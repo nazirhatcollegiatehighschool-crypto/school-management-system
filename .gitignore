@@ -1,0 +1,55 @@
+# ---- build / generated ----
+**/build/
+node_modules/
+.gradle/
+.idea/
+*.iml
+.dart_tool/
+.pub-cache/
+**/android/.gradle/
+dist/
+coverage/
+*.log
+
+# ---- SECRETS ----
+backend/_mig_config.txt
+backend/**/*_config*.txt
+backend/RUN_PG_MIGRATION*.py
+backend/RUN_MIGRATION_NOW.py
+backend/make_then_run_migration.py
+backend_PG_MIG_RUN_1.py
+backend/THEREAL_MIG.py
+backend/_pg_*.py
+backend/_RUN_PG*.py
+backend/_mig_*.py
+backend/RUN_MIGRATION*.py
+backend/run_pg*.py
+backend/_mig_config.txt
+backend/*.pem
+backend/*.key
+.env
+backend/.env
+apps/**/.env
+*.env.local
+
+# ---- scratch ----
+backend/make_migration*.py
+backend/rebuild_migration*.py
+backend/fix_migration*.py
+backend/FINAL_migration*.py
+backend/finalize_migration*.py
+backend/emit_final*.py
+backend/guard_all*.py
+backend/verify_*.py
+backend/tmp*.py
+backend/_tmp*.py
+
+# ---- OS ----
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# hardcoded-DB-credential-runner-গুলো (নিজস্ব-SUPABASE_DB_PASSWORD-env-ভেরিয়েবল-থাকায়-push-না)
+backend/RUN_MIGRATION_NOW.py
+backend/make_then_run_migration.py
+backend_PG_MIG_RUN_1.py

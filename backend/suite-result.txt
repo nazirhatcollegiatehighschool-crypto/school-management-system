@@ -1,0 +1,76 @@
+Invoke-RestMethod : {"error":"Too many login attempts. Try again in 15 minutes."}
+At C:\Users\WALTON\Desktop\school-system\backend\test-suite.ps1:34 char:8
++ $at = (Invoke-RestMethod "$base/auth/login" -Method Post -ContentType ...
++        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (System.Net.HttpWebRequest:HttpWebRequest) [Invoke-RestMethod], WebExc 
+   eption
+    + FullyQualifiedErrorId : WebCmdletWebResponseException,Microsoft.PowerShell.Commands.InvokeRestMethodCommand
+Invoke-RestMethod : {"error":"Too many login attempts. Try again in 15 minutes."}
+At C:\Users\WALTON\Desktop\school-system\backend\test-suite.ps1:36 char:8
++ $tt = (Invoke-RestMethod "$base/auth/login" -Method Post -ContentType ...
++        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (System.Net.HttpWebRequest:HttpWebRequest) [Invoke-RestMethod], WebExc 
+   eption
+    + FullyQualifiedErrorId : WebCmdletWebResponseException,Microsoft.PowerShell.Commands.InvokeRestMethodCommand
+Invoke-RestMethod : {"error":"Too many login attempts. Try again in 15 minutes."}
+At C:\Users\WALTON\Desktop\school-system\backend\test-suite.ps1:38 char:8
++ $gt = (Invoke-RestMethod "$base/auth/guardian-login" -Method Post -Co ...
++        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (System.Net.HttpWebRequest:HttpWebRequest) [Invoke-RestMethod], WebExc 
+   eption
+    + FullyQualifiedErrorId : WebCmdletWebResponseException,Microsoft.PowerShell.Commands.InvokeRestMethodCommand
+Invoke-WebRequest : {"error":"No token provided"}
+At C:\Users\WALTON\Desktop\school-system\backend\test-suite.ps1:44 char:14
++ ... examsRaw = (Invoke-WebRequest "$base/teacher/exams" -Headers $TH -Use ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (System.Net.HttpWebRequest:HttpWebRequest) [Invoke-WebRequest], WebExc 
+   eption
+    + FullyQualifiedErrorId : WebCmdletWebResponseException,Microsoft.PowerShell.Commands.InvokeWebRequestCommand
+ConvertFrom-Json : Cannot bind argument to parameter 'InputObject' because it is null.
+At C:\Users\WALTON\Desktop\school-system\backend\test-suite.ps1:45 char:40
++ $exams = ConvertFrom-Json -InputObject $examsRaw
++                                        ~~~~~~~~~
+    + CategoryInfo          : InvalidData: (:) [ConvertFrom-Json], ParameterBindingValidationException
+    + FullyQualifiedErrorId : ParameterArgumentValidationErrorNullNotAllowed,Microsoft.PowerShell.Commands.ConvertFrom 
+   JsonCommand
+ 
+T1 marks>total rejected                PASSED   {"error":"No token provided"}
+T2 negative marks rejected             PASSED   {"error":"No token provided"}
+T3 invalid exam id rejected            PASSED   {"error":"No token provided"}
+T3b student-not-in-class rejected      PASSED   {"error":"No token provided"}
+T4 teacher blocked from admin API      PASSED   {"error":"No token provided"}
+T5 guardian IDOR blocked               PASSED   {"error":"No token provided"}
+T5b guardian result-detail IDOR blocked PASSED   {"error":"No token provided"}
+T6 guardian own child OK               FAILED   {"error":"No token provided"}
+T6b teacher exam privacy (creator A not seen by B) FAILED   {"error":"No token provided"}
+T7 bad token rejected                  PASSED   {"error":"Invalid or expired session. Please login again."}
+T8 missing token rejected              PASSED   {"error":"No token provided"}
+T9 invalid roll rejected               PASSED   {"error":"No token provided"}
+T10 duplicate teacher username         PASSED   {"error":"No token provided"}
+T11 mark-all-read works                FAILED   {"error":"No token provided"}
+T12 published exam locked              PASSED   {"error":"No token provided"}
+T13 settings roundtrip                 FAILED   {"error":"No token provided"}
+T14 anonymous notice blocked           PASSED   {"error":"No token provided"}
+T15 teacher-created exam privacy across teachers FAILED   {"error":"Too many login attempts. Try again in 15 minutes."}
+T16 section-targeted notice            FAILED   {"error":"No token provided"}
+T17 guardian result detail (own child) PASSED   no published exam available
+
+T18 class-teacher-only attendance      PASSED   {"error":"Too many login attempts. Try again in 15 minutes."}
+T18b own-class attendance allowed      FAILED   {"error":"No token provided"}
+T19 fees endpoints removed (admin)     PASSED   {"error":"No token provided"}
+T19b fees stats field removed          FAILED   {"error":"No token provided"}
+T19c guardian fees endpoint removed    PASSED   {"error":"No token provided"}
+T20 homework create (own class)        FAILED   {"error":"No token provided"}
+T20b guardian sees only own child homework FAILED   {"error":"No token provided"}
+T20c cross-teacher homework blocked    PASSED   {"error":"Too many login attempts. Try again in 15 minutes."}
+T20d cross-guardian homework blocked   PASSED   {"error":"No token provided"}
+T21 complaint to guardian              FAILED   {"error":"Too many login attempts. Try again in 15 minutes."}
+T21b complaint appears in guardian notifications FAILED   {"error":"No token provided"}
+T21c complaint for unowned student blocked PASSED   {"error":"Too many login attempts. Try again in 15 minutes."}
+T22 sibling pending request created    FAILED   {"error":"No token provided"}
+T22b sibling data invisible until approved PASSED   {"error":"No token provided"}
+T22c admin sees pending sibling request FAILED   {"error":"No token provided"}
+T23 admin approves sibling link        FAILED   {"error":"No token provided"}
+T23b sibling now visible to guardian   FAILED   {"error":"No token provided"}
+T24 rejected sibling stays invisible   FAILED   {"error":"No token provided"}
+T24b rejected sibling still blocked    PASSED   {"error":"No token provided"}
