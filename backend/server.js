@@ -41,6 +41,17 @@ const loginLimiter = rateLimit({
 app.use('/api/auth/login', loginLimiter);
 app.use('/api/auth/guardian-login', loginLimiter);
 
+// Root route for Render health checks
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    message: 'School Management System API is running',
+    version: '1.0.0',
+    timestamp: new Date().toISOString(),
+    docs: 'https://school-management-system-5jqj.onrender.com/api/health'
+  });
+});
+
 app.get('/api/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
@@ -67,6 +78,40 @@ app.get('/api/cron/routine-alerts', async (req, res) => {
   } catch (e) {
     console.error('routine-alert cron error:', e.message);
     res.status(500).json({ error: 'alert check failed' });
+  }
+});
+
+// Supabase sync endpoints
+const SupabaseSync = require('./supabase_sync');
+const syncSystem = new SupabaseSync();
+
+// Admin-only sync endpoints
+app.get('/api/admin/sync/schema', async (req, res) => {
+  try {
+    await syncSystem.initialize();
+    await syncSystem.syncSchemas();
+    res.json({ status: 'ok', message: 'Schema sync completed' });
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: error.message });
+  }
+});
+
+app.get('/api/admin/sync/backup', async (req, res) => {
+  try {
+    await syncSystem.initialize();
+    const backupPath = await syncSystem.backupSupabaseData();
+    res.json({ status: 'ok', backupPath, message: 'Backup completed' });
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: error.message });
+  }
+});
+
+app.get('/api/admin/sync/full', async (req, res) => {
+  try {
+    const result = await syncSystem.runFullSync();
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: error.message });
   }
 });
 

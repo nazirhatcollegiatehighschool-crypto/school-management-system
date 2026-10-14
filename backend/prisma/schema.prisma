@@ -1,0 +1,570 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model users {
+  id            Int       @id @default(autoincrement())
+  role          String    @db.VarChar(20)
+  username      String    @unique @db.VarChar(50)
+  password_hash String    @db.VarChar(255)
+  name          String    @db.VarChar(100)
+  email         String?   @db.VarChar(100)
+  phone         String?   @db.VarChar(20)
+  active        Int       @default(1)
+  created_at    DateTime  @default(now()) @db.Timestamp()
+  is_class_teacher String? @db.Text
+  designation   String?   @db.Text
+  sort_order    Int       @default(99)
+  signature     String?   @db.VarChar(255)
+  signature_name String?  @db.VarChar(100)
+
+  @@unique([username])
+}
+
+model sessions {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique @db.VarChar(20)
+  is_active Int      @default(0)
+}
+
+model classes {
+  id         Int     @id @default(autoincrement())
+  name       String  @db.VarChar(50)
+  section    String  @db.VarChar(20)
+  group_name String? @db.VarChar(20)
+  session_id Int?
+  teacher_id Int?
+
+  @@unique([name, section])
+  @@index([session_id])
+  @@index([teacher_id])
+}
+
+model subjects {
+  id              Int       @id @default(autoincrement())
+  name            String    @db.VarChar(60)
+  class_id        Int
+  teacher_id      Int?
+  full_marks      Int       @default(100)
+  group_name      String    @default("Compulsory") @db.VarChar(20)
+  is_optional     Int       @default(0)
+  excluded_from_gpa Int     @default(0)
+  cq_full         Int?
+  mcq_full        Int?
+  practical_full  Int?
+  subject_code    Int?
+  is_fourth_subject Int     @default(0)
+  is_elective     Int       @default(0)
+  sort_order      Int?
+  pass_marks      Int?
+  ca_full         Int?
+  written_full    Int?
+
+  @@unique([name, class_id])
+  @@index([class_id])
+  @@index([teacher_id])
+}
+
+model students {
+  id             Int       @id @default(autoincrement())
+  student_code   String    @unique @db.VarChar(20)
+  name           String    @db.VarChar(100)
+  dob            DateTime? @db.Date
+  roll           Int
+  class_id       Int
+  guardian_id    Int?
+  guardian_name  String?   @db.VarChar(100)
+  guardian_phone String?   @db.VarChar(20)
+  guardian_email String?   @db.VarChar(100)
+  address        String?   @db.VarChar(255)
+  photo          String?   @db.VarChar(255)
+  father_name    String?   @db.VarChar(100)
+  mother_name    String?   @db.VarChar(100)
+  birth_cert_no  String?   @db.VarChar(50)
+  session_id     Int?
+  created_at     DateTime  @default(now()) @db.Timestamp()
+  religion       String?   @db.VarChar(30)
+  section        String?   @db.VarChar(20)
+  status         String?   @default("active") @db.VarChar(50)
+  gender         String?   @db.VarChar(10)
+  blood_group    String?   @db.VarChar(10)
+  optional_subject String? @db.VarChar(80)
+  phone          String?   @db.VarChar(20)
+  email          String?   @db.VarChar(100)
+
+  @@unique([class_id, roll])
+  @@unique([student_code])
+  @@index([guardian_id])
+}
+
+model student_subjects {
+  id            Int       @id @default(autoincrement())
+  student_id    Int
+  subject_id    Int
+  is_mandatory  Int       @default(1)
+  is_fourth_subject Int   @default(0)
+  is_elective   Int       @default(0)
+  assigned_by   Int?
+  created_at    DateTime  @default(now()) @db.Timestamp()
+
+  @@unique([subject_id, student_id])
+  @@index([student_id])
+}
+
+model exam_events {
+  id               Int        @id @default(autoincrement())
+  name             String     @db.VarChar(100)
+  session_id       Int?
+  start_date       DateTime?  @db.Date
+  created_by       Int?
+  created_at       DateTime   @default(now()) @db.Timestamp()
+  exam_kind        String?    @default("other") @db.Text
+  year             Int?
+  is_published     Int        @default(0)
+  published_at     DateTime?  @db.Timestamp()
+  promotion_linked Int        @default(0)
+  notify_guardians Int        @default(0)
+  notified_at      DateTime?  @db.Timestamp()
+  exam_date        DateTime?  @db.Date
+  result_date      DateTime?  @db.Date
+
+  @@index([session_id])
+}
+
+model exams {
+  id            Int        @id @default(autoincrement())
+  name          String     @db.VarChar(150)
+  exam_type     String     @default("class_test") @db.VarChar(20)
+  class_id      Int
+  subject_id    Int
+  event_id      Int?
+  source        String     @default("teacher") @db.VarChar(20)
+  status        String     @default("draft") @db.VarChar(20)
+  created_by    Int
+  exam_date     DateTime?  @db.Date
+  created_at    DateTime   @default(now()) @db.Timestamp()
+  entry_deadline DateTime?  @db.Timestamp()
+  entry_open    Int        @default(1)
+
+  @@index([class_id])
+  @@index([subject_id])
+  @@index([event_id])
+  @@index([created_by])
+}
+
+model exam_shares {
+  id          Int      @id @default(autoincrement())
+  exam_id     Int
+  teacher_id  Int
+  created_by  Int?
+  created_at  DateTime @default(now()) @db.Timestamp()
+
+  @@unique([exam_id, teacher_id])
+  @@index([teacher_id])
+}
+
+model marks {
+  id          Int       @id @default(autoincrement())
+  student_id  Int
+  exam_id     Int
+  marks       Decimal   @db.Decimal(5,2)
+  total       Decimal   @default(100) @db.Decimal(5,2)
+  comment     String?   @db.VarChar(255)
+  cq          Decimal?  @db.Decimal(5,2)
+  mcq         Decimal?  @db.Decimal(5,2)
+  practical   Decimal?  @db.Decimal(5,2)
+  written     Decimal?  @db.Decimal(5,2)
+  absent      Int       @default(0)
+  recorded_by Int?
+  recorded_at DateTime  @default(now()) @db.Timestamp()
+  edit_until  DateTime? @db.Timestamp()
+  ca          Decimal?  @db.Decimal(5,2)
+
+  @@unique([student_id, exam_id])
+  @@index([exam_id])
+  @@index([recorded_by])
+}
+
+model ct_marks {
+  id          Int       @id @default(autoincrement())
+  student_id  Int
+  subject_id  Int
+  ct_no       Int       @default(1)
+  marks       Decimal   @db.Decimal(5,2)
+  full_marks  Decimal   @default(25) @db.Decimal(5,2)
+  recorded_by Int?
+  recorded_at DateTime  @default(now()) @db.Timestamp()
+  edit_until  DateTime? @db.Timestamp()
+
+  @@unique([ct_no, student_id, subject_id])
+  @@index([student_id])
+  @@index([subject_id])
+}
+
+model attendance {
+  id                  Int        @id @default(autoincrement())
+  student_id          Int
+  date                DateTime   @db.Date
+  status              String     @default("present") @db.VarChar(10)
+  remark              String?    @db.VarChar(255)
+  recorded_by         Int?
+  created_at          DateTime   @default(now()) @db.Timestamp()
+  is_escape           Int        @default(0)
+  escape_detected_at  DateTime?  @db.Timestamp()
+  session             String     @default("morning") @db.VarChar(10)
+  final_state         String?    @db.VarChar(32)
+  leave_ticket_id     Int?
+  override_by         Int?
+  override_reason     String?    @db.VarChar(255)
+
+  @@unique([student_id, date, session])
+  @@index([final_state])
+  @@index([student_id, date])
+}
+
+model results {
+  id                   Int       @id @default(autoincrement())
+  student_id           Int
+  exam_id              Int
+  total_gpa_without_4th Decimal  @default(0) @db.Decimal(4,2)
+  gpa_4th_bonus        Decimal   @default(0) @db.Decimal(4,2)
+  final_gpa            Decimal   @default(0) @db.Decimal(4,2)
+  result_status        String    @default("ABSENT") @db.VarChar(10)
+  teacher_remarks      String?   @db.Text
+  computed_at          DateTime  @default(now()) @db.Timestamp()
+
+  @@unique([student_id, exam_id])
+  @@index([exam_id])
+}
+
+model notifications {
+  id          Int       @id @default(autoincrement())
+  student_id  Int?
+  class_id    Int?
+  title       String    @db.VarChar(150)
+  body        String    @db.Text
+  type        String    @default("general") @db.VarChar(20)
+  target_type String    @default("all") @db.VarChar(20)
+  related_id  Int?
+  is_read     Int       @default(0)
+  created_by  Int?
+  created_at  DateTime  @default(now()) @db.Timestamp()
+  dedup_key   String?   @db.VarChar(150)
+
+  @@index([student_id])
+  @@index([class_id])
+  @@index([dedup_key])
+}
+
+model homework {
+  id          Int       @id @default(autoincrement())
+  class_id    Int
+  subject_id  Int?
+  title       String    @db.VarChar(150)
+  description String?   @db.Text
+  due_date    DateTime? @db.Date
+  created_by  Int
+  created_at  DateTime  @default(now()) @db.Timestamp()
+
+  @@index([class_id])
+  @@index([subject_id])
+  @@index([created_by])
+}
+
+model homework_attachments {
+  id          Int       @id @default(autoincrement())
+  homework_id Int
+  file_name   String    @db.VarChar(255)
+  file_path   String    @db.VarChar(255)
+  mime_type   String?   @db.VarChar(100)
+  file_size   Int?
+  uploaded_by Int?
+  created_at  DateTime  @default(now()) @db.Timestamp()
+
+  @@index([homework_id])
+  @@index([uploaded_by])
+}
+
+model guardian_links {
+  id                  Int       @id @default(autoincrement())
+  guardian_id         Int
+  student_id          Int
+  role                String    @default("sibling") @db.VarChar(20)
+  status              String    @default("pending") @db.VarChar(20)
+  requester_student_id Int?
+  decided_by          Int?
+  remark              String?   @db.VarChar(255)
+  requested_at        DateTime  @default(now()) @db.Timestamp()
+  decided_at          DateTime? @db.Timestamp()
+
+  @@unique([student_id, guardian_id])
+  @@index([guardian_id])
+  @@index([requester_student_id])
+  @@index([decided_by])
+}
+
+model class_teacher_requests {
+  id          Int       @id @default(autoincrement())
+  class_id    Int
+  teacher_id  Int
+  status      String    @default("pending") @db.VarChar(20)
+  note        String?   @db.VarChar(255)
+  decided_by  Int?
+  created_at  DateTime  @default(now()) @db.Timestamp()
+  decided_at  DateTime? @db.Timestamp()
+
+  @@unique([teacher_id, class_id])
+  @@index([class_id])
+  @@index([decided_by])
+}
+
+model mark_edit_requests {
+  id          Int       @id @default(autoincrement())
+  mark_id     Int
+  student_id  Int
+  exam_id     Int
+  teacher_id  Int
+  reason      String?   @db.Text
+  status      String    @default("pending") @db.VarChar(20)
+  created_at  DateTime  @default(now()) @db.Timestamp()
+  decided_at  DateTime? @db.Timestamp()
+  decided_by  Int?
+
+  @@index([student_id])
+  @@index([exam_id])
+  @@index([teacher_id])
+  @@index([decided_by])
+  @@index([mark_id])
+}
+
+model mark_edit_endorsements {
+  id              Int       @id @default(autoincrement())
+  request_id      Int
+  class_teacher_id Int
+  created_at      DateTime  @default(now()) @db.Timestamp()
+
+  @@unique([request_id, class_teacher_id])
+}
+
+model promotions {
+  id                  Int       @id @default(autoincrement())
+  student_id          Int
+  event_id            Int
+  class_id            Int
+  group_name          String?   @db.VarChar(20)
+  from_class          String    @db.VarChar(50)
+  to_class            String    @db.VarChar(50)
+  promoted_roll       Int?
+  decision            String    @default("promoted") @db.VarChar(20)
+  final_gpa           Decimal   @default(0) @db.Decimal(4,2)
+  recorded_by         Int?
+  created_at          DateTime  @default(now()) @db.Timestamp()
+  passing_year        Int?
+  destination_session_id Int?
+
+  @@unique([event_id, student_id])
+  @@index([student_id])
+  @@index([recorded_by])
+}
+
+model promotion_history {
+  id            Int       @id @default(autoincrement())
+  student_id    Int
+  from_class_id Int
+  to_class_id   Int?
+  final_gpa     Decimal   @default(0) @db.Decimal(4,2)
+  decision      String?   @default("promoted") @db.VarChar(20)
+  created_at    DateTime  @default(now()) @db.Timestamp()
+  admin_note    String?   @db.VarChar(255)
+
+  @@index([student_id])
+}
+
+model promotion_grace {
+  id            Int       @id @default(autoincrement())
+  class_id      Int
+  exam_type     String    @default("test") @db.VarChar(20)
+  grace_failed  Int       @default(0)
+  notes         String?   @db.VarChar(255)
+  updated_at    DateTime  @default(now()) @db.Timestamp()
+
+  @@unique([exam_type, class_id])
+  @@index([class_id])
+}
+
+model time_slots {
+  id          Int       @id @default(autoincrement())
+  slot_order  Int       @unique
+  label       String    @db.VarChar(50)
+  start_time  DateTime? @db.Time
+  end_time    DateTime? @db.Time
+  is_break    Int       @default(0)
+}
+
+model routines {
+  id          Int       @id @default(autoincrement())
+  teacher_id  Int
+  subject_id  Int
+  day         Int
+  time_slot_id Int
+  notes       String?   @db.Text
+  created_at  DateTime  @default(now()) @db.Timestamp()
+  room        String?   @db.VarChar(30)
+
+  @@unique([day, time_slot_id, teacher_id])
+  @@index([teacher_id])
+  @@index([subject_id])
+  @@index([time_slot_id])
+}
+
+model routine_entries {
+  id          Int       @id @default(autoincrement())
+  class_id    Int
+  day         Int
+  period      Int
+  subject_id  Int?
+  teacher_id  Int?
+
+  @@unique([class_id, day, period])
+}
+
+model routine_groups {
+  routine_id  Int
+  class_id    Int
+  group_name  String    @db.VarChar(20)
+
+  @@id([routine_id, class_id, group_name])
+  @@index([class_id])
+}
+
+model routine_sections {
+  routine_id  Int
+  class_id    Int
+  section     String    @db.VarChar(20)
+
+  @@id([routine_id, class_id, section])
+  @@index([class_id])
+}
+
+model routine_delete_requests {
+  id            Int       @id @default(autoincrement())
+  routine_id    Int
+  teacher_id    Int
+  subject_name  String?   @db.VarChar(150)
+  class_details String?   @db.Text
+  day           Int?
+  time_slot_id  Int?
+  reason        String?   @db.Text
+  status        String    @default("pending") @db.VarChar(20)
+  created_at    DateTime  @default(now()) @db.Timestamp()
+  decided_at    DateTime? @db.Timestamp()
+}
+
+model routine_notification_log {
+  id          BigInt    @id @default(autoincrement())
+  routine_id  Int
+  event_date  DateTime  @db.Date
+  event       String    @db.VarChar(20)
+  sent_at     DateTime  @default(now()) @db.Timestamp()
+
+  @@unique([event_date, event, routine_id])
+  @@index([routine_id])
+}
+
+model holidays {
+  date  DateTime @id @db.Date
+  title String   @db.VarChar(150)
+}
+
+model app_settings {
+  setting_key   String  @id @db.VarChar(60)
+  setting_value String? @db.Text
+}
+
+model activity_log {
+  id         Int       @id @default(autoincrement())
+  user_id    Int?
+  action     String    @db.VarChar(100)
+  detail     String?   @db.Text
+  created_at DateTime  @default(now()) @db.Timestamp()
+
+  @@index([user_id])
+  @@index([action])
+}
+
+model device_tokens {
+  id          Int       @id @default(autoincrement())
+  user_id     Int
+  role        String    @db.VarChar(20)
+  fcm_token   String    @unique @db.Text
+  platform    String    @default("android") @db.VarChar(20)
+  active      Int       @default(1)
+  last_seen   DateTime  @default(now()) @db.Timestamp()
+
+  @@index([user_id])
+  @@index([role, active])
+}
+
+model subject_aliases {
+  id            Int       @id @default(autoincrement())
+  subject_id    Int
+  alias_name    String    @db.VarChar(120)
+  student_field String    @default("religion") @db.VarChar(50)
+  field_value   String    @db.VarChar(50)
+  class_id      Int?
+
+  @@unique([student_field, subject_id, field_value, class_id])
+  @@index([subject_id])
+  @@index([class_id])
+}
+
+model leave_tickets {
+  id          Int        @id @default(autoincrement())
+  student_id  Int
+  guardian_id Int?
+  leave_date  DateTime   @db.Date
+  kind        String     @default("full_day") @db.VarChar(20)
+  reason      String?    @db.VarChar(500)
+  status      String     @default("pending") @db.VarChar(20)
+  decided_by  Int?
+  decided_at  DateTime?  @db.Timestamp()
+  created_at  DateTime   @default(now()) @db.Timestamp()
+
+  @@index([student_id, leave_date])
+  @@index([status])
+}
+
+model reexam_requests {
+  id           Int        @id @default(autoincrement())
+  guardian_id  Int?
+  student_id   Int
+  event_id     Int
+  class_id     Int?
+  reason       String?    @db.VarChar(1000)
+  status       String     @default("pending") @db.VarChar(20)
+  decided_by   Int?
+  decided_at   DateTime?  @db.Timestamp()
+  admin_note   String?    @db.VarChar(500)
+  created_at   DateTime   @default(now()) @db.Timestamp()
+
+  @@index([status])
+  @@index([student_id])
+  @@index([event_id])
+}
+
+model designation_slots {
+  id              Int       @id @default(autoincrement())
+  designation     String    @db.VarChar(100)
+  scope           String    @default("global") @db.VarChar(20)
+  class_id        Int?
+  holder_user_id  Int?
+  locked          Int       @default(1)
+  created_at      DateTime  @default(now()) @db.Timestamp()
+
+  @@unique([designation, scope, class_id])
+}
