@@ -39,6 +39,22 @@ export default function SeatPlan() {
   };
 
   const ev = events.find(e => e.id === Number(eventId));
+  const cls = classes.find(c => c.id === Number(classId));
+  const school = 'Nazirhat Collegiate High School';
+  const year = ev && ev.year ? ev.year : (ev ? (ev.session_name || '') : '');
+  const secLabel = cls ? (cls.group_name ? `${cls.group_name} Group` : `Section ${cls.section}`) : '';
+  // Flatten rooms into bench stickers with running bench numbers.
+  const stickers = [];
+  (plan || []).forEach(r => {
+    let bench = 0;
+    r.seats.forEach(row => {
+      [row[0], row[1]].forEach(stu => {
+        if (!stu) return;
+        bench += 1;
+        stickers.push({ ...stu, room: r.room, bench });
+      });
+    });
+  });
 
   return (
     <div>
@@ -67,28 +83,26 @@ export default function SeatPlan() {
 
       {plan && (
         <div className="print-sheet">
-          <div className="doc-header">
-            <h1>Seat Plan</h1>
-            <div className="addr">{eventName}{classId ? ` — ${((classes.find(c => c.id === Number(classId)) || {}).name || '')}` : ''}</div>
+          <div className="doc-header no-print" style={{ border: 'none' }}>
+            <h2 style={{ fontSize: 18 }}>Preview — {stickers.length} bench stickers</h2>
           </div>
-          {plan.map(r => (
-            <div key={r.room} style={{ marginBottom: 20 }}>
-              <h3 style={{ marginBottom: 8 }}>{r.room} ({r.seats.length * 2 - r.seats.filter(row => !row[1]).length} students)</h3>
-              <table className="seat-table" style={{ width: '100%' }}>
-                <thead><tr><th>Desk</th><th>Left Seat</th><th>Right Seat</th></tr></thead>
-                <tbody>
-                  {r.seats.map((row, i) => (
-                    <tr key={i}>
-                      <td>{i + 1}</td>
-                      <td>{row[0] ? `${row[0].roll}. ${row[0].name}` : ''}</td>
-                      <td>{row[1] ? `${row[1].roll}. ${row[1].name}` : '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ))}
-          <div className="no-print">
+          <div className="sp-sheet">
+            <div className="sp-header">{eventName}{year ? ` ${year}` : ''} — {cls ? `${cls.name} (${secLabel})` : ''}</div>
+            {stickers.map(s => (
+              <div className="sp-sticker" key={`${s.room}-${s.bench}`}>
+                <div className="sp-head">
+                  <span className="sp-emblem">N</span>
+                  <div className="sp-school">{school}<small>{eventName} {year}</small></div>
+                </div>
+                <div className="sp-roll">Roll {s.roll}</div>
+                <div className="sp-name">{s.name}</div>
+                <div className="sp-id">ID: {s.student_code}</div>
+                <div className="sp-meta">{cls ? cls.name : ''} · {secLabel} · Session {year}</div>
+                <div className="sp-foot"><span className="sp-room-label">Room No: {String(s.room).replace(/\D/g, '') || s.room}</span><span className="sp-room-label">Bench No: {s.bench}</span></div>
+              </div>
+            ))}
+          </div>
+          <div className="no-print" style={{ marginTop: 16 }}>
             <button className="btn" onClick={() => window.print()}>🖨️ Print Seat Plan</button>
           </div>
         </div>

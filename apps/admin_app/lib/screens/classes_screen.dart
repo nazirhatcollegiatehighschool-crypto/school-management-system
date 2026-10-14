@@ -44,7 +44,7 @@ class _ClassesScreenState extends State<ClassesScreen> {
             builder: (_, snap) {
               if (!snap.hasData) return const SizedBox();
               return DropdownButtonFormField<int>(
-                value: teacherId,
+                initialValue: teacherId,
                 decoration: const InputDecoration(labelText: 'Class Teacher (attendance + marksheet)', border: OutlineInputBorder()),
                 items: [const DropdownMenuItem(value: null, child: Text('— None —')),
                   ...snap.data!.map<DropdownMenuItem<int>>((t) =>

@@ -73,10 +73,11 @@ class _RoutinesScreenState extends State<RoutinesScreen> {
     int? slotId;
     int? subjectId;
 
+    final sheetCtx = context;
     await showModalBottomSheet(
-      context: context, isScrollControlled: true, isDismissible: false,
+      context: sheetCtx, isScrollControlled: true, isDismissible: false,
       builder: (_) => Padding(
-        padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+        padding: EdgeInsets.only(bottom: MediaQuery.of(sheetCtx).viewInsets.bottom),
         child: Padding(padding: const EdgeInsets.all(20), child: StatefulBuilder(builder: (context, setSheet) {
           final classNames = _classes.map((c) => '${c['name']}').toSet().toList();
           final rows = _classes.where((c) => c['name'] == clsName).toList();
@@ -95,42 +96,42 @@ class _RoutinesScreenState extends State<RoutinesScreen> {
             const Text('Add Routine Period — Step by Step', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 14),
             DropdownButtonFormField<int?>(
-              value: teacherId,
+              initialValue: teacherId,
               decoration: const InputDecoration(labelText: 'Step 1 — Teacher', border: OutlineInputBorder()),
               items: [for (final t in _teachers) DropdownMenuItem(value: t['id'] as int, child: Text('${t['name']}'))],
               onChanged: (v) => setSheet(() { teacherId = v; subjectId = null; }),
             ),
             const SizedBox(height: 10),
             DropdownButtonFormField<String?>(
-              value: clsName,
+              initialValue: clsName,
               decoration: const InputDecoration(labelText: 'Step 2 — Class', border: OutlineInputBorder()),
               items: [for (final n in classNames) DropdownMenuItem(value: n, child: Text(n))],
               onChanged: (v) => setSheet(() { clsName = v; sec = null; subjectId = null; }),
             ),
             const SizedBox(height: 10),
             DropdownButtonFormField<String?>(
-              value: sec,
+              initialValue: sec,
               decoration: InputDecoration(labelText: isGroup ? 'Step 3 — Group' : 'Step 3 — Section', border: const OutlineInputBorder()),
               items: [for (final s in secOpts) DropdownMenuItem(value: s, child: Text(s))],
               onChanged: (v) => setSheet(() { sec = v; subjectId = null; }),
             ),
             const SizedBox(height: 10),
             DropdownButtonFormField<int?>(
-              value: day,
+              initialValue: day,
               decoration: const InputDecoration(labelText: 'Step 4 — Day', border: OutlineInputBorder()),
               items: [for (var i = 0; i < _days.length; i++) DropdownMenuItem(value: i, child: Text(_days[i]))],
               onChanged: (v) => setSheet(() => day = v),
             ),
             const SizedBox(height: 10),
             DropdownButtonFormField<int?>(
-              value: slotId,
+              initialValue: slotId,
               decoration: const InputDecoration(labelText: 'Step 5 — Period', border: OutlineInputBorder()),
               items: [for (final s in _slots) DropdownMenuItem(value: s['id'] as int, child: Text(_slotDisplayName(s['label']?.toString())))],
               onChanged: (v) => setSheet(() => slotId = v),
             ),
             const SizedBox(height: 10),
             DropdownButtonFormField<int?>(
-              value: subjectId,
+              initialValue: subjectId,
               decoration: const InputDecoration(labelText: 'Step 6 — Subject', border: OutlineInputBorder()),
               items: [for (final s in classSubjects) DropdownMenuItem(value: s['id'] as int, child: Text(s['name']?.toString() ?? ''))],
               onChanged: (v) => setSheet(() => subjectId = v),
@@ -143,6 +144,7 @@ class _RoutinesScreenState extends State<RoutinesScreen> {
               ),
             const SizedBox(height: 16),
             FilledButton(onPressed: teacherId == null || clsName == null || sec == null || day == null || slotId == null || subjectId == null ? null : () async {
+              final navCtx = sheetCtx;
               try {
                 final sections = <Map<String, dynamic>>[];
                 final groups = <Map<String, dynamic>>[];
@@ -155,13 +157,13 @@ class _RoutinesScreenState extends State<RoutinesScreen> {
                   'teacher_id': teacherId, 'day': day, 'time_slot_id': slotId, 'subject_id': subjectId,
                   'sections': sections, 'groups': groups,
                 });
-                if (!mounted) return;
-                Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Period added'), backgroundColor: Colors.green));
+                if (!navCtx.mounted) return;
+                Navigator.pop(navCtx);
+                ScaffoldMessenger.of(navCtx).showSnackBar(const SnackBar(content: Text('Period added'), backgroundColor: Colors.green));
                 _load();
               } catch (e) {
-                if (!mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                if (!navCtx.mounted) return;
+                ScaffoldMessenger.of(navCtx).showSnackBar(SnackBar(
                     backgroundColor: Colors.red,
                     content: Text(e.toString().replaceFirst('Exception: ', ''))));
               }
@@ -286,7 +288,7 @@ class _RoutinesScreenState extends State<RoutinesScreen> {
                 items: [null, ..._teachers.map((t) => '${t['id']}')]
                     .map((id) => DropdownMenuItem(
                           value: id,
-                          child: Text(id == null ? 'All Teachers' : (_teachers.firstWhere((t) => '${t['id']}' == id)['name'] ?? '$id')),
+                          child: Text(id == null ? 'All Teachers' : (_teachers.firstWhere((t) => '${t['id']}' == id)['name'] ?? id)),
                         ))
                     .toList(),
                 onChanged: (v) => setState(() => _filterTeacher = v),

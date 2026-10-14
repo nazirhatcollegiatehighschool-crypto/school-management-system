@@ -4,9 +4,11 @@
   "description": "School management system REST API",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "lint": "node lint.js"
   },
   "dependencies": {
+    "bcrypt": "^6.0.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^17.4.2",
@@ -18,6 +20,7 @@
     "multer": "^2.2.0",
     "mysql2": "^3.11.0",
     "pdfkit": "^0.15.2",
-    "pg": "^8.23.0"
+    "pg": "^8.23.0",
+    "sharp": "^0.35.5"
   }
 }

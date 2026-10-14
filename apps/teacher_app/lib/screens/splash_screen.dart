@@ -27,6 +27,14 @@ class _SplashScreenState extends State<SplashScreen> {
       Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const LoginScreen()));
       return;
     }
+    Api.kickstartPreload(); // refresh stored essential data in the background
+    // Instant start: use the on-device profile if present, verify in background.
+    final cached = Api.peekCache('/teacher/profile');
+    if (cached is Map && cached['teacher'] != null) {
+      if (!mounted) return;
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => HomeScreen(teacher: cached['teacher'])));
+      return;
+    }
     try {
       final r = await Api.get('/teacher/profile');
       if (!mounted) return;

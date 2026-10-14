@@ -96,7 +96,11 @@ export default function Marksheet() {
             <div className="addr">{sheet.settings.school_address}</div>
             {sheet.settings.school_eiin && <div className="eiin">EIIN: {sheet.settings.school_eiin}</div>}
           </div>
-          <div className="doc-title">{sheet.event ? sheet.event.name : ''} — Marksheet</div>
+          <div className="doc-title">{sheet.event ? sheet.event.name : ''}{sheet.event && sheet.event.year ? ` ${sheet.event.year}` : ''} — ACADEMIC MARKSHEET</div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#475569', marginBottom: 8 }}>
+            <span><b>Serial No:</b> {sheet.serial_no || '—'}</span>
+            <span><b>Record No:</b> {sheet.student.birth_cert_no || sheet.student.student_code}</span>
+          </div>
 
           <table style={{ width: '100%', border: 'none', marginBottom: 8 }}>
             <tbody>
@@ -119,14 +123,31 @@ export default function Marksheet() {
             </tbody>
           </table>
 
+          <div style={{ display: 'flex', gap: 16, marginBottom: 10, flexWrap: 'wrap' }}>
+            <table className="mark-table" style={{ width: 'auto', fontSize: 12 }}>
+              <caption style={{ textAlign: 'left', fontWeight: 700, padding: '4px 0' }}>Grading Scale</caption>
+              <thead><tr><th>Letter</th><th>Interval</th><th>GP</th></tr></thead>
+              <tbody>
+                {[['A+', '80–100', '5.0'], ['A', '70–79', '4.0'], ['A-', '60–69', '3.5'], ['B', '50–59', '3.0'], ['C', '40–49', '2.0'], ['D', '33–39', '1.0'], ['F', '0–32', '0.0']].map(r => (
+                  <tr key={r[0]}><td><b>{r[0]}</b></td><td>{r[1]}</td><td>{r[2]}</td></tr>
+                ))}
+              </tbody>
+            </table>
+            <div style={{ fontSize: 13, lineHeight: 2 }}>
+              <div><b>Class Highest GPA:</b> {sheet.class_highest_gpa != null ? Number(sheet.class_highest_gpa).toFixed(2) : '—'}</div>
+              <div><b>Attendance:</b> {(sheet.attendance || []).map(a => `${a.status}: ${a.c}`).join(' • ') || '—'}</div>
+            </div>
+          </div>
+
           <table className="mark-table" style={{ width: '100%' }}>
             <thead>
-              <tr><th>Subject</th><th>Papers</th><th>Marks</th><th>Full</th><th>%</th><th>Letter</th><th>GP</th></tr>
+              <tr><th>Sl.</th><th>Subject</th><th>Papers</th><th>Marks</th><th>Full</th><th>%</th><th>Letter</th><th>GP</th></tr>
             </thead>
             <tbody>
-              {sheet.result.families.map(f => (
+              {sheet.result.families.filter(f => !f.is_optional).map((f, i) => (
                 <tr key={f.subject}>
-                  <td className="subj"><b>{f.subject}</b>{f.is_optional ? ' (4th)' : ''}</td>
+                  <td>{i + 1}</td>
+                  <td className="subj"><b>{f.subject}</b></td>
                   <td>{f.papers.join(', ')}</td>
                   <td>{f.absent ? '—' : f.total}</td>
                   <td>{f.full}</td>
@@ -137,6 +158,25 @@ export default function Marksheet() {
               ))}
             </tbody>
           </table>
+
+          {sheet.result.families.some(f => f.is_optional) && (
+            <table className="mark-table" style={{ width: '100%', marginTop: 10 }}>
+              <thead>
+                <tr><th>Sl.</th><th>Fourth Subject (Optional)</th><th>Marks</th><th>Letter</th><th>GP</th></tr>
+              </thead>
+              <tbody>
+                {sheet.result.families.filter(f => f.is_optional).map((f, i) => (
+                  <tr key={f.subject}>
+                    <td>{i + 1}</td>
+                    <td className="subj"><b>{f.subject}</b></td>
+                    <td>{f.absent ? '—' : f.total}</td>
+                    <td>{f.letter_grade}</td>
+                    <td>{f.grade_point.toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
 
           <div className="result-box">
             <span>GPA: {sheet.result.final_gpa.toFixed(2)}</span>
@@ -150,8 +190,11 @@ export default function Marksheet() {
 
           <div className="sign-row">
             <span>Class Teacher</span>
-            <span>Guardian</span>
+            <span>Controller of Examinations</span>
             <span>{sheet.settings.headmaster || 'Headmaster'}</span>
+          </div>
+          <div style={{ marginTop: 10, fontSize: 12, color: '#475569' }}>
+            Date of Publication of Result: {sheet.event && sheet.event.published_at ? String(sheet.event.published_at).slice(0, 10) : '—'}
           </div>
 
           <div style={{ marginTop: 16 }} className="no-print">

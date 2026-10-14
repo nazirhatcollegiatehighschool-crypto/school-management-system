@@ -102,6 +102,7 @@ export default function Classes() {
         full_marks: s.full_marks, pass_marks: s.pass_marks || null, group_name: s.group_name || 'Compulsory',
         is_optional: !!s.is_optional, excluded_from_gpa: !!s.excluded_from_gpa,
         cq_full: s.cq_full || null, mcq_full: s.mcq_full || null, practical_full: s.practical_full || null,
+        written_full: s.written_full || null, ca_full: s.ca_full || null,
         subject_code: s.subject_code || null, is_fourth_subject: !!s.is_fourth_subject,
         is_elective: !!s.is_elective, sort_order: s.sort_order,
       };
@@ -120,6 +121,7 @@ export default function Classes() {
       excluded_from_gpa: !!s.excluded_from_gpa,
       cq_full: s.cq_full != null ? s.cq_full : '', mcq_full: s.mcq_full != null ? s.mcq_full : '',
       practical_full: s.practical_full != null ? s.practical_full : '',
+      written_full: s.written_full != null ? s.written_full : '', ca_full: s.ca_full != null ? s.ca_full : '',
       subject_code: s.subject_code != null ? s.subject_code : '',
       is_fourth_subject: !!s.is_fourth_subject, is_elective: !!s.is_elective,
       sort_order: s.sort_order != null ? s.sort_order : '',
@@ -139,7 +141,9 @@ export default function Classes() {
         is_optional: !!subForm.is_optional, excluded_from_gpa: !!subForm.excluded_from_gpa,
         cq_full: currentTier === 'ssc' ? (subForm.cq_full === '' ? null : num(subForm.cq_full, null)) : (subForm.cq_full === '' ? null : num(subForm.cq_full, null)),
         mcq_full: currentTier === 'ssc' ? (subForm.mcq_full === '' ? null : num(subForm.mcq_full, null)) : null,
-        practical_full: currentTier === 'ssc' ? (subForm.practical_full === '' ? null : num(subForm.practical_full, null)) : null,
+        practical_full: currentTier === 'ssc' ? (subForm.practical_full === '' ? null : num(subForm.practical_full, null)) : (subForm.practical_full === '' ? null : num(subForm.practical_full, null)),
+        written_full: subForm.written_full === '' || subForm.written_full === undefined ? null : num(subForm.written_full, null),
+        ca_full: subForm.ca_full === '' || subForm.ca_full === undefined ? null : num(subForm.ca_full, null),
         subject_code: subForm.subject_code === '' ? null : num(subForm.subject_code, null),
         is_fourth_subject: !!subForm.is_fourth_subject, is_elective: !!subForm.is_elective,
         sort_order: subForm.sort_order === '' ? null : num(subForm.sort_order, null),
@@ -153,7 +157,7 @@ export default function Classes() {
 
   const marksCell = s => {
     const tier = tierOf(s.class_name);
-    const parts = [s.cq_full, s.mcq_full, s.practical_full].filter(x => x !== null && x !== undefined);
+    const parts = [s.cq_full, s.mcq_full, s.practical_full, s.written_full, s.ca_full].filter(x => x !== null && x !== undefined);
     if (tier === 'ssc') return parts.length ? parts.join(' / ') : <span className="muted">—</span>;
     return [`${s.full_marks || 100}${s.pass_marks != null ? ' (pass ' + s.pass_marks + ')' : ''}`];
   };
@@ -293,12 +297,19 @@ export default function Classes() {
                 <>
                   <div className="form-row">
                     <div><label>Full Marks</label><input type="number" value={subForm.full_marks} onChange={e => setSubForm({ ...subForm, full_marks: e.target.value })} /></div>
-                    <div><label>CQ (Creative)</label><input type="number" value={subForm.cq_full} onChange={e => setSubForm({ ...subForm, cq_full: e.target.value })} placeholder="e.g. 50" /></div>
-                    <div><label>MCQ</label><input type="number" value={subForm.mcq_full} onChange={e => setSubForm({ ...subForm, mcq_full: e.target.value })} placeholder="e.g. 25" /></div>
-                    <div><label>Practical</label><input type="number" value={subForm.practical_full} onChange={e => setSubForm({ ...subForm, practical_full: e.target.value })} placeholder="e.g. 25" /></div>
+                    <div><label>CQ (Creative / সৃজনশীল)</label><input type="number" value={subForm.cq_full} onChange={e => setSubForm({ ...subForm, cq_full: e.target.value })} placeholder="e.g. 70" /></div>
+                    <div><label>MCQ (বহুনির্বাচনী)</label><input type="number" value={subForm.mcq_full} onChange={e => setSubForm({ ...subForm, mcq_full: e.target.value })} placeholder="e.g. 30" /></div>
+                  </div>
+                  <div className="form-row">
+                    <div><label>Practical (ব্যবহারিক)</label><input type="number" value={subForm.practical_full} onChange={e => setSubForm({ ...subForm, practical_full: e.target.value })} placeholder="e.g. 25" /></div>
+                    <div><label>Written (লিখিত)</label><input type="number" value={subForm.written_full} onChange={e => setSubForm({ ...subForm, written_full: e.target.value })} placeholder="optional" /></div>
+                    <div><label>CA (ধারাবাহিক মূল্যায়ন)</label><input type="number" value={subForm.ca_full} onChange={e => setSubForm({ ...subForm, ca_full: e.target.value })} placeholder="optional" /></div>
                   </div>
                   <div className="form-row">
                     <div><label>Pass Marks (optional)</label><input type="number" value={subForm.pass_marks} onChange={e => setSubForm({ ...subForm, pass_marks: e.target.value })} placeholder="33" /></div>
+                  </div>
+                  <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                    টিপস: CQ + MCQ + Practical + Written + CA-র যোগফল Full Marks-এর সাথে মিলিয়ে দিন — teacher-রা component-wise নম্বর দিলে system নিজে total হিসাব করবে।
                   </div>
                 </>
               )}

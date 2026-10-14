@@ -110,7 +110,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   Card(child: ListTile(
                     leading: const Icon(Icons.system_update_alt, color: Colors.blue),
                     title: const Text('অ্যাপ আপডেট'),
-                    subtitle: Text('বর্তমান version: v$appVersion — নতুন update চেক করুন'),
+                    subtitle: FutureBuilder(
+                      future: Future.wait([installedVersion(), installedBuild()]),
+                      builder: (_, s) {
+                        final v = s.data is List ? (s.data as List)[0].toString() : '…';
+                        final b = s.data is List ? (s.data as List)[1].toString() : '…';
+                        return Text('ফোনে: v$v • build $b — tap করে সার্ভারের সাথে মিলান');
+                      },
+                    ),
                     trailing: const Icon(Icons.chevron_right),
                     onTap: () => checkForUpdate(context, 'admin', manual: true),
                   )),

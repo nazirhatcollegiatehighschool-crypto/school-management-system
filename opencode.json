@@ -1,0 +1,42 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": ["ARCHITECTURE.md"],
+  "permission": {
+    "edit": {
+      "**": "allow",
+      "**/.env": "deny",
+      "**/.env.*": "deny",
+      "**/*_config.txt": "deny",
+      "**/firebase-service-account.json": "deny",
+      "**/*.pem": "deny",
+      "**/RUN_*MIGRATION*.py": "deny",
+      "**/RUN_PG_MIGRATION*.py": "deny"
+    },
+    "bash": {
+      "*": "ask",
+      "git status *": "allow",
+      "git diff *": "allow",
+      "git log *": "allow",
+      "git branch *": "allow",
+      "npm run lint": "allow",
+      "npm run build": "allow",
+      "npx oxlint *": "allow",
+      "node --check *": "allow",
+      "flutter analyze *": "allow"
+    }
+  },
+  "mcp": {
+    "context7": {
+      "type": "remote",
+      "url": "https://mcp.context7.com/mcp"
+    },
+    "composio": {
+      "type": "local",
+      "command": ["npx", "-y", "@composio/mcp"],
+      "enabled": true
+    }
+  },
+  "plugin": [
+    "oh-my-opencode"
+  ]
+}

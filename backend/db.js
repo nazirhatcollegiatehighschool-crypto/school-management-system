@@ -1,4 +1,122 @@
 require('dotenv').config();
+
+// ------------------------------------------------------------------
+// Dual-driver DB layer: PostgreSQL (Supabase/prod) or local MySQL/MariaDB.
+// Set DATABASE_URL=mysql://user:pass@host:port/dbname for local mode.
+// Route code stays in mysql2 style (`?` placeholders, [rows] destructure,
+// insertId/affectedRows) in BOTH modes.
+//  - pg mode: existing MySQL->PG translation (unchanged).
+//  - mysql mode: direct mysql2 pool + PG-ism normalization (ILIKE->LIKE,
+//    ON CONFLICT->ON DUPLICATE KEY, IS [NOT] DISTINCT FROM<=>>, $n->?).
+// ------------------------------------------------------------------
+
+const isMysql = /^mysql:\/\//i.test(process.env.DATABASE_URL || '');
+
+function pgToMysql(sql) {
+  // $n placeholders (routine_alerts) -> ? in numeric order
+  sql = sql.replace(/\$(\d+)/g, '?');
+  // ILIKE -> LIKE (utf8mb4_unicode_ci comparisons are case-insensitive)
+  sql = sql.replace(/\bILIKE\b/gi, 'LIKE');
+  // IS [NOT] DISTINCT FROM -> <=> / NOT <=>
+  sql = sql.replace(/(\S+)\s+IS\s+NOT\s+DISTINCT\s+FROM\s+(\S+)/gi, '$1 <=> $2');
+  sql = sql.replace(/(\S+)\s+IS\s+DISTINCT\s+FROM\s+(\S+)/gi, 'NOT ($1 <=> $2)');
+  // ON CONFLICT (..) DO NOTHING -> INSERT IGNORE
+  if (/\bDO\s+NOTHING\b/i.test(sql)) {
+    sql = sql.replace(/^\s*insert\s+into/i, 'INSERT IGNORE INTO');
+    sql = sql.replace(/\s*ON\s+CONFLICT\b.*?DO\s+NOTHING/i, '');
+  }
+  // ON CONFLICT (..) DO UPDATE SET a=EXCLUDED.a -> ON DUPLICATE KEY UPDATE a=VALUES(a)
+  sql = sql.replace(/\bON\s+CONFLICT\s*\([^)]*\)\s*DO\s+UPDATE\s+SET\b/gi, 'ON DUPLICATE KEY UPDATE');
+  sql = sql.replace(/(\w+)\s*=\s*EXCLUDED\.(\w+)/g, '$1=VALUES($2)');
+  return sql;
+}
+
+let pool;
+if (isMysql) {
+  const mysql = require('mysql2/promise');
+  const u = new URL(process.env.DATABASE_URL);
+  const myPool = mysql.createPool({
+    host: u.hostname,
+    port: Number(u.port) || 3306,
+    user: decodeURIComponent(u.username),
+    password: decodeURIComponent(u.password || ''),
+    database: decodeURIComponent(u.pathname || '').replace(/^\//, '') || undefined,
+    waitForConnections: true,
+    connectionLimit: (process.env.DB_POOL_MAX && parseInt(process.env.DB_POOL_MAX)) || 10,
+    charset: 'utf8mb4',
+    timezone: 'Z',
+    dateStrings: false,
+  });
+  // mysql2 returns BIGINT/DECIMAL as string; normalize plain integer strings
+  // to numbers for the shapes apps expect (matches pg int8 parser).
+  // Leading-zero strings (phones, codes) are NEVER converted.
+  const normRows = (rows) => {
+    if (Array.isArray(rows)) {
+      for (const r of rows) {
+        for (const k of Object.keys(r)) {
+          const v = r[k];
+          if (typeof v === 'string' && /^-?(0|[1-9]\d{0,14})$/.test(v) && !/^0\d/.test(v)) r[k] = parseInt(v, 10);
+        }
+      }
+    }
+    return rows;
+  };
+  pool = {
+    async query(sql, params) {
+      let rows, fields;
+      try {
+        [rows, fields] = await myPool.query(pgToMysql(sql), params || []);
+      } catch (e) { throw asPgError(e); }
+      if (/^\s*insert\s+/i.test(sql)) {
+        return [{ fieldCount: 0, affectedRows: rows.affectedRows || 0, insertId: rows.insertId || 0, info: '' }, null];
+      }
+      if (/^\s*(update|delete)\b/i.test(sql)) {
+        return [{ affectedRows: rows.affectedRows || 0, changedRows: rows.changedRows || 0, fieldCount: 0, info: '' }, null];
+      }
+      return [normRows(rows), fields || null];
+    },
+    async getConnection() {
+      const conn = await myPool.getConnection();
+      const run = async (sql, params) => {
+        let rows, fields;
+        try {
+          [rows, fields] = await conn.query(pgToMysql(sql), params || []);
+        } catch (e) { throw asPgError(e); }
+        if (/^\s*insert\s+/i.test(sql)) {
+          return [{ fieldCount: 0, affectedRows: rows.affectedRows || 0, insertId: rows.insertId || 0, info: '' }, null];
+        }
+        if (/^\s*(update|delete)\b/i.test(sql)) {
+          return [{ affectedRows: rows.affectedRows || 0, changedRows: rows.changedRows || 0, fieldCount: 0, info: '' }, null];
+        }
+        return [normRows(rows), fields || null];
+      };
+      return {
+        query: run,
+        beginTransaction: () => conn.beginTransaction(),
+        commit: () => conn.commit(),
+        rollback: () => conn.rollback(),
+        release: () => conn.release(),
+      };
+    },
+    end: () => myPool.end(),
+  };
+  pool._mysql = myPool;
+  pool._transform = pgToMysql;
+  pool._mode = 'mysql';
+  module.exports = pool;
+  return;
+}
+
+// Map MySQL driver errors onto the PG codes the route layer already
+// handles, so `e.code === '23505'` (unique violation) works in both modes.
+// Original code preserved on err.mysqlCode.
+function asPgError(e) {
+  if (e && (e.code === 'ER_DUP_ENTRY' || e.errno === 1062)) {
+    e.mysqlCode = e.code;
+    e.code = '23505';
+  }
+  return e;
+}
 const { Pool, types } = require('pg');
 
 // MySQL returns BIGINT (COUNT/SUM) as a JS number; pg returns int8 as string.
@@ -87,7 +205,7 @@ async function exec(client, sql, params) {
   return [result.rows, result.fields || null];
 }
 
-const pool = {
+pool = {
   async query(sql, params) { return exec(pgPool, sql, params); },
   async getConnection() {
     const client = await pgPool.connect();

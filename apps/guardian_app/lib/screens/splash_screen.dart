@@ -26,6 +26,7 @@ class _SplashScreenState extends State<SplashScreen> {
       Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const LoginScreen()));
       return;
     }
+    Api.kickstartPreload(); // refresh stored essential data in the background
     try {
       final r = await Api.get('/guardian/profile');
       if (!mounted) return;

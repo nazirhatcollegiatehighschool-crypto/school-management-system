@@ -7,7 +7,7 @@ plugins {
 
 android {
     namespace = "com.school.teacher_app"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {

@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-String _slotDisplayName(String? l0) {
+String slotDisplayName(String? l0) {
   final l = (l0 ?? '').toString().trim();
   final m = RegExp(r'^CLASS_(\d)$', caseSensitive: false).firstMatch(l);
   if (m != null) {
@@ -95,7 +95,7 @@ class RoutineView extends StatelessWidget {
                               child: Text('বাঙ্ক', style: TextStyle(fontSize: 11, color: Colors.red, fontWeight: FontWeight.bold))),
                       ]),
                       subtitle: Text(
-                        '${e['slot_label'] ?? ''}  ${e['start_time']?.toString().substring(0, 5) ?? ''}–${e['end_time']?.toString().substring(0, 5) ?? ''}',
+                        '${slotDisplayName(e['slot_label']?.toString())}  ${e['start_time']?.toString().substring(0, 5) ?? ''}–${e['end_time']?.toString().substring(0, 5) ?? ''}',
                         style: const TextStyle(fontSize: 11),
                       ),
                     ),

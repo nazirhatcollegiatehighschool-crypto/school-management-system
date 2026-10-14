@@ -64,6 +64,21 @@ async function findConflicts(teacherId, day, timeSlotId, excludeId) {
   return rows;
 }
 
+// Subject assignment strictly follows the routine: a teacher stays assigned
+// to a subject ONLY while at least one of their routine entries uses it.
+// When the last such entry goes away, the subject is auto-unassigned.
+async function unassignSubjectIfUnused(db, teacherId, subjectId) {
+  if (!teacherId || !subjectId) return false;
+  const [left] = await db.query(
+    'SELECT id FROM routines WHERE teacher_id=? AND subject_id=? LIMIT 1',
+    [teacherId, subjectId]);
+  if (left.length > 0) return false;
+  const [r] = await db.query(
+    'UPDATE subjects SET teacher_id=NULL WHERE id=? AND teacher_id=?',
+    [subjectId, teacherId]);
+  return (r.affectedRows || 0) > 0;
+}
+
 // ------------------------------------------------------------------
 // GET shared data (slots + subjects + classes) — used by all apps
 // ------------------------------------------------------------------
@@ -114,9 +129,9 @@ router.post('/teacher', auth('teacher'), async (req, res) => {
     // A NEW rule: same subject at the same (day, period) is NOT a conflict when the
     // second teacher is scheduling ADDITIONAL classes for THAT SAME subject (co-teaching /
     // combined class). This bypasses the hard block that previously returned 409.
-    const [subj] = await pool.query(
+    const [subjectInfo] = await pool.query(
       'SELECT id, name, class_id FROM subjects WHERE id = ?', [subject_id]);
-    if (!subj[0]) return res.status(400).json({ error: 'Subject not found' });
+    if (!subjectInfo[0]) return res.status(400).json({ error: 'Subject not found' });
 
     const ownBlocks = await findConflicts(req.user.id, dayNum, time_slot_id, null);
     const sameSubjectOnly = ownBlocks.filter(r => String(r.subject_id) === String(subject_id));
@@ -159,8 +174,9 @@ router.put('/teacher/:id', auth('teacher'), async (req, res) => {
   const { day, time_slot_id, subject_id, sections, groups, notes, room } = req.body || {};
   const dayNum = DAY_KEYS[day] ?? day;
   try {
-    const [own] = await pool.query('SELECT id FROM routines WHERE id = ? AND teacher_id = ?', [req.params.id, req.user.id]);
+    const [own] = await pool.query('SELECT id, subject_id FROM routines WHERE id = ? AND teacher_id = ?', [req.params.id, req.user.id]);
     if (!own[0]) return res.status(403).json({ error: 'Not your routine entry' });
+    const oldSubjectId = own[0].subject_id;
     const [subj] = await pool.query('SELECT id, class_id, teacher_id FROM subjects WHERE id = ?', [subject_id]);
     if (!subj[0]) return res.status(400).json({ error: 'Subject not found' });
 
@@ -192,7 +208,13 @@ router.put('/teacher/:id', auth('teacher'), async (req, res) => {
           [req.params.id, g.class_id, g.group_name]);
       }
       await conn.commit();
-      res.json({ ok: true });
+      // If the edit swapped to a different subject, the old one is no longer
+      // in this teacher's routine -> unassign it when fully unused.
+      let unassigned = false;
+      if (Number(oldSubjectId) !== Number(subject_id)) {
+        unassigned = await unassignSubjectIfUnused(pool, req.user.id, oldSubjectId);
+      }
+      res.json({ ok: true, subject_unassigned: unassigned });
     } catch (e) {
       await conn.rollback();
       throw e;
@@ -372,13 +394,16 @@ router.post('/admin/delete-requests/:id/approve', auth('admin'), async (req, res
     const [rq] = await conn.query('SELECT * FROM routine_delete_requests WHERE id = ? FOR UPDATE', [req.params.id]);
     if (!rq[0]) { await conn.rollback(); return res.status(404).json({ error: 'Request not found' }); }
     if (rq[0].status !== 'pending') { await conn.rollback(); return res.status(400).json({ error: 'Request already ' + rq[0].status }); }
+    const [gone] = await conn.query('SELECT teacher_id, subject_id FROM routines WHERE id = ?', [rq[0].routine_id]);
     await conn.query('DELETE FROM routine_sections WHERE routine_id = ?', [rq[0].routine_id]);
     await conn.query('DELETE FROM routine_groups WHERE routine_id = ?', [rq[0].routine_id]);
     await conn.query('DELETE FROM routines WHERE id = ?', [rq[0].routine_id]);
+    let unassigned = false;
+    if (gone[0]) unassigned = await unassignSubjectIfUnused(conn, gone[0].teacher_id, gone[0].subject_id);
     await conn.query("UPDATE routine_delete_requests SET status = 'approved', decided_at = now() WHERE id = ?", [rq[0].id]);
     await conn.commit();
     conn.release();
-    res.json({ ok: true });
+    res.json({ ok: true, subject_unassigned: unassigned });
   } catch (e) {
     try { await conn.rollback(); } catch (_) {}
     conn.release();
@@ -439,8 +464,13 @@ router.get('/conflicts', auth('admin'), async (req, res) => {
 // admin can delete any routine entry
 router.delete('/admin/:id', auth('admin'), async (req, res) => {
   try {
+    const [gone] = await pool.query('SELECT teacher_id, subject_id FROM routines WHERE id=?', [req.params.id]);
+    if (!gone[0]) return res.status(404).json({ error: 'Routine entry not found' });
+    await pool.query('DELETE FROM routine_sections WHERE routine_id=?', [req.params.id]);
+    await pool.query('DELETE FROM routine_groups WHERE routine_id=?', [req.params.id]);
     await pool.query('DELETE FROM routines WHERE id=?', [req.params.id]);
-    res.json({ ok: true });
+    const unassigned = await unassignSubjectIfUnused(pool, gone[0].teacher_id, gone[0].subject_id);
+    res.json({ ok: true, subject_unassigned: unassigned });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 

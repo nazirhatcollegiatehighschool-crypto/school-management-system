@@ -39,11 +39,14 @@ class _ClassStudentsScreenState extends State<ClassStudentsScreen> {
   }
 
   Future<void> _loadStudents() async {
-    setState(() { _loading = true; _students = []; _error = null; });
+    if (_students.isEmpty) setState(() { _loading = true; _error = null; });
     try {
-      final r = await Api.get('/teacher/classes/$_selectedClass/guardians');
-      setState(() { _students = r is List ? r : []; _loading = false; });
+      await Api.loadCachedFirst('/teacher/classes/$_selectedClass/guardians', (r) {
+        if (!mounted) return;
+        setState(() { _students = r is List ? r : []; _loading = false; });
+      });
     } catch (e) {
+      if (!mounted) return;
       setState(() { _error = e.toString().replaceFirst('Exception: ', ''); _loading = false; });
     }
   }

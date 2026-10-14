@@ -11,6 +11,9 @@ class Api {
   static const Duration _timeout = Duration(seconds: 25);
   static const _tokenKey = 'auth_token';
 
+  /// Raw server root for browser-opened downloads (PDFs). See Config.
+  static String get downloadBase => Config.downloadBase;
+
   /// Offline read/write layer. Every successful GET is cached; every mutation
   /// that fails on the network is queued and replayed when connectivity returns.
   static final SyncStore sync = SyncStore.instance;
@@ -18,6 +21,10 @@ class Api {
   static Future<void> init() async {
     sync.tokenProvider = () => token;
     await sync.init(base: Config.api);
+    sync.onReconnected = () {
+      // Re-connect: re-pull the essential data so the local cache gets updated.
+      unawaited(preloadEssential());
+    };
   }
 
   static Future<void> saveToken(String t) async {
@@ -51,20 +58,50 @@ class Api {
 
   static Map<String, String> get _headers => {
         'Content-Type': 'application/json',
+        // ngrok free tier sits behind a browser-warning gate — this header
+        // skips it so mobile-data requests get JSON instead of an HTML page.
+        'ngrok-skip-browser-warning': 'true',
         if (token != null) 'Authorization': 'Bearer $token',
       };
 
+  /// Connectivity probe for the Server-URL setting: raw GET, no auth/cache.
+  static Future<bool> testHealth(String base) async {
+    try {
+      final res = await http
+          .get(Uri.parse('${base.replaceAll(RegExp(r'/+$'), '')}/api/health'),
+              headers: const {'ngrok-skip-browser-warning': 'true'})
+          .timeout(const Duration(seconds: 10));
+      return res.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
   static Future<dynamic> get(String path) async {
+    // Offline-first: serve the locally stored copy immediately instead of
+    // waiting for a slow network timeout.
+    if (sync.isOffline) {
+      final cached = sync.cacheGet(path);
+      if (cached != null) return jsOne(cached);
+    }
+    // Server known-down (recent probe failed): don't hang 25s, serve cache.
+    // Manual refresh paths use refreshCache(), which always re-probes.
+    if (!sync.isOffline && sync.serverKnownDown()) {
+      final cached = sync.cacheGet(path);
+      if (cached != null) return jsOne(cached);
+    }
     try {
       final res = await http
           .get(Uri.parse(Config.api + path), headers: _headers)
           .timeout(_timeout);
       final data = _handle(res);
+      sync.markRequestOk();
       // keep a copy for offline reads
       unawaited(sync.cachePut(path, jsOne(data)));
       return data;
     } catch (e) {
       if (isNetworkError(e)) {
+        sync.markRequestFailed();
         final cached = sync.cacheGet(path);
         if (cached != null) return jsOne(cached);
       }
@@ -72,14 +109,27 @@ class Api {
     }
   }
 
+  /// Accurate user-facing message for a failed mutation: distinguishes
+  /// "no internet on the phone" from "internet OK but school server
+  /// unreachable (laptop off / URL changed)".
+  static String failureMessage({required String queuedAction}) {
+    if (sync.isOffline) {
+      return 'ইন্টারনেট নেই — $queuedAction ফোনে সেভ আছে, online হলেই server-এ যাবে';
+    }
+    return 'Server-এ পৌঁছানো যাচ্ছে না (ইন্টারনেট আছে) — $queuedAction ফোনে সেভ আছে; laptop server / Server URL ঠিক করে আবার চেষ্টা করুন';
+  }
+
   static Future<dynamic> post(String path, [Map<String, dynamic>? body]) async {
     try {
       final res = await http
           .post(Uri.parse(Config.api + path), headers: _headers, body: jsonEncode(body ?? {}))
           .timeout(_timeout);
-      return _handle(res);
+      final data = _handle(res);
+      sync.markRequestOk();
+      return data;
     } catch (e) {
       if (isNetworkError(e)) {
+        sync.markRequestFailed();
         await sync.enqueue('POST', path, body);
         return {'offline_queued': true};
       }
@@ -92,9 +142,12 @@ class Api {
       final res = await http
           .put(Uri.parse(Config.api + path), headers: _headers, body: jsonEncode(body ?? {}))
           .timeout(_timeout);
-      return _handle(res);
+      final data = _handle(res);
+      sync.markRequestOk();
+      return data;
     } catch (e) {
       if (isNetworkError(e)) {
+        sync.markRequestFailed();
         await sync.enqueue('PUT', path, body);
         return {'offline_queued': true};
       }
@@ -107,9 +160,12 @@ class Api {
       final res = await http
           .delete(Uri.parse(Config.api + path), headers: _headers)
           .timeout(_timeout);
-      return _handle(res);
+      final data = _handle(res);
+      sync.markRequestOk();
+      return data;
     } catch (e) {
       if (isNetworkError(e)) {
+        sync.markRequestFailed();
         await sync.enqueue('DELETE', path, null);
         return {'offline_queued': true};
       }
@@ -119,6 +175,33 @@ class Api {
 
   /// Replay queued offline changes against the server.
   static Future<Map<String, int>> flushOffline() => sync.flush();
+
+  /// Fire-and-forget entry point for screens: preload essential datasets.
+  static void kickstartPreload() => unawaited(preloadEssential());
+
+  static bool _preloading = false;
+
+  /// Download & store the essential datasets into the offline cache. Called
+  /// on first login, on app start (when a session exists), and every time
+  /// connectivity comes back. Errors are ignored — online reads fall back to
+  /// whatever was already cached.
+  static Future<void> preloadEssential() async {
+    if (_preloading || token == null) return;
+    _preloading = true;
+    try {
+      await Future.wait([
+        get('/admin/stats').catchError((_) {}),
+        get('/admin/teachers').catchError((_) {}),
+        get('/admin/classes').catchError((_) {}),
+        get('/admin/subjects').catchError((_) {}),
+        get('/admin/students').catchError((_) {}),
+        get('/routine/teacher/mine').catchError((_) {}),
+        get('/routine/slots').catchError((_) {}),
+      ]);
+    } finally {
+      _preloading = false;
+    }
+  }
 
   static dynamic _handle(http.Response res) {
     final data = res.body.isEmpty ? {} : jsonDecode(res.body);

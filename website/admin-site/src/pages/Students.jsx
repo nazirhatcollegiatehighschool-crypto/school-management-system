@@ -1,7 +1,13 @@
 import { useState, useEffect, useMemo } from 'react';
 import { api } from '../api';
+import { parseStudentPrompt, PROMPT_TEMPLATE } from '../lib/studentPromptParser';
 
-const empty = { student_code: '', name: '', dob: '', roll: '', class_id: '', guardian_name: '', guardian_phone: '', guardian_email: '', address: '' };
+const empty = {
+  student_code: '', name: '', dob: '', roll: '', class_id: '',
+  guardian_name: '', guardian_phone: '', guardian_email: '', address: '',
+  father_name: '', mother_name: '', birth_cert_no: '', religion: '',
+  gender: '', blood_group: '', optional_subject: '', phone: '', email: '', status: ''
+};
 
 export default function Students() {
   const [rows, setRows] = useState([]);
@@ -20,6 +26,8 @@ export default function Students() {
   const [filterCls, setFilterCls] = useState('');
   const [filterSec, setFilterSec] = useState('');
   const [viewMode, setViewMode] = useState('table');
+  const [prompt, setPrompt] = useState('');
+  const [promptMsg, setPromptMsg] = useState('');
 
   const load = () => {
     api('/admin/students').then(setRows).catch(e => setErr(e.message));
@@ -116,11 +124,50 @@ export default function Students() {
     setForm({
       student_code: s.student_code, name: s.name, dob: s.dob ? s.dob.slice(0, 10) : '',
       roll: s.roll, class_id: s.class_id, guardian_name: s.guardian_name || '',
-      guardian_phone: s.guardian_phone || '', guardian_email: s.guardian_email || '', address: s.address || ''
+      guardian_phone: s.guardian_phone || '', guardian_email: s.guardian_email || '', address: s.address || '',
+      father_name: s.father_name || '', mother_name: s.mother_name || '', birth_cert_no: s.birth_cert_no || '',
+      religion: s.religion || '', gender: s.gender || '', blood_group: s.blood_group || '',
+      optional_subject: s.optional_subject || '', phone: s.phone || '', email: s.email || '',
+      status: s.status || 'active'
     });
     setCls(s.class_name);
     setSec(s.section);
     setShowForm(true);
+  };
+
+  const fillFromPrompt = async () => {
+    setPromptMsg('');
+    const res = parseStudentPrompt(prompt);
+    if (Object.keys(res).length === 0) { setPromptMsg('Prompt-এ কোনো তথ্য পাওয়া যায়নি। Template অনুযায়ী লিখে আবার চেষ্টা করুন।'); return; }
+    setForm(f => ({
+      ...f,
+      name: res.name ?? f.name,
+      roll: res.roll != null ? String(res.roll) : f.roll,
+      dob: res.dob ?? f.dob,
+      father_name: res.father_name ?? f.father_name,
+      mother_name: res.mother_name ?? f.mother_name,
+      birth_cert_no: res.birth_cert_no ?? f.birth_cert_no,
+      guardian_name: res.guardian_name ?? f.guardian_name,
+      guardian_phone: res.guardian_phone ?? f.guardian_phone,
+      phone: res.phone ?? f.phone,
+      email: res.email ?? f.email,
+      gender: res.gender ?? f.gender,
+      religion: res.religion === 'Hinduism' ? 'Hindu' : res.religion === 'Christianity' ? 'Christian' : res.religion === 'Buddhism' ? 'Buddhist' : (res.religion ?? f.religion),
+      blood_group: res.blood_group ?? f.blood_group,
+      optional_subject: res.optional_subject ?? f.optional_subject,
+      address: res.address ?? f.address,
+    }));
+    setPromptMsg('✓ Prompt থেকে ফিল্ড পূরণ হয়েছে — মান যাচাই করে Class/Section বাছুন।');
+  };
+
+  const copyTemplate = async () => {
+    try {
+      await navigator.clipboard.writeText(PROMPT_TEMPLATE);
+      setPromptMsg('✓ AI Prompt Template কপি হয়েছে');
+    } catch (e) {
+      setPrompt(PROMPT_TEMPLATE);
+      setPromptMsg('কপি করা যায়নি — টেমপ্লেট টেক্সটবক্সে বসানো হয়েছে।');
+    }
   };
 
   const resetForm = () => {
@@ -162,7 +209,7 @@ export default function Students() {
         {viewMode === 'table' ? (
           <div style={{ overflowX: 'auto' }}>
             <table>
-              <thead><tr><th>Code</th><th>Name</th><th>Class</th><th>Roll</th><th>DOB</th><th>Guardian</th><th>Phone</th><th>Actions</th></tr></thead>
+              <thead><tr><th>Code</th><th>Name</th><th>Class</th><th>Roll</th><th>DOB</th><th>Guardian</th><th>Phone</th><th>Status</th><th>Actions</th></tr></thead>
               <tbody>
                 {filtered.map(s => (
                   <tr key={s.id}>
@@ -170,6 +217,9 @@ export default function Students() {
                     <td>{s.class_name} ({s.section})</td><td>{s.roll}</td>
                     <td>{s.dob ? s.dob.slice(0, 10) : '-'}</td>
                     <td>{s.guardian_name || '-'}</td><td>{s.guardian_phone || '-'}</td>
+                    <td>{(!s.status || s.status === 'active')
+                      ? <span className="badge editable">Active</span>
+                      : <span className="badge locked">Inactive</span>}</td>
                     <td style={{ whiteSpace: 'nowrap' }}>
                       <button className="btn sm ghost" onClick={() => loadSubjects(s)}>Subjects</button>{' '}
                       <button className="btn sm ghost" onClick={() => edit(s)}>Edit</button>{' '}
@@ -178,7 +228,7 @@ export default function Students() {
                   </tr>
                 ))}
                 {filtered.length === 0 && (
-                  <tr><td colSpan={8} style={{ textAlign: 'center', color: '#64748b', padding: 20 }}>No students found</td></tr>
+                  <tr><td colSpan={9} style={{ textAlign: 'center', color: '#64748b', padding: 20 }}>No students found</td></tr>
                 )}
               </tbody>
             </table>
@@ -218,6 +268,22 @@ export default function Students() {
           <div className="modal" onClick={e => e.stopPropagation()}>
             <h3>{editing ? 'Edit Student' : 'Add Student'}</h3>
             <form onSubmit={save}>
+              {!editing && (
+                <div style={{ background: '#f0f7ff', border: '1px solid #c9e3ff', borderRadius: 8, padding: 10, marginBottom: 12 }}>
+                  <label>AI Prompt (বাংলা/English) — auto-fill</label>
+                  <textarea
+                    value={prompt}
+                    onChange={e => setPrompt(e.target.value)}
+                    rows={3}
+                    style={{ width: '100%', boxSizing: 'border-box', marginTop: 4 }}
+                    placeholder={'Name: ...\nRoll: 12\nFather\'s Name: ...'} />
+                  <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                    <button type="button" className="btn sm" onClick={fillFromPrompt}>বিশ্লেষণ → ফিল করুন</button>
+                    <button type="button" className="btn sm ghost" onClick={copyTemplate}>Copy Prompt Template</button>
+                  </div>
+                  {promptMsg && <div style={{ fontSize: 12, marginTop: 6, color: promptMsg.startsWith('✓') ? '#166534' : '#b91c1c' }}>{promptMsg}</div>}
+                </div>
+              )}
               <div className="form-row">
                 <div><label>Student Code</label><input value={form.student_code} readOnly disabled placeholder="Auto-generated" title="Auto-generated on save" /></div>
                 <div><label>Roll *</label><input type="number" value={form.roll}
@@ -230,6 +296,29 @@ export default function Students() {
               <div className="form-row">
                 <div><label>Name *</label><input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} required /></div>
                 <div><label>Date of Birth</label><input type="date" value={form.dob} onChange={e => setForm({ ...form, dob: e.target.value })} /></div>
+              </div>
+              <div className="form-row">
+                <div><label>Status *</label>
+                  <select value={form.status || 'active'} onChange={e => setForm({ ...form, status: e.target.value })}>
+                    <option value="active">Active</option>
+                    <option value="inactive">Inactive (dropped out — no marks/attendance)</option>
+                  </select>
+                </div>
+                <div></div>
+              </div>
+              <div className="form-row">
+                <div><label>Gender</label>
+                  <select value={form.gender} onChange={e => setForm({ ...form, gender: e.target.value })}>
+                    <option value="">—</option>
+                    <option>Male</option><option>Female</option><option>Other</option>
+                  </select>
+                </div>
+                <div><label>Religion</label>
+                  <select value={form.religion} onChange={e => setForm({ ...form, religion: e.target.value })}>
+                    <option value="">—</option>
+                    <option>Islam</option><option>Hindu</option><option>Christian</option><option>Buddhist</option><option>Other</option>
+                  </select>
+                </div>
               </div>
               <div className="form-row">
                 <div><label>Class *</label>
@@ -246,11 +335,23 @@ export default function Students() {
                 </div>
               </div>
               <div className="form-row">
+                <div><label>Father's Name</label><input value={form.father_name} onChange={e => setForm({ ...form, father_name: e.target.value })} /></div>
+                <div><label>Mother's Name</label><input value={form.mother_name} onChange={e => setForm({ ...form, mother_name: e.target.value })} /></div>
+              </div>
+              <div className="form-row">
                 <div><label>Guardian Name</label><input value={form.guardian_name} onChange={e => setForm({ ...form, guardian_name: e.target.value })} /></div>
                 <div><label>Guardian Phone (admission main number)</label><input value={form.guardian_phone} onChange={e => setForm({ ...form, guardian_phone: e.target.value })} placeholder="01XXXXXXXXX" /></div>
               </div>
               <div className="form-row">
                 <div><label>Guardian Email</label><input type="email" value={form.guardian_email} onChange={e => setForm({ ...form, guardian_email: e.target.value })} /></div>
+                <div><label>Student Phone</label><input value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} /></div>
+              </div>
+              <div className="form-row">
+                <div><label>Blood Group</label><input value={form.blood_group} onChange={e => setForm({ ...form, blood_group: e.target.value })} placeholder="A+/B+/O-" /></div>
+                <div><label>Optional Subject</label><input value={form.optional_subject} onChange={e => setForm({ ...form, optional_subject: e.target.value })} /></div>
+              </div>
+              <div className="form-row">
+                <div><label>Birth Certificate No</label><input value={form.birth_cert_no} onChange={e => setForm({ ...form, birth_cert_no: e.target.value })} /></div>
                 <div><label>Address</label><input value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} /></div>
               </div>
               <div className="modal-actions">

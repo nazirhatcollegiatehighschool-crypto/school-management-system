@@ -1,5 +1,50 @@
 /* Central input validation helpers — server-side data integrity */
 
+// NCTB component validation: each component (CQ/MCQ/Practical/Written/CA)
+// is validated against its own full marks; the plain `marks` total is
+// validated against the subject/event total. All fields optional —
+// the teacher fills whichever structure the admin configured.
+function validateComponentValue(v, full, label) {
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number(v);
+  const f = Number(full);
+  if (!Number.isFinite(n)) return `${label} must be a number`;
+  if (n < 0) return `${label} cannot be negative`;
+  if (Number.isFinite(f) && f > 0 && n > f) return `${label} cannot exceed ${f}`;
+  return null;
+}
+
+function validateMarksRecord(r, layout) {
+  const errs = [];
+  const totalFull = layout && layout.full_marks != null
+    ? Number(layout.full_marks)
+    : Number(r.total !== undefined && r.total !== null && r.total !== '' ? r.total : 100);
+  const labels = { cq: 'CQ', mcq: 'MCQ', practical: 'Practical', written: 'Written', ca: 'CA (ধারাবাহিক)' };
+  const comps = ['cq', 'mcq', 'practical', 'written', 'ca'];
+  let hasAnyComponent = false;
+  for (const k of comps) {
+    if (r[k] !== undefined && r[k] !== null && r[k] !== '') {
+      hasAnyComponent = true;
+      const fullKey = k + '_full';
+      const full = layout && layout[fullKey] != null ? Number(layout[fullKey]) : null;
+      const e = validateComponentValue(r[k], full, labels[k]);
+      if (e) errs.push(`Student ${r.student_id}: ${e}`);
+    }
+  }
+  // Component-wise records: sum must not exceed the subject total.
+  if (hasAnyComponent) {
+    const sum = comps.reduce((s, k) => s + (r[k] === undefined || r[k] === null || r[k] === '' ? 0 : Number(r[k])), 0);
+    if (Number.isFinite(totalFull) && totalFull > 0 && sum > totalFull) {
+      errs.push(`Student ${r.student_id}: component total ${sum} exceeds subject total (${totalFull})`);
+    }
+  } else {
+    const e = validateMarksValue(r.marks, totalFull);
+    if (e) errs.push(`Student ${r.student_id}: ${e}`);
+  }
+  if (r.comment && String(r.comment).length > 255) errs.push('Comment too long (max 255)');
+  return errs;
+}
+
 function validateMarksValue(marks, total) {
   const m = Number(marks);
   const t = Number(total || 100);
@@ -26,4 +71,4 @@ function validateStudent(body) {
   return errors;
 }
 
-module.exports = { validateMarksValue, validateStudent };
+module.exports = { validateMarksValue, validateComponentValue, validateMarksRecord, validateStudent };

@@ -23,9 +23,11 @@ class _AttendanceAnalyticsScreenState extends State<AttendanceAnalyticsScreen> {
   }
 
   Future<void> _load() async {
+    if (_records.isEmpty) setState(() { _loading = true; _error = null; });
     try {
-      final r = await Api.get('/teacher/attendance');
-      final rows = r is List ? r : [];
+      await Api.loadCachedFirst('/teacher/attendance', (r) {
+        if (!mounted) return;
+        final rows = r is List ? r : [];
       final perDay = <DateTime, Map<String, int>>{};
       final totals = {'present': 0, 'absent': 0, 'late': 0};
       final days = <DateTime>[];
@@ -46,6 +48,7 @@ class _AttendanceAnalyticsScreenState extends State<AttendanceAnalyticsScreen> {
       }
       days.sort();
       final recent = days.length > 10 ? days.sublist(days.length - 10) : days;
+      if (!mounted) return;
       setState(() {
         _records = rows;
         _perDay = perDay;
@@ -53,7 +56,9 @@ class _AttendanceAnalyticsScreenState extends State<AttendanceAnalyticsScreen> {
         _days = recent;
         _loading = false;
       });
+      });
     } catch (e) {
+      if (!mounted) return;
       setState(() { _error = e.toString().replaceFirst('Exception: ', ''); _loading = false; });
     }
   }

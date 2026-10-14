@@ -35,11 +35,16 @@ function isSectionClass(cls) { return ['9', '10'].indexOf(String(cls)) === -1; }
 
 function layoutFor(classLevel, subject, maxes) {
   const sName = String((subject && subject.name) || '');
-  if (maxes && (maxes.cq_full != null || maxes.mcq_full != null || maxes.practical_full != null)) {
+  // NCTB mark structure: CQ (Creative) + MCQ + Practical + Written + CA
+  // (Continuous Assessment / ধারাবাহিক মূল্যায়ন). Any combination stored
+  // on the subject row drives component-wise entry and grading.
+  if (maxes && (maxes.cq_full != null || maxes.mcq_full != null || maxes.practical_full != null || maxes.written_full != null || maxes.ca_full != null)) {
     const parts = [];
     if (maxes.cq_full != null) parts.push({ key: 'cq', full: Number(maxes.cq_full) });
     if (maxes.mcq_full != null) parts.push({ key: 'mcq', full: Number(maxes.mcq_full) });
     if (maxes.practical_full != null) parts.push({ key: 'practical', full: Number(maxes.practical_full) });
+    if (maxes.written_full != null) parts.push({ key: 'written', full: Number(maxes.written_full) });
+    if (maxes.ca_full != null) parts.push({ key: 'ca', full: Number(maxes.ca_full) });
     if (parts.length === 1) return [{ key: 'mark', full: parts[0].full }];
     if (parts.length > 1) return parts;
   }
@@ -58,7 +63,7 @@ function gradePaper(classLevel, row, subject, maxes) {
   if (row.absent) {
     return { total: 0, full: fullTotal, scaled: 0, letter_grade: 'F', grade_point: 0, absent: true, comp_fail: false };
   }
-  const hasComponents = row.cq != null || row.mcq != null || row.practical != null || row.written != null;
+  const hasComponents = row.cq != null || row.mcq != null || row.practical != null || row.written != null || row.ca != null;
   let total = 0, full = 0, compFail = false;
   if (layout.length === 1 || !hasComponents) {
     total = Number(row.marks != null ? row.marks : 0);
@@ -88,15 +93,18 @@ async function computeResult(studentId, eventId) {
   if (!stu) return null;
   const cls = classLevelOf(stu.class_name);
 
+  // Marks follow the STUDENT, not their current class: after a promotion
+  // the papers live under the old class's exams, and the marksheet must
+  // still resolve (academic history is preserved across class moves).
   const [papers] = await pool.query(
     `SELECT m.*, e.subject_id, sub.name AS subject_name, sub.full_marks, sub.is_optional,
-            sub.excluded_from_gpa, sub.cq_full, sub.mcq_full, sub.practical_full
+            sub.excluded_from_gpa, sub.cq_full, sub.mcq_full, sub.practical_full,
+            sub.written_full, sub.ca_full
      FROM marks m
      JOIN exams e ON m.exam_id = e.id
      JOIN subjects sub ON e.subject_id = sub.id
-     WHERE m.student_id = ? AND e.event_id = ?
-       AND e.class_id = ?`,
-    [studentId, eventId, stu.class_id]
+     WHERE m.student_id = ? AND e.event_id = ?`,
+    [studentId, eventId]
   );
   if (papers.length === 0) return null;
 
@@ -115,6 +123,7 @@ async function computeResult(studentId, eventId) {
   });
 
   let failed = false, fourthAbsent = false, mainPoints = 0, mainCount = 0, fourthGp = null;
+  let grandTotal = 0, grandFull = 0, fourthScore = null;
   const familyRows = [];
 
   for (const fam of Object.keys(fams)) {
@@ -139,13 +148,13 @@ async function computeResult(studentId, eventId) {
     rows.forEach(r => {
       if (r.absent) { full += Number(r.full_marks || 100); return; }
       const subjObj = { name: r.subject_name, full_marks: r.full_marks };
-      const g = gradePaper(cls, r, subjObj, { cq_full: r.cq_full, mcq_full: r.mcq_full, practical_full: r.practical_full });
+      const g = gradePaper(cls, r, subjObj, { cq_full: r.cq_full, mcq_full: r.mcq_full, practical_full: r.practical_full, written_full: r.written_full, ca_full: r.ca_full });
       total += g.total;
       full += g.full;
       if (g.letter_grade === 'F') compFail = true;
       paperDetails.push({
         subject_name: r.subject_name, marks: r.marks, cq: r.cq, mcq: r.mcq,
-        practical: r.practical, written: r.written, absent: !!r.absent,
+        practical: r.practical, written: r.written, ca: r.ca, absent: !!r.absent,
         letter_grade: g.letter_grade, grade_point: g.grade_point
       });
     });
@@ -154,8 +163,11 @@ async function computeResult(studentId, eventId) {
     const letter = compFail ? 'F' : base.letter_grade;
     const gp = compFail ? 0.0 : base.grade_point;
     if (letter === 'F' && !isFourth) failed = true;
+    if (!isFourth) { grandTotal += total; grandFull += full; }
     if (isFourth) {
       if (fourthGp == null || gp > fourthGp) fourthGp = gp;
+      // Highest 4th-subject scaled score (tie-breaker).
+      if (fourthScore == null || scaled > fourthScore) fourthScore = scaled;
     } else { mainPoints += gp; mainCount++; }
     familyRows.push({
       subject: fam, total, full, scaled, letter_grade: letter, grade_point: gp,
@@ -180,6 +192,9 @@ async function computeResult(studentId, eventId) {
     total_gpa_without_4th: totalGpaWithout4th,
     gpa_4th_bonus: gpa4thBonus,
     final_gpa: finalGpa,
+    total_marks: +grandTotal.toFixed(2),
+    total_full: +grandFull.toFixed(2),
+    fourth_score: fourthScore,
     result_status: failed ? 'FAILED' : (fourthAbsent ? 'ABSENT' : 'PASSED'),
     families: familyRows
   };

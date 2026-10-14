@@ -32,16 +32,20 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   Future<void> _load() async {
     try {
-      final r = await Api.get('/teacher/profile');
-      final [reqs, subs] = await Future.wait([
-        Api.get('/teacher/class-teacher-requests').catchError((_) => <dynamic>[]),
-        Api.get('/teacher/subjects').catchError((_) => <dynamic>[]),
+      await Future.wait([
+        Api.loadCachedFirst('/teacher/profile', (r) {
+          if (!mounted || r is! Map) return;
+          setState(() => _profile = r);
+        }),
+        Api.loadCachedFirst('/teacher/class-teacher-requests', (r) {
+          if (!mounted) return;
+          setState(() => _ctr = r is List ? r : []);
+        }),
+        Api.loadCachedFirst('/teacher/subjects', (r) {
+          if (!mounted) return;
+          setState(() => _subjects = r is List ? r : []);
+        }),
       ]);
-      setState(() {
-        _profile = r;
-        _ctr = reqs is List ? reqs : [];
-        _subjects = subs is List ? subs : [];
-      });
     } catch (_) {}
   }
 
@@ -111,11 +115,17 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
     if (saved != true || selectedId == null) return;
     try {
-      await Api.post('/teacher/class-teacher-request', {
+      final r = await Api.post('/teacher/class-teacher-request', {
         'class_id': selectedId,
         'note': noteCtl.text.trim().isEmpty ? null : noteCtl.text.trim(),
       });
       if (!mounted) return;
+      if (Api.isQueued(r)) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            backgroundColor: Colors.orange,
+            content: Text('ইন্টারনেট নেই — অনুরোধ queue-তে আছে, online হলে যাবে')));
+        return;
+      }
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
           backgroundColor: Colors.green, content: Text('অনুরোধ পাঠানো হয়েছে। Admin অনুমোদন করলে class teacher হবেন।')));
       await _load();
@@ -127,13 +137,93 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
+  Future<void> _changePasswordDialog() async {
+    final curCtl = TextEditingController();
+    final newCtl = TextEditingController();
+    final confCtl = TextEditingController();
+    var obscure = true;
+    final dlgCtx = context;
+    final ok = await showDialog<bool>(
+      context: dlgCtx,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setD) => AlertDialog(
+        title: const Text('Password পরিবর্তন'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(controller: curCtl, obscureText: obscure,
+              decoration: const InputDecoration(labelText: 'বর্তমান password *', border: OutlineInputBorder())),
+          const SizedBox(height: 10),
+          TextField(controller: newCtl, obscureText: obscure,
+              decoration: const InputDecoration(labelText: 'নতুন password (কমপক্ষে ৬ অক্ষর) *', border: OutlineInputBorder())),
+          const SizedBox(height: 10),
+          TextField(controller: confCtl, obscureText: obscure,
+              decoration: const InputDecoration(labelText: 'নতুন password আবার *', border: OutlineInputBorder())),
+          Row(children: [
+            Checkbox(value: !obscure, onChanged: (v) => setD(() => obscure = !(v ?? false))),
+            const Text('দেখান', style: TextStyle(fontSize: 13)),
+          ]),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('বাতিল')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('পরিবর্তন')),
+        ],
+      )),
+    );
+    if (ok != true) return;
+    if (!context.mounted) return;
+    if (curCtl.text.isEmpty || newCtl.text.length < 6) {
+      ScaffoldMessenger.of(dlgCtx).showSnackBar(const SnackBar(
+          backgroundColor: Colors.red, content: Text('বর্তমান password দিন ও নতুন password কমপক্ষে ৬ অক্ষরের হতে হবে।')));
+      return;
+    }
+    if (newCtl.text != confCtl.text) {
+      ScaffoldMessenger.of(dlgCtx).showSnackBar(const SnackBar(
+          backgroundColor: Colors.red, content: Text('নতুন password দুবার এক হয়নি।')));
+      return;
+    }
+    // Confirmation popup — teacher taps OK, old is replaced immediately.
+    final pwdCtx = context;
+    final confirm = await showDialog<bool>(
+      context: pwdCtx,
+      builder: (ctx) => AlertDialog(
+        title: const Text('নিশ্চিত?'),
+        content: const Text('OK চাপলেই পুরনো password বদলে নতুনটা কার্যকর হবে।'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('বাতিল')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('OK')),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    try {
+      final r = await Api.put('/teacher/profile/password', {
+        'current_password': curCtl.text,
+        'new_password': newCtl.text,
+      });
+      if (!context.mounted) return;
+      if (Api.isQueued(r)) {
+        ScaffoldMessenger.of(pwdCtx).showSnackBar(const SnackBar(
+            backgroundColor: Colors.orange,
+            content: Text('ইন্টারনেট নেই — request queue-তে আছে, online হলে পাঠানো হবে')));
+        return;
+      }
+      ScaffoldMessenger.of(pwdCtx).showSnackBar(const SnackBar(
+          backgroundColor: Colors.green, content: Text('Password বদলে গেছে। পরের বার নতুন password দিয়ে login করবেন।')));
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(pwdCtx).showSnackBar(SnackBar(
+          backgroundColor: Colors.red,
+          content: Text(e.toString().replaceFirst('Exception: ', ''))));
+    }
+  }
+
   Future<void> _editInfo() async {
     final tv = _profile?['teacher'] as Map? ?? widget.teacher;
     final name = tv['name'] ?? '';
     final rawDesig = tv['designation'];
     final designation = rawDesig == null ? '' : '$rawDesig';
+    final phone = tv['phone']?.toString() ?? '';
     final nameCtl = TextEditingController(text: '$name');
     final desigCtl = TextEditingController(text: designation);
+    final phoneCtl = TextEditingController(text: phone);
     final saved = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -142,6 +232,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
           TextField(controller: nameCtl, decoration: const InputDecoration(labelText: 'Name'), textCapitalization: TextCapitalization.words),
           const SizedBox(height: 10),
           TextField(controller: desigCtl, decoration: const InputDecoration(labelText: 'Designation (পদবি)')),
+          const SizedBox(height: 10),
+          TextField(
+            controller: phoneCtl,
+            decoration: const InputDecoration(labelText: 'Phone (01XXXXXXXXX)', hintText: '01XXXXXXXXX'),
+            keyboardType: TextInputType.phone,
+          ),
         ]),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
@@ -150,11 +246,26 @@ class _ProfileScreenState extends State<ProfileScreen> {
       ),
     );
     if (saved != true) return;
+    final phoneV = phoneCtl.text.trim();
+    if (phoneV.isNotEmpty && !RegExp(r'^01\d{9}$').hasMatch(phoneV)) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          backgroundColor: Colors.red,
+          content: Text('Phone must be 11 digits starting with 01 (যেমন 01712345678)')));
+      return;
+    }
     final r = await Api.put('/teacher/profile', {
       'name': nameCtl.text.trim(),
       'designation': desigCtl.text.trim(),
+      'phone': phoneV.isEmpty ? null : phoneV,
     });
     if (!mounted) return;
+    if (Api.isQueued(r)) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          backgroundColor: Colors.orange,
+          content: Text('ইন্টারনেট নেই — পরিবর্তন queue-তে আছে, online হলে যাবে')));
+      return;
+    }
     if (r is Map && r['ok'] == true) {
       await Api.saveToken(r['token']);
       if (!mounted) return;
@@ -242,16 +353,35 @@ class _ProfileScreenState extends State<ProfileScreen> {
         const SizedBox(height: 12),
         const Card(color: Color(0xFFE0F2F1), child: Padding(
           padding: EdgeInsets.all(14),
-          child: Text('ℹ️ Exam-এ marks দেওয়ার পর ১০ মিনিট edit করা যায়। এরপর admin unlock ছাড়া সম্ভব নয়।',
+          child: Text('ℹ️ Exam-এ marks দেওয়ার পর ৫ ঘণ্টা edit করা যায়। এরপর admin unlock ছাড়া সম্ভব নয়।',
               style: TextStyle(fontSize: 13)),
         )),
         const SizedBox(height: 12),
         Card(child: ListTile(
           leading: const Icon(Icons.system_update_alt, color: Colors.teal),
           title: const Text('অ্যাপ আপডেট'),
-          subtitle: Text('বর্তমান version: v$appVersion — নতুন update চেক করুন'),
+          // Scientific fix: show version AND build (e.g. v1.4.1 • build
+          // 1791835509). The old tile showed only "v1.4.1" — identical text
+          // before AND after a same-version rebuild, which made users (rightly)
+          // believe "update করলাম অথচ কিছু বদলালো না". Build number is the
+          // true identity of a binary; version string is just a label.
+          subtitle: FutureBuilder(
+            future: Future.wait([installedVersion(), installedBuild()]),
+            builder: (_, s) {
+              final v = s.data is List ? (s.data as List)[0].toString() : '…';
+              final b = s.data is List ? (s.data as List)[1].toString() : '…';
+              return Text('ফোনে: v$v • build $b — tap করে সার্ভারের সাথে মিলান');
+            },
+          ),
           trailing: const Icon(Icons.chevron_right),
           onTap: () => checkForUpdate(context, 'teacher', manual: true),
+        )),
+        Card(child: ListTile(
+          leading: const Icon(Icons.lock_reset_outlined, color: Colors.indigo),
+          title: const Text('Password পরিবর্তন'),
+          subtitle: const Text('নতুন দিলেই পুরনোটা বদলে যাবে'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => _changePasswordDialog(),
         )),
       ]),
     );

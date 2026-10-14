@@ -25,20 +25,60 @@ class _RoutineScreenState extends State<RoutineScreen> {
   }
 
   Future<void> _load() async {
-    setState(() { _loading = true; _error = null; });
-    try {
-      final entries = await Api.get('/routine/teacher/mine');
-      final subjects = await Api.get('/routine/teacher/subjects');
-      final slots = await Api.get('/routine/slots');
+    // Instant paint from permanent on-device cache, then silent background
+    // refresh. Teachers never stare at a spinner for their own routine.
+    final cEntries = Api.peekCache('/routine/teacher/mine');
+    final cSubjects = Api.peekCache('/routine/teacher/subjects');
+    final cSlots = Api.peekCache('/routine/slots');
+    if (cEntries is List || cSubjects is List || cSlots is List) {
       if (!mounted) return;
       setState(() {
-        _entries = entries is List ? entries : [];
-        _subjects = subjects is List ? subjects : [];
-        _slots = slots is List ? slots : [];
+        if (cEntries is List) _entries = cEntries;
+        if (cSubjects is List) _subjects = cSubjects;
+        if (cSlots is List) _slots = cSlots;
+        _loading = false;
+      });
+      ClassAlertService.instance.updateRoutines(_entries);
+    } else {
+      setState(() { _loading = true; _error = null; });
+    }
+    try {
+      // Revalidate in background. A subjects/slots failure must NEVER hide
+      // the teacher's own routine entries.
+      List entries = _entries;
+      List subjects = _subjects;
+      List slots = _slots;
+      String? entriesError;
+      try {
+        final r = await Api.refreshCache('/routine/teacher/mine');
+        if (r is List) entries = r;
+      } catch (_) {}
+      if (entries.isEmpty) {
+        try {
+          final r = await Api.get('/routine/teacher/mine');
+          if (r is List) entries = r;
+        } catch (e) {
+          entriesError = e.toString().replaceFirst('Exception: ', '');
+        }
+      }
+      try {
+        final r = await Api.refreshCache('/routine/teacher/subjects');
+        if (r is List) subjects = r;
+      } catch (_) {}
+      try {
+        final r = await Api.refreshCache('/routine/slots');
+        if (r is List) slots = r;
+      } catch (_) {}
+      if (!mounted) return;
+      setState(() {
+        _entries = entries;
+        _subjects = subjects;
+        _slots = slots;
+        _error = entries.isEmpty ? entriesError : null;
         _loading = false;
       });
       // keep the "next class" alert engine + weekly notification schedule in sync
-      ClassAlertService.instance.updateRoutines(entries is List ? entries : []);
+      ClassAlertService.instance.updateRoutines(entries);
     } catch (e) {
       if (!mounted) return;
       setState(() { _error = e.toString().replaceFirst('Exception: ', ''); _loading = false; });
@@ -236,12 +276,20 @@ class _RoutineScreenState extends State<RoutineScreen> {
     };
 
     try {
+      dynamic r;
       if (existingEntry == null) {
-        await Api.post('/routine/teacher', body);
+        r = await Api.post('/routine/teacher', body);
       } else {
-        await Api.put('/routine/teacher/${existingEntry['id']}', body);
+        r = await Api.put('/routine/teacher/${existingEntry['id']}', body);
       }
       if (!mounted) return;
+      if (Api.isQueued(r)) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            backgroundColor: Colors.orange,
+            content: Text(Api.failureMessage(queuedAction: 'routine'))));
+        await _load();
+        return;
+      }
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(existingEntry == null ? 'Period added' : 'Period updated')));
       await _load();
     } catch (e) {
@@ -300,8 +348,14 @@ class _RoutineScreenState extends State<RoutineScreen> {
     );
     if (ok != true) return;
     try {
-      await Api.delete('/routine/teacher/${entry['id']}');
+      final r = await Api.delete('/routine/teacher/${entry['id']}');
       if (!mounted) return;
+      if (Api.isQueued(r)) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            backgroundColor: Colors.orange,
+            content: Text(Api.failureMessage(queuedAction: 'delete request'))));
+        return;
+      }
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Delete request sent to admin for approval.')));
     } catch (e) {
       if (!mounted) return;
@@ -318,8 +372,12 @@ class _RoutineScreenState extends State<RoutineScreen> {
       ]),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : _error != null
-              ? Center(child: Text('Error: $_error'))
+          : _error != null && _entries.isEmpty
+              ? Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  Padding(padding: const EdgeInsets.all(16),
+                      child: Text('Error: $_error', textAlign: TextAlign.center)),
+                  FilledButton.tonal(onPressed: _load, child: const Text('আবার চেষ্টা করুন')),
+                ]))
               : _entries.isEmpty
                   ? const Center(child: Text('No routine periods yet.\nTap + to add one.'))
                   : _buildList(),
@@ -375,6 +433,16 @@ class _ListSheet extends StatelessWidget {
   final List<String> values;
   const _ListSheet({required this.title, required this.items, required this.values});
 
+  // Same meaning-layer as _MultiSelectSheet: Bengali + English + icon.
+  static const _groupMeta = {
+    'science': (Icons.science_outlined, 'বিজ্ঞান', 'Science'),
+    'arts': (Icons.menu_book_outlined, 'মানবিক', 'Arts / Humanities'),
+    'humanities': (Icons.menu_book_outlined, 'মানবিক', 'Arts / Humanities'),
+    'commerce': (Icons.business_center_outlined, 'বাণিজ্য', 'Commerce'),
+    'business': (Icons.business_center_outlined, 'বাণিজ্য', 'Commerce'),
+    'vocational': (Icons.handyman_outlined, 'ভোকেশনাল', 'Vocational'),
+  };
+
   @override
   Widget build(BuildContext context) {
     return SafeArea(
@@ -384,10 +452,25 @@ class _ListSheet extends StatelessWidget {
           child: ListView.builder(
             shrinkWrap: true,
             itemCount: items.length,
-            itemBuilder: (ctx, i) => ListTile(
-              title: Text(items[i]),
-              onTap: () => Navigator.pop(ctx, values[i]),
-            ),
+            itemBuilder: (ctx, i) {
+              final key = items[i].trim().toLowerCase();
+              final meta = _groupMeta[key];
+              final isBnSection = RegExp(r'^[\u0980-\u09FF]$').hasMatch(items[i].trim());
+              return ListTile(
+                leading: CircleAvatar(
+                  backgroundColor: Colors.teal.shade50,
+                  child: Icon(meta?.$1 ?? (isBnSection ? Icons.class_outlined : Icons.label_outline),
+                      color: Colors.teal.shade800, size: 20),
+                ),
+                title: Text(meta?.$2 ?? (isBnSection ? 'শাখা ${items[i]}' : items[i]),
+                    style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15)),
+                subtitle: (meta?.$3 ?? '').isNotEmpty
+                    ? Text(meta!.$3, style: const TextStyle(fontSize: 12))
+                    : (isBnSection ? Text('Section ${items[i]}', style: const TextStyle(fontSize: 12)) : null),
+                trailing: const Icon(Icons.arrow_forward_ios, size: 15, color: Colors.grey),
+                onTap: () => Navigator.pop(ctx, values[i]),
+              );
+            },
           ),
         ),
       ]),
@@ -404,8 +487,45 @@ class _MultiSelectSheet extends StatefulWidget {
   State<_MultiSelectSheet> createState() => _MultiSelectSheetState();
 }
 
+/// Group chip design (scientific fix for "Arts/Science/Commerce unreadable"):
+///
+/// ROOT CAUSE: raw DB group names are terse codes ("Science", "Arts",
+/// "Commerce", "ক", "খ") rendered in a default FilterChip — small font, low
+/// contrast, no meaning. A teacher scanning for "বিজ্ঞান বিভাগ" can't map the
+/// code to the concept, especially under sunlight on a small screen.
+///
+/// FIX (3 layers, each independently justified):
+///  1. MEANING LAYER — each code maps to icon + Bengali label + English
+///     sublabel (🧬 বিজ্ঞান / Science). Recognition > recall: the teacher
+///     RECOGNIZES the icon instead of decoding text.
+///  2. CONTRAST LAYER — selected chip = solid teal fill + white text
+///     (contrast ratio ≈ 7:1); unselected = white fill + dark text + teal
+///     border. Never grey-on-grey (the old failure mode).
+///  3. TOUCH LAYER — min 48px height, 14px gaps, checkmark on selected.
+///     Fitts's law: big adjacent targets, zero precision needed.
 class _MultiSelectSheetState extends State<_MultiSelectSheet> {
   late final Set<String> _sel = widget.initial.toSet();
+
+  // Scientific mapping: code → (icon, Bengali, English). Unknown codes fall
+  // through to a neutral book icon + raw text (never blank, never crash).
+  static const _groupMeta = {
+    'science': (Icons.science_outlined, 'বিজ্ঞান', 'Science'),
+    'arts': (Icons.menu_book_outlined, 'মানবিক', 'Arts / Humanities'),
+    'humanities': (Icons.menu_book_outlined, 'মানবিক', 'Arts / Humanities'),
+    'commerce': (Icons.business_center_outlined, 'বাণিজ্য', 'Commerce'),
+    'business': (Icons.business_center_outlined, 'বাণিজ্য', 'Commerce'),
+    'vocational': (Icons.handyman_outlined, 'ভোকেশনাল', 'Vocational'),
+  };
+
+  (IconData, String, String)? _metaFor(String code) {
+    final k = code.trim().toLowerCase();
+    if (_groupMeta.containsKey(k)) return _groupMeta[k];
+    // Bengali single-letter sections (ক/খ/গ) get a class icon + full label.
+    if (RegExp(r'^[\u0980-\u09FF]$').hasMatch(code.trim())) {
+      return (Icons.class_outlined, 'শাখা ${code.trim()}', 'Section ${code.trim()}');
+    }
+    return null;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -415,12 +535,49 @@ class _MultiSelectSheetState extends State<_MultiSelectSheet> {
         Flexible(
           child: SingleChildScrollView(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: Wrap(spacing: 8, runSpacing: 8, children: widget.options.map((o) {
+            child: Wrap(spacing: 14, runSpacing: 14, children: widget.options.map((o) {
               final on = _sel.contains(o);
-              return FilterChip(
-                label: Text(o),
-                selected: on,
-                onSelected: (v) => setState(() { v ? _sel.add(o) : _sel.remove(o); }),
+              final meta = _metaFor(o);
+              final icon = meta?.$1 ?? Icons.bookmark_outline;
+              final bn = meta?.$2 ?? o;
+              final en = meta?.$3 ?? '';
+              return GestureDetector(
+                onTap: () => setState(() { on ? _sel.remove(o) : _sel.add(o); }),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  curve: Curves.easeInOut,
+                  constraints: const BoxConstraints(minWidth: 104, minHeight: 64),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: on ? Colors.teal.shade700 : Colors.white,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                        color: on ? Colors.teal.shade700 : Colors.teal.shade300, width: on ? 0 : 1.6),
+                    boxShadow: [
+                      BoxShadow(
+                          color: (on ? Colors.teal : Colors.black).withValues(alpha: on ? 0.30 : 0.06),
+                          blurRadius: on ? 10 : 5,
+                          offset: const Offset(0, 3)),
+                    ],
+                  ),
+                  child: Column(mainAxisSize: MainAxisSize.min, mainAxisAlignment: MainAxisAlignment.center, children: [
+                    Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(icon, size: 22, color: on ? Colors.white : Colors.teal.shade800),
+                      if (on) ...[
+                        const SizedBox(width: 4),
+                        const Icon(Icons.check_circle_rounded, size: 17, color: Colors.white),
+                      ],
+                    ]),
+                    const SizedBox(height: 4),
+                    Text(bn,
+                        style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800,
+                            color: on ? Colors.white : Colors.grey.shade900)),
+                    if (en.isNotEmpty)
+                      Text(en,
+                          style: TextStyle(fontSize: 10.5,
+                              color: on ? Colors.white.withValues(alpha: 0.85) : Colors.grey.shade600)),
+                  ]),
+                ),
               );
             }).toList()),
           ),
@@ -429,9 +586,10 @@ class _MultiSelectSheetState extends State<_MultiSelectSheet> {
           padding: const EdgeInsets.all(12),
           child: Row(mainAxisAlignment: MainAxisAlignment.end, children: [
             TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+            const SizedBox(width: 8),
             FilledButton(
               onPressed: _sel.isEmpty ? null : () => Navigator.pop(context, _sel.toList()),
-              child: const Text('OK'),
+              child: Text('OK (${_sel.length})'),
             ),
           ]),
         ),

@@ -53,11 +53,7 @@ async function runRoutineAlertCheck() {
 
   const [routines] = await pool.query(
     `SELECT r.id, r.teacher_id, r.room, ts.label AS slot_label, ts.start_time, ts.end_time,
-            s.name AS subject_name, u.name AS teacher_name,
-            (SELECT string_agg(DISTINCT c.name || CASE WHEN rs.section IS NOT NULL THEN ' (' || rs.section || ')' ELSE '' END, ', ')
-               FROM routine_sections rs JOIN classes c ON rs.class_id = c.id WHERE rs.routine_id = r.id) AS sections_label,
-            (SELECT string_agg(DISTINCT c.name || ' (' || rg.group_name || ')', ', ')
-               FROM routine_groups rg JOIN classes c ON rg.class_id = c.id WHERE rg.routine_id = r.id) AS groups_label
+            s.name AS subject_name, u.name AS teacher_name
      FROM routines r
      JOIN time_slots ts ON r.time_slot_id = ts.id
      JOIN subjects s ON r.subject_id = s.id
@@ -65,6 +61,19 @@ async function runRoutineAlertCheck() {
      WHERE r.day = $1 AND ts.is_break = FALSE`,
     [t.day]
   );
+  // Class labels aggregated in JS (GROUP_CONCAT/string_agg differ by dialect).
+  for (const r of routines) {
+    const [secs] = await pool.query(
+      `SELECT c.name, rs.section FROM routine_sections rs JOIN classes c ON rs.class_id = c.id WHERE rs.routine_id = ? ORDER BY c.name, rs.section`,
+      [r.id]);
+    const [grps] = await pool.query(
+      `SELECT c.name, rg.group_name FROM routine_groups rg JOIN classes c ON rg.class_id = c.id WHERE rg.routine_id = ? ORDER BY c.name, rg.group_name`,
+      [r.id]);
+    const secsList = [...new Set(secs.map(s => s.section ? `${s.name} (${s.section})` : s.name))];
+    const grpsList = [...new Set(grps.map(g => `${g.name} (${g.group_name})`))];
+    r.sections_label = secsList.join(', ') || null;
+    r.groups_label = grpsList.join(', ') || null;
+  }
 
   let checked = 0, sent = 0, logErr = 0;
   for (const r of routines) {

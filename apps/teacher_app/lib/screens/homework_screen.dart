@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:file_picker/file_picker.dart';
 import '../api.dart';
+import '../pdf_helper.dart';
 
 class HomeworkScreen extends StatefulWidget {
   final dynamic teacher;
@@ -30,10 +33,13 @@ class _HomeworkScreenState extends State<HomeworkScreen> {
 
   Future<void> _load() async {
     try {
-      final r = await Api.get('/teacher/homework');
-      if (mounted) setState(() { _homework = r; _loading = false; _error = null; });
+      await Api.loadCachedFirst('/teacher/homework', (r) {
+        if (!mounted) return;
+        setState(() { _homework = r; _loading = false; _error = null; });
+      });
     } catch (e) {
-      if (mounted) setState(() { _error = e.toString().replaceFirst('Exception: ', ''); _loading = false; });
+      if (!mounted) return;
+      setState(() { _error = e.toString().replaceFirst('Exception: ', ''); _loading = false; });
     }
   }
 
@@ -86,6 +92,12 @@ class _HomeworkScreenState extends State<HomeworkScreen> {
                 });
                 _load();
                 if (!mounted) return;
+                if (Api.isQueued(r)) {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                      backgroundColor: Colors.orange,
+                      content: Text('ইন্টারনেট নেই — homework ফোনে সেভ আছে, online হলেই যাবে')));
+                  return;
+                }
                 ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(content: Text('Homework assigned (push: ${r['push']?['sent'] ?? 'n/a'})')));
               } catch (e) {
@@ -163,6 +175,12 @@ class _HomeworkScreenState extends State<HomeworkScreen> {
                   'kind': special ? 'special' : 'complaint',
                 });
                 if (!mounted) return;
+                if (Api.isQueued(r)) {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                      backgroundColor: Colors.orange,
+                      content: Text('ইন্টারনেট নেই — complaint queue-তে আছে, online হলে যাবে')));
+                  return;
+                }
                 ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(content: Text('Sent (push: ${r['push']?['sent'] ?? 'n/a'})')));
               } catch (e) {
@@ -202,23 +220,391 @@ class _HomeworkScreenState extends State<HomeworkScreen> {
                     itemCount: _homework.length,
                     itemBuilder: (_, i) {
                       final h = _homework[i];
-                      return Card(child: ListTile(
-                        leading: const Icon(Icons.edit_note, color: Colors.deepPurple),
-                        title: Text(h['title']),
-                        subtitle: Text([
-                          '${h['class_name']} (${h['section']})',
-                          if (h['subject_name'] != null) h['subject_name'].toString(),
-                          if ((h['description'] ?? '').toString().isNotEmpty) h['description'].toString(),
-                        ].join('\n')),
-                        isThreeLine: true,
-                        trailing: Text(h['due_date'] != null
-                            ? 'Due ${h['due_date'].toString().substring(0, 10)}'
-                            : 'No due date',
-                            style: const TextStyle(fontSize: 11, color: Colors.grey)),
-                      ));
+                      final attachments = (h['attachments'] as List?) ?? [];
+                      final hasDue = h['due_date'] != null;
+
+                      return Container(
+                        margin: const EdgeInsets.symmetric(vertical: 5),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: Colors.grey.withValues(alpha: 0.12)),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.02),
+                              blurRadius: 8,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
+                        ),
+                        child: Material(
+                          color: Colors.transparent,
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(16),
+                            onTap: () async {
+                              await showModalBottomSheet(
+                                context: context,
+                                isScrollControlled: true,
+                                builder: (_) => _HomeworkFilesSheet(
+                                  homework: h,
+                                  onChanged: _load,
+                                ),
+                              );
+                              _load();
+                            },
+                            child: Padding(
+                              padding: const EdgeInsets.all(14),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          h['title'] ?? '',
+                                          style: const TextStyle(
+                                            fontSize: 15,
+                                            fontWeight: FontWeight.w700,
+                                            color: Color(0xFF0F172A),
+                                          ),
+                                        ),
+                                      ),
+                                      if (hasDue)
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFFFEF3C7),
+                                            borderRadius: BorderRadius.circular(6),
+                                            border: Border.all(color: const Color(0xFFFDE68A)),
+                                          ),
+                                          child: Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              const Icon(Icons.schedule_rounded, size: 12, color: Color(0xFFB45309)),
+                                              const SizedBox(width: 4),
+                                              Text(
+                                                'Due ${h['due_date'].toString().substring(0, 10)}',
+                                                style: const TextStyle(
+                                                  fontSize: 11,
+                                                  fontWeight: FontWeight.bold,
+                                                  color: Color(0xFFB45309),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Wrap(
+                                    spacing: 6,
+                                    runSpacing: 4,
+                                    children: [
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFFECFDF5),
+                                          borderRadius: BorderRadius.circular(6),
+                                          border: Border.all(color: const Color(0xFFA7F3D0)),
+                                        ),
+                                        child: Text(
+                                          '${h['class_name']} (${h['section']})',
+                                          style: const TextStyle(
+                                            color: Color(0xFF065F46),
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ),
+                                      if (h['subject_name'] != null)
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFFEFF6FF),
+                                            borderRadius: BorderRadius.circular(6),
+                                            border: Border.all(color: const Color(0xFFBFDBFE)),
+                                          ),
+                                          child: Text(
+                                            h['subject_name'].toString(),
+                                            style: const TextStyle(
+                                              color: Color(0xFF1D4ED8),
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ),
+                                      if (attachments.isNotEmpty)
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                          decoration: BoxDecoration(
+                                            color: Colors.grey.shade100,
+                                            borderRadius: BorderRadius.circular(6),
+                                          ),
+                                          child: Text(
+                                            '📎 ${attachments.length} ফাইল',
+                                            style: TextStyle(
+                                              color: Colors.grey.shade700,
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w500,
+                                            ),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                  if ((h['description'] ?? '').toString().isNotEmpty) ...[
+                                    const SizedBox(height: 8),
+                                    Text(
+                                      h['description'].toString(),
+                                      style: TextStyle(fontSize: 13, color: Colors.blueGrey.shade700),
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
                     },
                   ),
                 ),
+    );
+  }
+}
+
+/// Homework file manager: view/open attachments, add photo (camera/gallery)
+/// or document (PDF), delete own files. Works online; uploads need internet.
+class _HomeworkFilesSheet extends StatefulWidget {
+  final Map homework;
+  final VoidCallback onChanged;
+  const _HomeworkFilesSheet({required this.homework, required this.onChanged});
+
+  @override
+  State<_HomeworkFilesSheet> createState() => _HomeworkFilesSheetState();
+}
+
+class _HomeworkFilesSheetState extends State<_HomeworkFilesSheet> {
+  List _files = [];
+  bool _loading = true;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final r = await Api.get('/teacher/homework/${widget.homework['id']}/attachments');
+      if (!mounted) return;
+      setState(() {
+        _files = r is List ? r : [];
+        _loading = false;
+      });
+      widget.onChanged();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          backgroundColor: Colors.red,
+          content: Text(e.toString().replaceFirst('Exception: ', ''))));
+    }
+  }
+
+  bool _isImg(String name, String mime) {
+    final n = name.toLowerCase();
+    return mime.startsWith('image/') ||
+        n.endsWith('.jpg') || n.endsWith('.jpeg') ||
+        n.endsWith('.png') || n.endsWith('.webp') || n.endsWith('.gif');
+  }
+
+  String _size(int? bytes) {
+    if (bytes == null) return '';
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1048576) return '${(bytes / 1024).toStringAsFixed(0)} KB';
+    return '${(bytes / 1048576).toStringAsFixed(1)} MB';
+  }
+
+  Future<void> _upload(String filePath) async {
+    setState(() => _busy = true);
+    try {
+      await Api.uploadFile(
+          '/teacher/homework/${widget.homework['id']}/attachments', filePath);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          backgroundColor: Colors.green, content: Text('ফাইল যোগ হয়েছে ✓')));
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          backgroundColor: Colors.red,
+          content: Text(Api.isNetworkError(e)
+              ? 'ইন্টারনেট নেই — ফাইল আপলোডের জন্য online থাকতে হবে'
+              : e.toString().replaceFirst('Exception: ', ''))));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _pickPhoto() async {
+    final src = await showDialog<ImageSource>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('ছবি যোগ করুন'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+            leading: const Icon(Icons.photo_library),
+            title: const Text('Gallery থেকে'),
+            onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+          ),
+          ListTile(
+            leading: const Icon(Icons.camera_alt),
+            title: const Text('Camera দিয়ে তুলুন'),
+            onTap: () => Navigator.pop(ctx, ImageSource.camera),
+          ),
+        ]),
+      ),
+    );
+    if (src == null) return;
+    try {
+      final x = await ImagePicker().pickImage(source: src, maxWidth: 1600, imageQuality: 80);
+      if (x != null) await _upload(x.path);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          backgroundColor: Colors.red,
+          content: Text(e.toString().replaceFirst('Exception: ', ''))));
+    }
+  }
+
+  Future<void> _pickDoc() async {
+    try {
+      final files = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['pdf', 'jpg', 'jpeg', 'png', 'webp'],
+      );
+      if (files.isNotEmpty && files.single.path != null) {
+        await _upload(files.single.path!);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          backgroundColor: Colors.red,
+          content: Text(e.toString().replaceFirst('Exception: ', ''))));
+    }
+  }
+
+  Future<void> _deleteFile(dynamic a) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('ফাইল মুছবেন?'),
+        content: Text('"${a['file_name']}" মুছে ফেলা হবে।'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('বাতিল')),
+          FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: Colors.red),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('মুছুন')),
+        ],
+      ));
+    if (ok != true) return;
+    try {
+      await Api.delete('/teacher/homework/attachments/${a['id']}');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('ফাইল মোছা হয়েছে')));
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          backgroundColor: Colors.red,
+          content: Text(e.toString().replaceFirst('Exception: ', ''))));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final h = widget.homework;
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+            left: 16, right: 16, top: 16,
+            bottom: 16 + MediaQuery.of(context).viewInsets.bottom),
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('${h['title']}', style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+          Text('${h['class_name']} (${h['section']})${h['subject_name'] != null ? ' • ${h['subject_name']}' : ''}',
+              style: const TextStyle(fontSize: 12, color: Colors.grey)),
+          const SizedBox(height: 12),
+          Row(children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                icon: const Icon(Icons.photo_camera_outlined, size: 18),
+                label: const Text('ছবি', style: TextStyle(fontSize: 13)),
+                onPressed: _busy ? null : _pickPhoto,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton.icon(
+                icon: const Icon(Icons.picture_as_pdf_outlined, size: 18),
+                label: const Text('PDF/ফাইল', style: TextStyle(fontSize: 13)),
+                onPressed: _busy ? null : _pickDoc,
+              ),
+            ),
+          ]),
+          const SizedBox(height: 8),
+          if (_busy) const LinearProgressIndicator(),
+          if (_loading)
+            const Padding(
+                padding: EdgeInsets.all(20),
+                child: Center(child: CircularProgressIndicator()))
+          else if (_files.isEmpty)
+            const Padding(
+                padding: EdgeInsets.all(12),
+                child: Text('কোনো ফাইল নেই — উপরে বাটনে ফাইল যোগ করুন',
+                    style: TextStyle(color: Colors.grey, fontSize: 13)))
+          else
+            Flexible(
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: _files.length,
+                itemBuilder: (_, i) {
+                  final a = _files[i];
+                  final mime = '${a['mime_type'] ?? ''}';
+                  final img = _isImg('${a['file_name'] ?? ''}', mime);
+                  return Card(
+                    margin: const EdgeInsets.symmetric(vertical: 4),
+                    child: ListTile(
+                      dense: true,
+                      leading: Icon(img ? Icons.image_outlined : Icons.picture_as_pdf_outlined,
+                          color: img ? Colors.teal : Colors.red),
+                      title: Text('${a['file_name']}', style: const TextStyle(fontSize: 13)),
+                      subtitle: Text(_size(a['file_size'] as int?),
+                          style: const TextStyle(fontSize: 11)),
+                      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                        IconButton(
+                          icon: const Icon(Icons.visibility_outlined, size: 20),
+                          tooltip: 'দেখুন',
+                          onPressed: () => PdfHelper.download(
+                              context, '/uploads/homework/${a['file_path']}', '${a['file_name']}'),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete_outline, size: 20, color: Colors.red),
+                          tooltip: 'মুছুন',
+                          onPressed: () => _deleteFile(a),
+                        ),
+                      ]),
+                    ),
+                  );
+                },
+              ),
+            ),
+        ]),
+      ),
     );
   }
 }

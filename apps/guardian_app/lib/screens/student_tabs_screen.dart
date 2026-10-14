@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../api.dart';
+import '../config.dart';
 import 'marksheet_screen.dart';
 import '../widgets/routine_view.dart';
 
@@ -96,44 +98,206 @@ class _StudentTabsScreenState extends State<StudentTabsScreen> {
     final marksVal = num.tryParse('${m['marks']}')?.toDouble() ?? 0;
     final totalVal = num.tryParse('${m['total']}')?.toDouble() ?? 0;
     final pct = (totalVal > 0 ? marksVal / totalVal * 100 : 0).toStringAsFixed(0);
-    return Card(child: ListTile(
-      title: Text('${m['subject_name']} — ${m['exam_name']}'),
-      subtitle: Text('${m['exam_type'].toString().replaceAll('_', ' ')}${(m['comment'] ?? '').toString().isNotEmpty ? '\n💬 ${m['comment']}' : ''}'),
-      isThreeLine: (m['comment'] ?? '').toString().isNotEmpty,
-      trailing: Text('${m['marks']}/${m['total']}\n$pct%',
-          textAlign: TextAlign.end,
-          style: TextStyle(fontWeight: FontWeight.bold,
-              color: num.parse(pct) >= 60 ? Colors.green : Colors.red)),
-      onTap: m['exam_id'] != null
-          ? () => _openResultDetail(m['exam_id'].toString())
-          : null,
-    ));
+    final isPass = (num.tryParse(pct) ?? 0) >= 40;
+    final isGood = (num.tryParse(pct) ?? 0) >= 60;
+    final scoreColor = isGood ? const Color(0xFF16A34A) : isPass ? const Color(0xFFD97706) : const Color(0xFFDC2626);
+
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 5),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.withValues(alpha: 0.12)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.02),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(16),
+          onTap: m['exam_id'] != null ? () => _openResultDetail(m['exam_id'].toString()) : null,
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${m['subject_name']}',
+                            style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15, color: Color(0xFF0F172A)),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            '${m['exam_name']} • ${m['exam_type'].toString().replaceAll('_', ' ')}',
+                            style: TextStyle(fontSize: 12, color: Colors.blueGrey.shade600),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: scoreColor.withValues(alpha: 0.10),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: scoreColor.withValues(alpha: 0.3)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          Text(
+                            '${m['marks']} / ${m['total']}',
+                            style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14, color: scoreColor),
+                          ),
+                          Text(
+                            '$pct%',
+                            style: TextStyle(fontWeight: FontWeight.w600, fontSize: 11, color: scoreColor),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                if ((m['comment'] ?? '').toString().isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF8FAFC),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.grey.withValues(alpha: 0.15)),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.chat_bubble_outline_rounded, size: 14, color: Colors.grey),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            m['comment'].toString(),
+                            style: TextStyle(fontSize: 12, color: Colors.grey.shade700, fontStyle: FontStyle.italic),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Color _statusColor(String s) =>
-      s == 'present' ? Colors.green : s == 'absent' ? Colors.red : Colors.orange;
+      s == 'present' ? const Color(0xFF16A34A) : s == 'absent' ? const Color(0xFFDC2626) : const Color(0xFFD97706);
 
   @override
   Widget build(BuildContext context) {
-    final tabs = const ['Routine', 'Attendance', 'Results', 'Homework', 'Notices', 'Complaints'];
+    final theme = Theme.of(context);
+    final indigo = theme.colorScheme.primary;
+
+    final tabItems = const [
+      (0, 'রুটিন', Icons.calendar_month_rounded),
+      (1, 'হাজিরা', Icons.fact_check_rounded),
+      (2, 'ফলাফল', Icons.emoji_events_rounded),
+      (3, 'হোমওয়ার্ক', Icons.edit_note_rounded),
+      (4, 'নোটিশ', Icons.campaign_rounded),
+      (5, 'অভিযোগ', Icons.report_problem_rounded),
+    ];
+
     return Scaffold(
-      appBar: AppBar(title: Text(widget.studentName)),
-      body: Column(children: [
-        if (_error != null)
-          Container(width: double.infinity, color: Colors.amber.shade100,
-            padding: const EdgeInsets.all(8),
-            child: Text(_error!, style: const TextStyle(fontSize: 12, color: Colors.brown))),
-        Padding(padding: const EdgeInsets.all(10),
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: SegmentedButton<int>(
-              segments: tabs.map((t) => ButtonSegment(value: tabs.indexOf(t), label: Text(t, style: const TextStyle(fontSize: 12)))).toList(),
-              selected: {_tab},
-              onSelectionChanged: (s) => setState(() => _tab = s.first),
+      backgroundColor: const Color(0xFFF3F5FB),
+      appBar: AppBar(
+        title: Text(widget.studentName.isNotEmpty ? widget.studentName : 'শিক্ষার্থীর তথ্য'),
+      ),
+      body: Column(
+        children: [
+          if (_error != null)
+            Container(
+              width: double.infinity,
+              color: const Color(0xFFFFFBEB),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              child: Text(_error!, style: const TextStyle(fontSize: 12, color: Color(0xFF92400E))),
             ),
-          )),
-        Expanded(child: _buildTab()),
-      ]),
+
+          // Horizontal Category Chips Bar
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 10),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              border: Border(bottom: BorderSide(color: Colors.grey.withValues(alpha: 0.15))),
+            ),
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Row(
+                children: tabItems.map((item) {
+                  final isSelected = _tab == item.$1;
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: InkWell(
+                      onTap: () => setState(() => _tab = item.$1),
+                      borderRadius: BorderRadius.circular(12),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 180),
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: isSelected ? indigo : const Color(0xFFF8FAFC),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: isSelected ? indigo : Colors.grey.withValues(alpha: 0.20),
+                          ),
+                          boxShadow: isSelected
+                              ? [
+                                  BoxShadow(
+                                    color: indigo.withValues(alpha: 0.3),
+                                    blurRadius: 8,
+                                    offset: const Offset(0, 3),
+                                  ),
+                                ]
+                              : null,
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              item.$3,
+                              size: 16,
+                              color: isSelected ? Colors.white : Colors.grey.shade600,
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              item.$2,
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                                color: isSelected ? Colors.white : const Color(0xFF334155),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+            ),
+          ),
+
+          Expanded(child: _buildTab()),
+        ],
+      ),
     );
   }
 
@@ -145,19 +309,58 @@ class _StudentTabsScreenState extends State<StudentTabsScreen> {
     }
     if (_tab == 1) {
       if (_attendance == null) return const Center(child: CircularProgressIndicator());
+      if (_attendance!.isEmpty) return const Center(child: Text('কোনো হাজিরা রেকর্ড পাওয়া যায়নি'));
       return ListView.builder(
         padding: const EdgeInsets.all(12),
         itemCount: _attendance!.length,
         itemBuilder: (_, i) {
           final a = _attendance![i];
-          return ListTile(
-            leading: Icon(Icons.circle, color: _statusColor(a['status']), size: 14),
-            title: Text(a['date'].toString().substring(0, 10)),
-            trailing: Text(a['status'].toUpperCase(),
-                style: TextStyle(color: _statusColor(a['status']), fontWeight: FontWeight.bold)),
-            subtitle: a['remark'] != null ? Text(a['remark']) : null,
+          final status = (a['status'] ?? '').toString().toLowerCase();
+          final statusColor = _statusColor(status);
+          final statusLabel = status == 'present' ? 'উপস্থিত' : status == 'absent' ? 'অনুপস্থিত' : 'বিলম্ব';
+
+          return Container(
+            margin: const EdgeInsets.symmetric(vertical: 4),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: Colors.grey.withValues(alpha: 0.12)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.02),
+                  blurRadius: 6,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            child: ListTile(
+              dense: true,
+              leading: Container(
+                width: 12,
+                height: 12,
+                decoration: BoxDecoration(color: statusColor, shape: BoxShape.circle),
+              ),
+              title: Text(
+                a['date'].toString().substring(0, 10),
+                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+              ),
+              trailing: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: statusColor.withValues(alpha: 0.10),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: statusColor.withValues(alpha: 0.3)),
+                ),
+                child: Text(
+                  statusLabel,
+                  style: TextStyle(color: statusColor, fontWeight: FontWeight.bold, fontSize: 12),
+                ),
+              ),
+              subtitle: a['remark'] != null ? Text(a['remark'], style: TextStyle(fontSize: 12, color: Colors.grey.shade600)) : null,
+            ),
           );
-        });
+        },
+      );
     }
 if (_tab == 2) {
       if (_marks == null) return const Center(child: CircularProgressIndicator());
@@ -436,6 +639,48 @@ class _HomeworkDetailScreenState extends State<HomeworkDetailScreen> {
           Text((h['description'] ?? '').toString().isNotEmpty
               ? h['description'].toString()
               : 'কোনো বিস্তারিত নেই'),
+        ]))),
+        const SizedBox(height: 10),
+        Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('সংযুক্ত ফাইল', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+          const SizedBox(height: 8),
+          Builder(builder: (_) {
+            final files = (h['attachments'] as List?) ?? const [];
+            if (files.isEmpty) {
+              return const Text('কোনো ফাইল নেই', style: TextStyle(color: Colors.grey, fontSize: 13));
+            }
+            return Column(children: [
+              for (final a in files)
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(
+                      '${a['mime_type'] ?? ''}'.startsWith('image/')
+                          ? Icons.image_outlined
+                          : Icons.picture_as_pdf_outlined,
+                      color: '${a['mime_type'] ?? ''}'.startsWith('image/')
+                          ? Colors.teal
+                          : Colors.red),
+                  title: Text('${a['file_name']}', style: const TextStyle(fontSize: 13)),
+                  trailing: const Icon(Icons.open_in_new, size: 18),
+                  onTap: () async {
+                    final uri = Uri.parse('${Config.api}${a['url'] ?? ''}');
+                    try {
+                      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+                      if (!ok && context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('ফাইল খোলা যায়নি')));
+                      }
+                    } catch (e) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                            content: Text(e.toString().replaceFirst('Exception: ', ''))));
+                      }
+                    }
+                  },
+                ),
+            ]);
+          }),
         ]))),
         const SizedBox(height: 10),
         Center(child: Text(_status, style: TextStyle(color: Colors.green.shade700, fontSize: 12))),

@@ -1,12 +1,35 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- In-app APK update: PackageInstaller session + status receiver. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
         android:usesCleartextTraffic="true"
         
         android:label="School Guardian"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
+        <!-- FileProvider: staged-APK fallback open (InstallStatusReceiver tap).
+             Primary path is PackageInstaller.Session (no URI perms needed). -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/filepaths" />
+        </provider>
+        <!-- Install-status receiver: posts success/failure notification so the
+             user ALWAYS has an actionable install option (never a dead end). -->
+        <receiver
+            android:name=".InstallStatusReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.school.guardian_app.INSTALL_STATUS" />
+            </intent-filter>
+        </receiver>
         <activity
             android:name=".MainActivity"
             android:exported="true"

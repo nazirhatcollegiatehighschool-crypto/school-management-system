@@ -32,16 +32,17 @@ void _showCreate() {
     String? clsName;
     String? sec;
 
+    final createCtx = context;
     showModalBottomSheet(
-      context: context, isScrollControlled: true,
-      builder: (_) => Padding(padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      context: createCtx, isScrollControlled: true,
+      builder: (_) => Padding(padding: EdgeInsets.only(bottom: MediaQuery.of(createCtx).viewInsets.bottom),
         child: Padding(padding: const EdgeInsets.all(20), child: Column(mainAxisSize: MainAxisSize.min, children: [
           const Text('Create Exam', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
           const SizedBox(height: 14),
           TextField(controller: name, decoration: const InputDecoration(labelText: 'Exam Name *', border: OutlineInputBorder())),
           const SizedBox(height: 10),
           DropdownButtonFormField<String>(
-            value: type,
+            initialValue: type,
             decoration: const InputDecoration(labelText: 'Type', border: OutlineInputBorder()),
             items: const [
               DropdownMenuItem(value: 'class_test', child: Text('Class Test')),
@@ -66,14 +67,14 @@ void _showCreate() {
                       : rows.map((c) => c['section'].toString()).toSet().toList();
                   return Column(children: [
                     DropdownButtonFormField<String?>(
-                      value: clsName,
+                      initialValue: clsName,
                       decoration: const InputDecoration(labelText: 'Step 1 — Class *', border: OutlineInputBorder()),
                       items: [for (final n in classNames) DropdownMenuItem(value: n, child: Text(n))],
                       onChanged: (v) => setSheet(() { clsName = v; sec = null; classId = null; subjectId = null; }),
                     ),
                     const SizedBox(height: 10),
                     DropdownButtonFormField<String?>(
-                      value: sec,
+                      initialValue: sec,
                       decoration: InputDecoration(labelText: isGroup ? 'Step 2 — Group *' : 'Step 2 — Section *', border: const OutlineInputBorder()),
                       items: [for (final s in secOpts) DropdownMenuItem(value: s, child: Text(s))],
                       onChanged: (v) {
@@ -96,7 +97,7 @@ void _showCreate() {
                     if (!snap.hasData) return const SizedBox();
                     final subs = snap.data!.where((s) => s['class_id'] == classId).toList();
                     return DropdownButtonFormField<int>(
-                      value: subjectId,
+                      initialValue: subjectId,
                       decoration: const InputDecoration(labelText: 'Subject *', border: OutlineInputBorder()),
                       items: subs.map<DropdownMenuItem<int>>((s) =>
                           DropdownMenuItem(value: s['id'] as int, child: Text(s['name']?.toString() ?? ''))).toList(),
@@ -107,16 +108,18 @@ void _showCreate() {
           }),
           const SizedBox(height: 16),
           FilledButton(onPressed: () async {
+            final navCtx = createCtx;
             try {
               await Api.post('/admin/exams', {
                 'name': name.text.trim(), 'exam_type': type,
                 'class_id': classId, 'subject_id': subjectId,
               });
-              if (!mounted) return;
-              Navigator.pop(context);
+              if (!navCtx.mounted) return;
+              Navigator.pop(navCtx);
               _load();
             } catch (e) {
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              if (!navCtx.mounted) return;
+              ScaffoldMessenger.of(navCtx).showSnackBar(SnackBar(
                   backgroundColor: Colors.red,
                   content: Text(e.toString().replaceFirst('Exception: ', ''))));
             }
@@ -126,11 +129,20 @@ void _showCreate() {
   }
 
   void _viewMarks(int examId, String examName) async {
+    final sheetCtx = context;
+    dynamic marks;
     try {
-      final marks = await Api.get('/admin/exams/$examId/marks');
-      if (!mounted) return;
+      marks = await Api.get('/admin/exams/$examId/marks');
+    } catch (e) {
+      if (!sheetCtx.mounted) return;
+      ScaffoldMessenger.of(sheetCtx).showSnackBar(SnackBar(content: Text(e.toString())));
+      return;
+    }
+    if (!mounted) return;
+    if (!sheetCtx.mounted) return;
+    try {
       showModalBottomSheet(
-        context: context, isScrollControlled: true,
+        context: sheetCtx, isScrollControlled: true,
         builder: (_) => DraggableScrollableSheet(
           initialChildSize: 0.7, maxChildSize: 0.95,
           builder: (_, scroll) => Container(
@@ -153,8 +165,10 @@ void _showCreate() {
                       const SizedBox(width: 6),
                       if (!(m['editable'] == 1 || m['editable'] == true))
                         TextButton(onPressed: () async {
+                          final navCtx = sheetCtx;
                           await Api.put('/admin/marks/${m['id']}/unlock');
-                          Navigator.pop(context);
+                          if (!navCtx.mounted) return;
+                          Navigator.pop(navCtx);
                           _viewMarks(examId, examName);
                         }, child: const Text('Unlock')),
                     ]),
@@ -164,7 +178,8 @@ void _showCreate() {
             ])),
           ));
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      if (!sheetCtx.mounted) return;
+      ScaffoldMessenger.of(sheetCtx).showSnackBar(SnackBar(content: Text(e.toString())));
     }
   }
 
@@ -206,7 +221,7 @@ void _setStatus(int id, String status) async {
               const SizedBox(height: 12),
               StatefulBuilder(builder: (_, setSheet) {
                 return DropdownButtonFormField<String>(
-                  value: sel,
+                  initialValue: sel,
                   decoration: const InputDecoration(labelText: 'Teacher', border: OutlineInputBorder()),
                   items: [for (final t in teachers ?? []) DropdownMenuItem(value: '${t['id']}', child: Text(t['name']?.toString() ?? ''))],
                   onChanged: (v) => teacherSel.value = v,

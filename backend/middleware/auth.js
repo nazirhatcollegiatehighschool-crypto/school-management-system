@@ -20,7 +20,9 @@ function matchesRole(required, actual) {
 function auth(roles) {
   return (req, res, next) => {
     const header = req.headers.authorization || '';
-    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    // PDF/print downloads can't send headers (url_launcher/browser) — allow ?token= fallback.
+    const qToken = req.query && typeof req.query.token === 'string' ? req.query.token : null;
+    const token = header.startsWith('Bearer ') ? header.slice(7) : qToken;
     if (!token) return res.status(401).json({ error: 'No token provided' });
     try {
       const decoded = jwt.verify(token, JWT_SECRET);

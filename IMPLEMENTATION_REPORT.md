@@ -12,7 +12,7 @@ Per the master spec (PDF `nchs_pdf_extract.txt`), integrate the existing client�
 
 - **Admin** manages teachers (activate/deactivate, assign subjects), classes, exams, results, notices.
 - **Teachers** can only see their assigned classes/subjects, create **private class tests** that only they (and admin) can access, enter marks with `edit_until` window and validation, and publish results.
-- **Guardians** see only their own children's data (marks, results, attendance, fees, notifications) — with IDOR protection.
+- **Guardians** see only their own children's data (marks, results, attendance, notifications) — with IDOR protection.
 - **Admin publishes** results school-wide, triggering guardian notifications (push + in-app).
 - Everything protected by JWT auth, `users.active` enforcement, rate limiting, audit logs.
 
@@ -38,13 +38,13 @@ Per the master spec (PDF `nchs_pdf_extract.txt`), integrate the existing client�
 
 ### 2.2 Database — `backend/schema_v6.sql`
 
-- New `fees` table; `exams.status` → `enum('draft','published')`; `exam_shares` table; `notifications` gains `target_type`, `related_id`; `users.active`; seed data in `seed_v5.sql`.
+- `exams.status` → `enum('draft','published')`; `exam_shares` table; `notifications` gains `target_type`, `related_id`; `users.active`; seed data in `seed_v5.sql`.
 - **Demo data seeded via SQL:** published ½-yearly math (exam 2), draft class tests (3, 6), draft bangla (4), published physics (5 — class 10), with 6 marks rows for class-6 students.
 
 ### 2.3 Admin website — `website/admin-site/`
 
 Rebuilt with Vite, then `build` to `dist`:
-- Dashboard/Tabs: teachers, students, notices, exams, results, fees, audit.
+- Dashboard/Tabs: teachers, students, notices, exams, results, audit.
 - **Exams page:** create exams linked to **events** (`/results/events`), publish/unpublish/delete, enter/edit marks with validation.
 - **Notifications page:** create notices targeting all/class/section (class+section pickers with student-count preview).
 - **401 handling:** session expiry clears token automatically (`window.__onSessionExpired`).

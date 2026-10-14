@@ -2,10 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:flutter/foundation.dart' show ValueNotifier;
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
+import 'config.dart';
 
 /// Offline-first layer: persists a GET cache and a mutation outbox to disk.
 /// Every queued change replays the exact same HTTP call once the device is
@@ -16,6 +16,14 @@ class SyncStore extends ChangeNotifier {
 
   final ValueNotifier<bool> online = ValueNotifier(true);
   final ValueNotifier<int> pending = ValueNotifier(0);
+  // True connectivity (wifi/mobile) vs ACTUAL server reachability are
+  // different things: the phone can have internet while the school server
+  // (laptop/tunnel URL) is unreachable. `serverUp` tracks the latter via
+  // lightweight /api/health probes so the UI never shows a misleading
+  // "no internet" message when the internet is fine.
+  final ValueNotifier<bool> serverUp = ValueNotifier(true);
+  DateTime? _lastProbeFail;
+  Future<bool>? _probeFlight;
 
   Map<String, dynamic> _cache = {};
   List<Map<String, dynamic>> _outbox = [];
@@ -25,10 +33,65 @@ class SyncStore extends ChangeNotifier {
   String? _redirectBase;
   Connectivity? _conn;
   String? Function()? tokenProvider;
+  /// Called whenever connectivity returns (offline -> online). Apps use this
+  /// to refresh cached GET data so the latest server data gets stored again.
+  void Function()? onReconnected;
 
   int get pendingCount => _outbox.length;
   List<Map<String, dynamic>> get syncErrors => List.unmodifiable(_errors);
   bool get isSyncing => _syncing;
+
+  bool get isOffline => !online.value;
+
+  /// Server known-down only counts when a probe failed recently (60s),
+  /// so a stale flag can never wedge the app offline forever.
+  bool serverKnownDown() {
+    if (serverUp.value) return false;
+    final f = _lastProbeFail;
+    if (f == null) return false;
+    return DateTime.now().difference(f).inSeconds < 60;
+  }
+
+  /// Lightweight reachability probe. Coalesces concurrent callers into one
+  /// flight. Never throws.
+  Future<bool> probeServer({Duration timeout = const Duration(seconds: 6)}) {
+    if (_probeFlight != null) return _probeFlight!;
+    final fut = _probeServerInner(timeout);
+    _probeFlight = fut;
+    fut.whenComplete(() => _probeFlight = null);
+    return fut;
+  }
+
+  Future<bool> _probeServerInner(Duration timeout) async {
+    try {
+      final res = await http
+          .get(Uri.parse('${Config.api}/health'),
+              headers: const {'ngrok-skip-browser-warning': 'true'})
+          .timeout(timeout);
+      final ok = res.statusCode >= 200 && res.statusCode < 300;
+      _markServer(ok);
+      return ok;
+    } catch (_) {
+      _markServer(false);
+      return false;
+    }
+  }
+
+  void _markServer(bool ok) {
+    if (!ok) {
+      _lastProbeFail = DateTime.now();
+    }
+    if (serverUp.value != ok) {
+      serverUp.value = ok;
+      notifyListeners();
+    }
+  }
+
+  /// Call when a request fails with a network-level error.
+  void markRequestFailed() => _markServer(false);
+
+  /// Call on any successful API response.
+  void markRequestOk() => _markServer(true);
 
   Future<bool> init({String? base}) async {
     if (_inited) return true;
@@ -57,7 +120,10 @@ class SyncStore extends ChangeNotifier {
         r == ConnectivityResult.mobile ||
         r == ConnectivityResult.ethernet ||
         r == ConnectivityResult.vpn);
-    if (online.value && !was && pendingCount > 0) flush();
+    if (online.value && !was) {
+      if (pendingCount > 0) flush();
+      onReconnected?.call();
+    }
   }
 
   Future<void> _load() async {
@@ -83,15 +149,18 @@ class SyncStore extends ChangeNotifier {
     } catch (_) {}
   }
 
-  String _keyOf(String path) => 'GET ' + path.split('?').first;
+  String _keyOf(String path) => 'GET $path';
 
   /// Store a successful GET response for offline reads.
   Future<void> cachePut(String path, dynamic data) async {
     _cache[_keyOf(path)] = data;
+
     if (_cache.length > 80) {
       // drop oldest half by insertion order (dart keeps insertion order)
       final keys = _cache.keys.toList();
-      for (var i = 0; i < keys.length - 60; i++) _cache.remove(keys[i]);
+      for (var i = 0; i < keys.length - 60; i++) {
+        _cache.remove(keys[i]);
+      }
     }
     await _save();
   }
@@ -169,7 +238,14 @@ class SyncStore extends ChangeNotifier {
     final headers = <String, String>{'Content-Type': 'application/json'};
     final tok = await _token();
     if (tok != null) headers['Authorization'] = 'Bearer $tok';
-    final uri = Uri.parse((_redirectBase ?? '') + path);
+    // Always resolve the CURRENT server base (user may change Server URL
+    // in settings after init — never replay to a stale host).
+    String base = '';
+    try {
+      base = Config.api;
+    } catch (_) {}
+    if (base.isEmpty) base = _redirectBase ?? '';
+    final uri = Uri.parse(base + path);
     switch (method) {
       case 'POST':
         return http.post(uri, headers: headers, body: jsonEncode(body ?? {})).timeout(const Duration(seconds: 20));

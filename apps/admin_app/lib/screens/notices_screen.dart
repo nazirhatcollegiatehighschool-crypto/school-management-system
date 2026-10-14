@@ -62,7 +62,7 @@ class _NoticesScreenState extends State<NoticesScreen> {
                 builder: (_, snap) {
                   if (!snap.hasData) return const SizedBox();
                   return DropdownButtonFormField<int>(
-                    value: _classId,
+                    initialValue: _classId,
                     decoration: const InputDecoration(labelText: 'Target', border: OutlineInputBorder()),
                     items: [const DropdownMenuItem(value: null, child: Text('All guardians')),
                       ...snap.data!.map<DropdownMenuItem<int>>((c) =>

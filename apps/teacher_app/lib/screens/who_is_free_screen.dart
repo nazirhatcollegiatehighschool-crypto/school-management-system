@@ -2,21 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../api.dart';
 
-String _slotName(String? raw) {
-  final l = (raw ?? '').trim();
-  final m = RegExp(r'^CLASS_(\d)$', caseSensitive: false).firstMatch(l);
-  if (m != null) {
-    const bn = <String, String>{
-      '1': '\u09E7\u09AE', '2': '\u09E8\u09DF', '3': '\u09E9\u09DF',
-      '4': '\u09EA\u09F0\u09CD\u09A5', '5': '\u09EB\u09AE',
-      '6': '\u09EC\u09B7\u09CD\u09A0', '7': '\u09ED\u09AE',
-    };
-    return '${bn[m.group(1)!] ?? m.group(1)} Period';
-  }
-  if (l.toLowerCase() == 'assembly') return '\u09B8\u09AE\u09BE\u09AC\u09C7\u09B6';
-  if (l.toLowerCase() == 'leisure') return '\u0985\u09AC\u09B8\u09B0';
-  return raw?.toString() ?? '';
-}
 String _slotDisplayName(String? l0) {
   final l = (l0 ?? '').toString().trim();
   final m = RegExp(r'^CLASS_(\d)$', caseSensitive: false).firstMatch(l);
@@ -48,16 +33,19 @@ class _WhoIsFreeScreenState extends State<WhoIsFreeScreen> {
   void initState() { super.initState(); _load(); }
 
   Future<void> _load() async {
-    setState(() { _loading = true; _error = null; });
+    if (_teachers.isEmpty) setState(() { _loading = true; _error = null; });
     try {
-      final r = await Api.get('/teacher/directory');
-      setState(() {
-        _bdTime = r['bd_time'] ?? '';
-        _day = r['day'] != null ? const ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][r['day']] : '';
-        _teachers = r['teachers'] is List ? r['teachers'] : [];
-        _loading = false;
+      await Api.loadCachedFirst('/teacher/directory', (r) {
+        if (!mounted || r is! Map) return;
+        setState(() {
+          _bdTime = r['bd_time'] ?? '';
+          _day = r['day'] != null ? const ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][r['day']] : '';
+          _teachers = r['teachers'] is List ? r['teachers'] : [];
+          _loading = false;
+        });
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() { _error = e.toString().replaceFirst('Exception: ', ''); _loading = false; });
     }
   }

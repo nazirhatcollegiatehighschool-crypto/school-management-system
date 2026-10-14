@@ -9,8 +9,8 @@ class CreateExamScreen extends StatefulWidget {
 }
 
 class _CreateExamScreenState extends State<CreateExamScreen> {
-  final _name = TextEditingController();
-  String _type = 'class_test';
+  final TextEditingController _name = TextEditingController();
+  final String _type = 'class_test';
   int? _subjectId;
   DateTime? _date;
   List _subjects = [];
@@ -20,7 +20,11 @@ class _CreateExamScreenState extends State<CreateExamScreen> {
   @override
   void initState() {
     super.initState();
-    Api.get('/teacher/subjects').then((r) => setState(() => _subjects = r)).catchError((e) {
+    Api.loadCachedFirst('/teacher/subjects', (r) {
+      if (!mounted) return;
+      setState(() => _subjects = r is List ? r : []);
+    }).catchError((e) {
+      if (!mounted) return;
       setState(() => _error = e.toString().replaceFirst('Exception: ', ''));
     });
   }
@@ -43,7 +47,7 @@ class _CreateExamScreenState extends State<CreateExamScreen> {
     final subj = _subjects.firstWhere((s) => s['id'] == _subjectId);
     setState(() { _saving = true; _error = null; });
     try {
-      await Api.post('/teacher/exams', {
+      final r = await Api.post('/teacher/exams', {
         'name': _name.text.trim(),
         'exam_type': _type,
         'class_id': subj['class_id'],
@@ -51,6 +55,13 @@ class _CreateExamScreenState extends State<CreateExamScreen> {
         'exam_date': _date?.toIso8601String().substring(0, 10),
       });
       if (!mounted) return;
+      if (Api.isQueued(r)) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            backgroundColor: Colors.orange,
+            content: Text('ইন্টারনেট নেই — exam ফোনে সেভ আছে, online হলেই তৈরি হবে')));
+        Navigator.pop(context);
+        return;
+      }
       ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Exam created! এখন marks দিতে পারেন।')));
       Navigator.pop(context);

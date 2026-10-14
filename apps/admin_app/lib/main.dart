@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'api.dart';
+import 'app_theme.dart';
+import 'config.dart';
 import 'screens/splash_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Config.loadOverride(); // LAN/tunnel URL saved from Server settings
   try { await Firebase.initializeApp(); } catch (_) {}
   await Api.init(); // offline cache + outbox + auto-sync
   runApp(const AdminApp());
@@ -18,10 +21,7 @@ class AdminApp extends StatelessWidget {
     return MaterialApp(
       title: 'School Admin',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
-        useMaterial3: true,
-      ),
+      theme: AppTheme.light(),
       home: const SplashScreen(),
     );
   }

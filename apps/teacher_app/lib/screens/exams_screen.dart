@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import 'exam_detail_screen.dart';
 import 'create_exam_screen.dart';
+import 'event_list_screen.dart';
 
 class ExamsScreen extends StatefulWidget {
   final dynamic teacher;
@@ -14,7 +15,7 @@ class ExamsScreenState extends State<ExamsScreen> {
   List _exams = [];
   bool _loading = true;
   String? _error;
-  String _filter = 'all';
+  String _filter = 'mine-subj';
 
   @override
   void initState() { super.initState(); _load(); }
@@ -22,11 +23,14 @@ class ExamsScreenState extends State<ExamsScreen> {
   Future<void> reload() => _load();
 
   Future<void> _load() async {
-    setState(() { _loading = true; _error = null; });
+    if (_exams.isEmpty) setState(() { _loading = true; _error = null; });
     try {
-      final r = await Api.get('/teacher/exams');
-      setState(() { _exams = r; _loading = false; });
+      await Api.loadCachedFirst('/teacher/exams', (r) {
+        if (!mounted) return;
+        setState(() { _exams = r is List ? r : []; _loading = false; });
+      });
     } catch (e) {
+      if (!mounted) return;
       setState(() { _error = e.toString().replaceFirst('Exception: ', ''); _loading = false; });
     }
   }
@@ -34,7 +38,9 @@ class ExamsScreenState extends State<ExamsScreen> {
   List get _filtered {
     if (_filter == 'admin') return _exams.where((e) => e['source'] == 'admin').toList();
     if (_filter == 'mine') return _exams.where((e) => e['is_mine'] == 1).toList();
-    return _exams;
+    // Default: only exams of MY assigned subjects (+ my own created tests).
+    // Unassigned / previously-removed subjects never show up here.
+    return _exams.where((e) => e['subject_mine'] == 1 || e['is_mine'] == 1).toList();
   }
 
   @override
@@ -61,10 +67,21 @@ class ExamsScreenState extends State<ExamsScreen> {
                   FilledButton.tonal(onPressed: _load, child: const Text('আবার চেষ্টা করুন')),
                 ]))
               : Column(children: [
+                  Padding(padding: const EdgeInsets.fromLTRB(12, 12, 12, 0), child: Card(
+                    color: Colors.indigo.shade50,
+                    child: ListTile(
+                      leading: const Icon(Icons.assessment_outlined, color: Colors.indigo),
+                      title: const Text('Exam Events & Results', style: TextStyle(fontWeight: FontWeight.bold)),
+                      subtitle: const Text('Published সহ সব event • coverage • seat/admit PDF', style: TextStyle(fontSize: 12)),
+                      trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                      onTap: () => Navigator.push(context, MaterialPageRoute(
+                          builder: (_) => EventListScreen(teacher: widget.teacher))),
+                    ),
+                  )),
                   Padding(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                     child: SegmentedButton<String>(
                       segments: const [
-                        ButtonSegment(value: 'all', label: Text('সব')),
+                        ButtonSegment(value: 'mine-subj', label: Text('আমার Subject')),
                         ButtonSegment(value: 'admin', label: Text('Admin Exam')),
                         ButtonSegment(value: 'mine', label: Text('আমার Test')),
                       ],
@@ -74,22 +91,29 @@ class ExamsScreenState extends State<ExamsScreen> {
                   Expanded(child: _filtered.isEmpty
                     ? Center(child: Padding(padding: const EdgeInsets.all(24),
                         child: Text(_filter == 'admin'
-                            ? 'কোনো admin exam নেই।\n\nপ্রশাসনিক (admin-created) exam শুধুমাত্র সেই class-এর designated Class Teacher-ই দেখতে ও মার্কস দিতে পারেন।'
+                            ? 'কোনো admin exam নেই।\n\nপ্রশাসনিক (admin-created) exam সেই class-এর Class Teacher এবং assigned subject teacher-রা দেখতে ও মার্কস দিতে পারেন।'
                             : 'কোনো exam নেই।', textAlign: TextAlign.center, style: const TextStyle(color: Colors.grey, height: 1.5))))
                     : ListView.builder(
                         padding: const EdgeInsets.all(12),
                         itemCount: _filtered.length,
                         itemBuilder: (_, i) {
                           final e = _filtered[i];
+                          final open = (e['entry_open'] as num?)?.toInt() ?? 1;
+                          final isPub = e['status'] == 'published';
+                          final dead = e['entry_deadline']?.toString();
+                          final closed = isPub || open == 0;
                         return Card(
                           child: ListTile(
                             title: Row(children: [
                               Expanded(child: Text(e['name'])),
-                              if (e['status'] == 'published')
+                              if (isPub)
                                 const Chip(backgroundColor: Colors.green, label: Text('Published', style: TextStyle(color: Colors.white, fontSize: 10)))
+                              else if (open == 0)
+                                const Chip(backgroundColor: Colors.red, label: Text('Entry বন্ধ', style: TextStyle(color: Colors.white, fontSize: 10))),
                             ]),
                             subtitle: Text(
-                                '${e['subject_name']} • ${e['class_name']} (${e['section']}) • ${e['exam_type'].toString().replaceAll('_', ' ')}'),
+                                '${e['subject_name']} • ${e['class_name']} (${e['section']}) • ${e['exam_type'].toString().replaceAll('_', ' ')}'
+                                '${(!isPub && dead != null && dead.isNotEmpty && dead != 'null') ? '\n⏰ Deadline: ${dead.toString().replaceAll('T', ' ').substring(0, 16)} পর্যন্ত' : ''}'),
                             trailing: e['source'] == 'teacher'
                                 ? PopupMenuButton<String>(
                                     itemBuilder: (_) => [
@@ -103,33 +127,35 @@ class ExamsScreenState extends State<ExamsScreen> {
                                     ],
                                     onSelected: (v) async {
                                       if (v == 'delete') {
-                                        final ok = await showDialog<bool>(
-                                            context: context,
-                                            builder: (c) => AlertDialog(
-                                              title: const Text('Exam ডিলিট করবেন?'),
-                                              content: Text('"${e['name']}" মুছে ফেলা হবে — undo করা যাবে না।'),
-                                              actions: [
-                                                TextButton(
-                                                    onPressed: () => Navigator.pop(c, false),
-                                                    child: const Text('বাতিল')),
-                                                FilledButton(
-                                                    style: FilledButton.styleFrom(backgroundColor: Colors.red),
-                                                    onPressed: () => Navigator.pop(c, true),
-                                                    child: const Text('ডিলিট')),
-                                              ],
-                                            ));
-                                        if (ok == true) {
-                                          try {
-                                            await Api.delete('/teacher/exams/${e['id']}');
-                                            if (!mounted) return;
-                                            ScaffoldMessenger.of(context).showSnackBar(
-                                                const SnackBar(content: Text('Exam ডিলিট হয়েছে'))RI
-                                            _load();
-                                          } catch (ex) {
-                                            if (!mounted) return;
-                                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                                                content: Text('ডিলিট ব্যর্থ: ${ex.toString().replaceFirst('Exception: ', '')}')RI
-                                        }
+                                            final dialogCtx = context;
+                                            final ok = await showDialog<bool>(
+                                                context: dialogCtx,
+                                                builder: (c) => AlertDialog(
+                                                  title: const Text('Exam ডিলিট করবেন?'),
+                                                  content: Text('"${e['name']}" মুছে ফেলা হবে — undo করা যাবে না।'),
+                                                  actions: [
+                                                    TextButton(
+                                                        onPressed: () => Navigator.pop(c, false),
+                                                        child: const Text('বাতিল')),
+                                                    FilledButton(
+                                                        style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                                                        onPressed: () => Navigator.pop(c, true),
+                                                        child: const Text('ডিলিট')),
+                                                  ],
+                                                ));
+                                            if (ok == true) {
+                                              try {
+                                                await Api.delete('/teacher/exams/${e['id']}');
+                                                if (!context.mounted) return;
+                                                ScaffoldMessenger.of(dialogCtx).showSnackBar(
+                                                    const SnackBar(content: Text('Exam ডিলিট হয়েছে')));
+                                                _load();
+                                              } catch (ex) {
+                                                if (!context.mounted) return;
+                                                ScaffoldMessenger.of(dialogCtx).showSnackBar(SnackBar(
+                                                    content: Text('ডিলিট ব্যর্থ: ${ex.toString().replaceFirst('Exception: ', '')}')));
+                                              }
+                                            }
                                       }
                                     },
                                   )

@@ -46,6 +46,7 @@ Future<void> unregisterDeviceToken() async {
 
 /// Returns payload data map when a message is tapped (for deep linking).
 void handleForegroundMessages(BuildContext context, void Function(Map<String, dynamic>) onTap) {
+  final messenger = ScaffoldMessenger.of(context);
   FirebaseMessaging.onMessage.listen((msg) {
     final snackBar = SnackBar(
       content: Text(msg.notification?.title ?? 'নতুন notification'),
@@ -54,7 +55,7 @@ void handleForegroundMessages(BuildContext context, void Function(Map<String, dy
         onPressed: () => onTap(msg.data),
       ),
     );
-    ScaffoldMessenger.of(context).showSnackBar(snackBar);
+    messenger.showSnackBar(snackBar);
   });
   FirebaseMessaging.onMessageOpenedApp.listen((msg) => onTap(msg.data));
 }

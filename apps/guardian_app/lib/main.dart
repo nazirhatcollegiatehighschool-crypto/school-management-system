@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'api.dart';
+import 'app_theme.dart';
+import 'config.dart';
 import 'fcm_service.dart';
 import 'screens/splash_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Config.loadOverride(); // LAN/tunnel URL saved from Server settings
   await Api.init(); // offline cache + outbox + auto-sync
   await initFirebase();
   runApp(const GuardianApp());
@@ -18,10 +21,7 @@ class GuardianApp extends StatelessWidget {
     return MaterialApp(
       title: 'Guardian App',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
-        useMaterial3: true,
-      ),
+      theme: AppTheme.light(),
       home: const SplashScreen(),
     );
   }

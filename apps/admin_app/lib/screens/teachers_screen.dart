@@ -53,10 +53,11 @@ class _TeachersScreenState extends State<TeachersScreen> {
     String? clsName;
     String? sec;
 
+    final sheetCtx = context;
     await showModalBottomSheet(
-      context: context, isScrollControlled: true, isDismissible: false,
+      context: sheetCtx, isScrollControlled: true, isDismissible: false,
       builder: (_) => Padding(
-        padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+        padding: EdgeInsets.only(bottom: MediaQuery.of(sheetCtx).viewInsets.bottom),
         child: Padding(
           padding: const EdgeInsets.all(20),
           child: StatefulBuilder(builder: (context, setSheet) {
@@ -74,14 +75,14 @@ class _TeachersScreenState extends State<TeachersScreen> {
               Text('${t['name']} — subject assign করুন', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
               const SizedBox(height: 12),
               DropdownButtonFormField<String?>(
-                value: clsName,
+                initialValue: clsName,
                 decoration: const InputDecoration(labelText: 'Step 1 — Class', border: OutlineInputBorder()),
                 items: [for (final n in classNames) DropdownMenuItem(value: n, child: Text(n))],
                 onChanged: (v) => setSheet(() { clsName = v; sec = null; }),
               ),
               const SizedBox(height: 10),
               DropdownButtonFormField<String?>(
-                value: sec,
+                initialValue: sec,
                 decoration: InputDecoration(labelText: isGroup ? 'Step 2 — Group' : 'Step 2 — Section', border: const OutlineInputBorder()),
                 items: [for (final s in secOpts) DropdownMenuItem(value: s, child: Text(s))],
                 onChanged: (v) => setSheet(() => sec = v),
@@ -108,6 +109,7 @@ class _TeachersScreenState extends State<TeachersScreen> {
               Text('Selected: ${picked.length} subjects', style: const TextStyle(fontSize: 12)),
               const SizedBox(height: 10),
               FilledButton(onPressed: () async {
+                final navCtx = sheetCtx;
                 try {
                   for (final s in _subjects) {
                     final should = picked.contains(s['id']);
@@ -125,14 +127,14 @@ class _TeachersScreenState extends State<TeachersScreen> {
                       'sort_order': s['sort_order'],
                     });
                   }
-                  if (!mounted) return;
-                  Navigator.pop(context);
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  if (!navCtx.mounted) return;
+                  Navigator.pop(navCtx);
+                  ScaffoldMessenger.of(navCtx).showSnackBar(
                       const SnackBar(content: Text('Subject assignment updated'), backgroundColor: Colors.green));
                   _load();
                 } catch (e) {
-                  if (!mounted) return;
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  if (!navCtx.mounted) return;
+                  ScaffoldMessenger.of(navCtx).showSnackBar(SnackBar(
                       backgroundColor: Colors.red,
                       content: Text(e.toString().replaceFirst('Exception: ', ''))));
                 }
@@ -149,10 +151,11 @@ class _TeachersScreenState extends State<TeachersScreen> {
     String? clsName;
     String? sec;
 
+    final ctCtx = context;
     await showModalBottomSheet(
-      context: context, isScrollControlled: true, isDismissible: false,
+      context: ctCtx, isScrollControlled: true, isDismissible: false,
       builder: (_) => Padding(
-        padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctCtx).viewInsets.bottom),
         child: Padding(
           padding: const EdgeInsets.all(20),
           child: StatefulBuilder(builder: (context, setSheet) {
@@ -168,14 +171,14 @@ class _TeachersScreenState extends State<TeachersScreen> {
               Text('${t['name']} — class teacher assign করুন', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
               const SizedBox(height: 12),
               DropdownButtonFormField<String?>(
-                value: clsName,
+                initialValue: clsName,
                 decoration: const InputDecoration(labelText: 'Step 1 — Class', border: OutlineInputBorder()),
                 items: [for (final n in classNames) DropdownMenuItem(value: n, child: Text(n))],
                 onChanged: (v) => setSheet(() { clsName = v; sec = null; }),
               ),
               const SizedBox(height: 10),
               DropdownButtonFormField<String?>(
-                value: sec,
+                initialValue: sec,
                 decoration: InputDecoration(labelText: isGroup ? 'Step 2 — Group' : 'Step 2 — Section', border: const OutlineInputBorder()),
                 items: [for (final s in secOpts) DropdownMenuItem(value: s, child: Text(s))],
                 onChanged: (v) => setSheet(() => sec = v),
@@ -208,19 +211,20 @@ class _TeachersScreenState extends State<TeachersScreen> {
               const SizedBox(height: 16),
               FilledButton(
                 onPressed: () async {
+                  final navCtx2 = ctCtx;
                   try {
                     await Api.put('/admin/teachers/${t['id']}', {
                       'name': t['name'], 'username': t['username'],
                       'class_teacher': picked.toList(),
                     });
-                    if (!mounted) return;
-                    Navigator.pop(context);
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    if (!navCtx2.mounted) return;
+                    Navigator.pop(navCtx2);
+                    ScaffoldMessenger.of(navCtx2).showSnackBar(
                         const SnackBar(content: Text('Class teacher assignment updated'), backgroundColor: Colors.green));
                     _load();
                   } catch (e) {
-                    if (!mounted) return;
-                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                    if (!navCtx2.mounted) return;
+                    ScaffoldMessenger.of(navCtx2).showSnackBar(SnackBar(
                         backgroundColor: Colors.red,
                         content: Text(e.toString().replaceFirst('Exception: ', ''))));
                   }

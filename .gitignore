@@ -1,4 +1,7 @@
-# ---- build / generated ----
+# ---- code-only push: binaries, local data, secrets NEVER pushed ----
+*.apk
+apks/
+backend/apks/
 **/build/
 node_modules/
 .gradle/
@@ -11,28 +14,43 @@ dist/
 coverage/
 *.log
 
-# ---- SECRETS ----
-backend/_mig_config.txt
-backend/**/*_config*.txt
-backend/RUN_PG_MIGRATION*.py
-backend/RUN_MIGRATION_NOW.py
-backend/make_then_run_migration.py
-backend_PG_MIG_RUN_1.py
-backend/THEREAL_MIG.py
-backend/_pg_*.py
-backend/_RUN_PG*.py
-backend/_mig_*.py
-backend/RUN_MIGRATION*.py
-backend/run_pg*.py
-backend/_mig_config.txt
-backend/*.pem
-backend/*.key
+# secrets
 .env
 backend/.env
+backend/.env.*
 apps/**/.env
 *.env.local
+backend/firebase-service-account.json
+backend/*.pem
+backend/*.key
+**/google-services.json
+**/GoogleService-Info.plist
+backend/_mig_config.txt
+backend/**/*_config*.txt
 
-# ---- scratch ----
+# local runtime / data / uploads
+db/
+runtime/
+logs/
+bin/
+tmp/
+tmp_scratch_20240918/
+backend/uploads/
+server.local.log
+
+# scratch / tmp scripts
+backend/tmp*.py
+backend/tmp*.js
+backend/_tmp*.py
+backend/_cols.js
+backend/_copy_live_to_local.js
+backend/_e2e_exam_lifecycle.js
+backend/_gen_local_schema.js
+backend/_inspect_*.js
+backend/_mig_cols.js
+backend/_peek_live.js
+backend/_run_import.js
+backend/_schema.js
 backend/make_migration*.py
 backend/rebuild_migration*.py
 backend/fix_migration*.py
@@ -41,15 +59,18 @@ backend/finalize_migration*.py
 backend/emit_final*.py
 backend/guard_all*.py
 backend/verify_*.py
-backend/tmp*.py
-backend/_tmp*.py
+backend/RUN_MIGRATION*.py
+backend/run_pg*.py
+backend/RUN_PG_MIGRATION*.py
+backend/make_then_run_migration.py
+backend_PG_MIG_RUN_1.py
+backend/THEREAL_MIG.py
+backend/_pg_*.py
+backend/_RUN_PG*.py
+backend/_mig_*.py
+backend/RUN_MIGRATION_NOW.py
 
-# ---- OS ----
+# OS
 Thumbs.db
 Desktop.ini
 .DS_Store
-
-# hardcoded-DB-credential-runner-গুলো (নিজস্ব-SUPABASE_DB_PASSWORD-env-ভেরিয়েবল-থাকায়-push-না)
-backend/RUN_MIGRATION_NOW.py
-backend/make_then_run_migration.py
-backend_PG_MIG_RUN_1.py
