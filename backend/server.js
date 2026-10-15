@@ -70,6 +70,25 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
+// Debug endpoint to check admin password
+app.get('/api/debug/admin-password', async (req, res) => {
+  try {
+    const bcrypt = require('bcrypt');
+    const [rows] = await pool.query('SELECT username, role, password_hash FROM users WHERE username = $1', ['admin']);
+    if (rows.length === 0) return res.json({ error: 'Admin user not found' });
+    const user = rows[0];
+    const ok = await bcrypt.compare('admin123', user.password_hash);
+    res.json({ 
+      username: user.username, 
+      role: user.role, 
+      hash: user.password_hash.substring(0, 20) + '...',
+      passwordMatch: ok 
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Auto-fix admin password on startup (for Supabase)
 async function ensureAdminPassword() {
   try {
