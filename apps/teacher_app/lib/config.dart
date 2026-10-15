@@ -4,7 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// runtime-overridable from the app's Server settings (survives restarts,
 /// so LAN IP / tunnel URL changes never need a rebuild).
 class Config {
-  static const String _defined = String.fromEnvironment('API_URL', defaultValue: 'https://school-management-system-5jqj.onrender.com');
+  static const String _defined = String.fromEnvironment('API_URL', defaultValue: 'https://school-management-system-brown-mu.vercel.app');
   static String _override = '';
 
   static String get serverUrl => _override.isNotEmpty ? _override : _defined;
