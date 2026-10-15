@@ -10,7 +10,7 @@ datasource db {
 model users {
   id            Int       @id @default(autoincrement())
   role          String    @db.VarChar(20)
-  username      String    @unique @db.VarChar(50)
+  username      String    @unique(map: "users_username_unique") @db.VarChar(50)
   password_hash String    @db.VarChar(255)
   name          String    @db.VarChar(100)
   email         String?   @db.VarChar(100)
@@ -23,7 +23,6 @@ model users {
   signature     String?   @db.VarChar(255)
   signature_name String?  @db.VarChar(100)
 
-  @@unique([username])
 }
 
 model sessions {
@@ -72,7 +71,7 @@ model subjects {
 
 model students {
   id             Int       @id @default(autoincrement())
-  student_code   String    @unique @db.VarChar(20)
+  student_code   String    @unique(map: "students_student_code_unique") @db.VarChar(20)
   name           String    @db.VarChar(100)
   dob            DateTime? @db.Date
   roll           Int
@@ -98,7 +97,6 @@ model students {
   email          String?   @db.VarChar(100)
 
   @@unique([class_id, roll])
-  @@unique([student_code])
   @@index([guardian_id])
 }
 
