@@ -290,7 +290,7 @@ if (require.main === module) {
   const PORT = process.env.PORT || 5000;
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`School API running on http://0.0.0.0:${PORT}`);
-    startAlertService();
+    try { startAlertService(); } catch (e) { console.warn('alert service:', e.message); }
   });
 }
 
