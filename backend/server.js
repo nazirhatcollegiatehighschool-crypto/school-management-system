@@ -138,8 +138,12 @@ app.post('/api/admin/migrate', async (req, res) => {
     
     // After migration, ensure admin password
     const bcrypt = require('bcrypt');
-    const hash = await bcrypt.hash('admin123', 10);
+    const adminHash = await bcrypt.hash('admin123', 10);
     await pool.query('UPDATE users SET password_hash = $1 WHERE username = $2 AND role = \'admin\'', ['$2b$10$AlHU/9JID1zHIt//kwlmC.paHhWDJ1MEi7/hn5IPz0fvo20Yp/UeC', 'admin']);
+    
+    // Also ensure Liakat Hossain Jewel password
+    const liakatHash = await bcrypt.hash('admin123', 10);
+    await pool.query('UPDATE users SET password_hash = $1 WHERE username = $2', [liakatHash, 'liakat']);
     
     res.json({ success: true, executed: success, errors });
   } catch (err) {
