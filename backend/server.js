@@ -52,6 +52,15 @@ app.get('/', (req, res) => {
   });
 });
 
+// Ping endpoint for keep-alive (prevents Render free tier spin-down)
+app.get('/ping', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    message: 'Server is awake',
+    timestamp: new Date().toISOString()
+  });
+});
+
 app.get('/api/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
@@ -60,6 +69,23 @@ app.get('/api/health', async (req, res) => {
     res.status(500).json({ status: 'error', db: e.message });
   }
 });
+
+// Auto-fix admin password on startup (for Supabase)
+async function ensureAdminPassword() {
+  try {
+    const bcrypt = require('bcrypt');
+    const correctHash = await bcrypt.hash('admin123', 10);
+    await pool.query(
+      `UPDATE users SET password_hash = $1 WHERE username = $2 AND role = 'admin'`,
+      [correctHash, 'admin']
+    );
+    console.log('✅ Admin password ensured on startup');
+  } catch (err) {
+    console.error('⚠️ Could not ensure admin password:', err.message);
+  }
+}
+
+ensureAdminPassword();
 
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/admin', require('./routes/admin'));
