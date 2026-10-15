@@ -106,6 +106,48 @@ async function ensureAdminPassword() {
 
 ensureAdminPassword();
 
+// One-time migration endpoint (no auth for initial setup)
+app.post('/api/admin/migrate', async (req, res) => {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    
+    // Read the Supabase migration SQL
+    const migrationPath = path.join(__dirname, 'supabase_migration_full_fully_idempotent_FINAL.sql');
+    if (!fs.existsSync(migrationPath)) {
+      return res.status(404).json({ error: 'Migration file not found' });
+    }
+    
+    const sql = fs.readFileSync(migrationPath, 'utf8');
+    const statements = sql.split(';').filter(s => s.trim() && !s.trim().startsWith('--'));
+    
+    let success = 0, errors = 0;
+    for (const stmt of statements) {
+      try {
+        if (stmt.trim()) {
+          await pool.query(stmt.trim());
+          success++;
+        }
+      } catch (err) {
+        if (!err.message.includes('already exists') && !err.message.includes('duplicate')) {
+          console.error('Migration error:', err.message.substring(0, 100));
+          errors++;
+        }
+      }
+    }
+    
+    // After migration, ensure admin password
+    const bcrypt = require('bcrypt');
+    const hash = await bcrypt.hash('admin123', 10);
+    await pool.query('UPDATE users SET password_hash = $1 WHERE username = $2 AND role = \'admin\'', ['$2b$10$AlHU/9JID1zHIt//kwlmC.paHhWDJ1MEi7/hn5IPz0fvo20Yp/UeC', 'admin']);
+    
+    res.json({ success: true, executed: success, errors });
+  } catch (err) {
+    console.error('Migration error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/teacher', require('./routes/teacher'));
