@@ -104,7 +104,7 @@ async function ensureAdminPassword() {
   }
 }
 
-ensureAdminPassword();
+try { ensureAdminPassword(); } catch (e) { console.warn('ensureAdminPassword skipped:', e.message); }
 
 // One-time migration endpoint (no auth for initial setup)
 app.post('/api/admin/migrate', async (req, res) => {
