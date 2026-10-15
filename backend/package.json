@@ -7,7 +7,7 @@
                     "start":  "node server.js",
                     "lint":  "node lint.js",
                     "postinstall":  "prisma generate",
-                    "build":  "prisma generate \u0026\u0026 node server.js --help 2\u003e/dev/null || echo \u0027ready\u0027"
+                    "build":  "prisma generate \u0026\u0026 node server.js"
                 },
     "dependencies":  {
                          "@prisma/client":  "^7.10.0",
