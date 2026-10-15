@@ -1,28 +1,19 @@
 {
-  "version": 2,
-  "crons": [
-    { "path": "/api/cron/routine-alerts", "schedule": "10 4 * * 0,1,2,3,4" },
-    { "path": "/api/cron/routine-alerts", "schedule": "15 4 * * 0,1,2,3,4" },
-    { "path": "/api/cron/routine-alerts", "schedule": "55 4 * * 0,1,2,3,4" },
-    { "path": "/api/cron/routine-alerts", "schedule": "0 5 * * 0,1,2,3,4" },
-    { "path": "/api/cron/routine-alerts", "schedule": "40 5 * * 0,1,2,3,4" },
-    { "path": "/api/cron/routine-alerts", "schedule": "45 5 * * 0,1,2,3,4" },
-    { "path": "/api/cron/routine-alerts", "schedule": "25 6 * * 0,1,2,3,4" },
-    { "path": "/api/cron/routine-alerts", "schedule": "30 6 * * 0,1,2,3,4" },
-    { "path": "/api/cron/routine-alerts", "schedule": "55 7 * * 0,1,2,3,4" },
-    { "path": "/api/cron/routine-alerts", "schedule": "0 8 * * 0,1,2,3,4" },
-    { "path": "/api/cron/routine-alerts", "schedule": "35 8 * * 0,1,2,3,4" },
-    { "path": "/api/cron/routine-alerts", "schedule": "40 8 * * 0,1,2,3,4" },
-    { "path": "/api/cron/routine-alerts", "schedule": "15 9 * * 0,1,2,3,4" },
-    { "path": "/api/cron/routine-alerts", "schedule": "20 9 * * 0,1,2,3,4" }
-  ],
-  "builds": [
-    { "src": "api/index.js", "use": "@vercel/node" }
-  ],
-  "routes": [
-    { "src": "/api/(.*)", "dest": "api/index.js" },
-    { "src": "/apks/(.*)", "dest": "api/index.js" },
-    { "src": "/uploads/(.*)", "dest": "api/index.js" },
-    { "src": "/(.*)", "dest": "api/index.js" }
-  ]
+    "builds":  [
+                   {
+                       "src":  "api/index.js",
+                       "use":  "@vercel/node"
+                   }
+               ],
+    "routes":  [
+                   {
+                       "src":  "/api/(.*)",
+                       "dest":  "api/index.js"
+                   },
+                   {
+                       "src":  "/(.*)",
+                       "dest":  "api/index.js"
+                   }
+               ],
+    "version":  2
 }

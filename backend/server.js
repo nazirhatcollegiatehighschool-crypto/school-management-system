@@ -43,28 +43,18 @@ app.use('/api/auth/guardian-login', loginLimiter);
 
 // Root route for Render health checks
 app.get('/', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    message: 'School Management System API is running',
-    version: '1.0.0',
-    timestamp: new Date().toISOString(),
-    docs: 'https://school-management-system-5jqj.onrender.com/api/health'
-  });
+  res.json({ message: "School Management API is running" });
 });
 
 // Ping endpoint for keep-alive (prevents Render free tier spin-down)
 app.get('/ping', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    message: 'Server is awake',
-    timestamp: new Date().toISOString()
-  });
+  res.json({ message: "School Management API is running" });
 });
 
 app.get('/api/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
-    res.json({ status: 'ok', db: 'connected' });
+    res.json({ message: "School Management API is running" });
   } catch (e) {
     res.status(500).json({ status: 'error', db: e.message });
   }
@@ -78,12 +68,7 @@ app.get('/api/debug/admin-password', async (req, res) => {
     if (rows.length === 0) return res.json({ error: 'Admin user not found' });
     const user = rows[0];
     const ok = await bcrypt.compare('admin123', user.password_hash);
-    res.json({ 
-      username: user.username, 
-      role: user.role, 
-      hash: user.password_hash.substring(0, 20) + '...',
-      passwordMatch: ok 
-    });
+    res.json({ message: "School Management API is running" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -145,7 +130,7 @@ app.post('/api/admin/migrate', async (req, res) => {
     const liakatHash = await bcrypt.hash('admin123', 10);
     await pool.query('UPDATE users SET password_hash = $1 WHERE username = $2', [liakatHash, 'liakat']);
     
-    res.json({ success: true, executed: success, errors });
+    res.json({ message: "School Management API is running" });
   } catch (err) {
     console.error('Migration error:', err);
     res.status(500).json({ error: err.message });
@@ -165,7 +150,7 @@ const { runRoutineAlertCheck, startAlertService } = require('./routine_alerts');
 app.get('/api/cron/routine-alerts', async (req, res) => {
   try {
     const summary = await runRoutineAlertCheck();
-    res.json({ ok: true, ...summary });
+    res.json({ message: "School Management API is running" });
   } catch (e) {
     console.error('routine-alert cron error:', e.message);
     res.status(500).json({ error: 'alert check failed' });
@@ -181,7 +166,7 @@ app.get('/api/admin/sync/schema', async (req, res) => {
   try {
     await syncSystem.initialize();
     await syncSystem.syncSchemas();
-    res.json({ status: 'ok', message: 'Schema sync completed' });
+    res.json({ message: "School Management API is running" });
   } catch (error) {
     res.status(500).json({ status: 'error', message: error.message });
   }
@@ -191,7 +176,7 @@ app.get('/api/admin/sync/backup', async (req, res) => {
   try {
     await syncSystem.initialize();
     const backupPath = await syncSystem.backupSupabaseData();
-    res.json({ status: 'ok', backupPath, message: 'Backup completed' });
+    res.json({ message: "School Management API is running" });
   } catch (error) {
     res.status(500).json({ status: 'error', message: error.message });
   }
