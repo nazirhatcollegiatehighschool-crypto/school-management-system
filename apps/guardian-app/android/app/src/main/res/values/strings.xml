@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Guardian App</string>
+    <string name="title_activity_main">Guardian App</string>
+    <string name="package_name">com.school.guardian</string>
+    <string name="custom_url_scheme">com.school.guardian</string>
+</resources>

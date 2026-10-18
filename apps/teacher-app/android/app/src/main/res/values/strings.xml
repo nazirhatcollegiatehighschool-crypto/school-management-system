@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Teacher App</string>
+    <string name="title_activity_main">Teacher App</string>
+    <string name="package_name">com.school.teacher</string>
+    <string name="custom_url_scheme">com.school.teacher</string>
+</resources>

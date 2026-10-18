@@ -1,0 +1,5 @@
+{
+  "appId": "com.school.admin",
+  "appName": "Admin Panel",
+  "webDir": "dist"
+}
