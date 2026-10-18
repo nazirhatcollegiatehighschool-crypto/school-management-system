@@ -1,33 +1,33 @@
 {
-    "name":  "school-backend",
-    "version":  "1.0.0",
-    "description":  "School management system REST API",
-    "main":  "server.js",
-    "scripts":  {
-                    "start":  "node server.js",
-                    "lint":  "node lint.js",
-                    "postinstall":  "prisma generate",
-                    "build":  "prisma generate"
-                },
-    "dependencies":  {
-                         "@prisma/client":  "^7.10.0",
-                         "bcrypt":  "^6.0.0",
-                         "bcryptjs":  "^2.4.3",
-                         "cors":  "^2.8.5",
-                         "dotenv":  "^17.4.2",
-                         "express":  "^4.19.2",
-                         "express-rate-limit":  "^8.6.2",
-                         "firebase-admin":  "^14.3.0",
-                         "helmet":  "^8.3.0",
-                         "jsonwebtoken":  "^9.0.2",
-                         "multer":  "^2.2.0",
-                         "mysql2":  "^3.11.0",
-                         "node-cron":  "^4.6.0",
-                         "pdfkit":  "^0.15.2",
-                         "pg":  "^8.23.0",
-                         "sharp":  "^0.35.5"
-                     },
-    "devDependencies":  {
-                            "prisma":  "^6.19.3"
-                        }
+  "name": "school-backend",
+  "version": "1.0.0",
+  "description": "School management system REST API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "lint": "node lint.js",
+    "postinstall": "prisma generate",
+    "build": "prisma generate && node api/index.js"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "bcrypt": "^6.0.0",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^4.19.2",
+    "express-rate-limit": "^8.6.2",
+    "firebase-admin": "^14.3.0",
+    "helmet": "^8.3.0",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.2.0",
+    "mysql2": "^3.11.0",
+    "node-cron": "^4.6.0",
+    "pdfkit": "^0.15.2",
+    "pg": "^8.23.0",
+    "sharp": "^0.35.5"
+  },
+  "devDependencies": {
+    "prisma": "^6.19.3"
+  }
 }
