@@ -11,6 +11,8 @@ node_modules/
 .pub-cache/
 **/android/.gradle/
 dist/
+!backend/dist/
+!backend/dist/**
 coverage/
 *.log
 

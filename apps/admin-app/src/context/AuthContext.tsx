@@ -31,9 +31,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const token = localStorage.getItem('auth_token');
       if (token) {
-        const res = await fetch('https://school-management-system-5jqj.onrender.com/api/auth/me', {
-          headers: { 'Authorization': `Bearer ${token}`, 'ngrok-skip-browser-warning': 'true' }
-        });
+        const res = await fetch('https://school-management-system-5jqj.onrender.com/api/auth/me');
         if (res.ok) {
           const data = await res.json();
           setUser(data.user);

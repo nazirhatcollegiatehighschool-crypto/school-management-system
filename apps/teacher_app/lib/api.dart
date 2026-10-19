@@ -56,18 +56,11 @@ class Api {
 
   static Map<String, String> get _headers => {
         'Content-Type': 'application/json',
-        // ngrok free tier sits behind a browser-warning gate — this header
-        // skips it so mobile-data requests get JSON instead of an HTML page.
-        'ngrok-skip-browser-warning': 'true',
         if (token != null) 'Authorization': 'Bearer $token',
       };
 
   /// Connectivity probe for the Server-URL setting: raw GET, no auth/cache.
-  /// ngrok free domains show an interstitial warning page on first visit —
-  /// send the skip header so the probe (and real requests) get real JSON.
-  static Map<String, String> get _probeHeaders => {
-        'ngrok-skip-browser-warning': 'true',
-      };
+  static Map<String, String> get _probeHeaders => const {};
 
   static Future<bool> testHealth(String base) async {
     try {

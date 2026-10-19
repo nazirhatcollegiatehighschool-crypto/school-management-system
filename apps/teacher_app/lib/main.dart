@@ -9,7 +9,7 @@ import 'screens/splash_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Config.loadOverride(); // LAN/tunnel URL saved from Server settings
+  await Config.loadOverride(); // server URL saved from Server settings
   try { await Firebase.initializeApp(); } catch (_) {}
   FirebaseMessaging.onBackgroundMessage(_bgMessagingHandler);
   await Api.init(); // offline cache + outbox + auto-sync

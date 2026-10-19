@@ -266,8 +266,8 @@ class _LoginScreenState extends State<LoginScreen> {
                                   ),
                                 ),
                         ),
-                        // Server URL Dialog button — lets the app follow the
-                        // LAN IP / ngrok URL change without a rebuild.
+                        // Server URL Dialog button — lets the user point the
+                        // app at another server URL without a rebuild.
                         Center(
                           child: TextButton.icon(
                             style: TextButton.styleFrom(

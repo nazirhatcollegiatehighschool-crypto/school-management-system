@@ -58,9 +58,6 @@ class Api {
 
   static Map<String, String> get _headers => {
         'Content-Type': 'application/json',
-        // ngrok free tier sits behind a browser-warning gate — this header
-        // skips it so mobile-data requests get JSON instead of an HTML page.
-        'ngrok-skip-browser-warning': 'true',
         if (token != null) 'Authorization': 'Bearer $token',
       };
 
@@ -68,8 +65,7 @@ class Api {
   static Future<bool> testHealth(String base) async {
     try {
       final res = await http
-          .get(Uri.parse('${base.replaceAll(RegExp(r'/+$'), '')}/api/health'),
-              headers: const {'ngrok-skip-browser-warning': 'true'})
+          .get(Uri.parse('${base.replaceAll(RegExp(r'/+$'), '')}/api/health'))
           .timeout(const Duration(seconds: 10));
       return res.statusCode == 200;
     } catch (_) {

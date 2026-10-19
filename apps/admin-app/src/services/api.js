@@ -22,7 +22,6 @@ class ApiClient {
   static async login(username, password) {
     const res = await fetch(`${API_URL}/api/auth/login`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
       body: JSON.stringify({ username, password })
     });
     const data = await res.json();
@@ -43,7 +42,6 @@ class ApiClient {
     }
     const headers = {
       'Content-Type': 'application/json',
-      'ngrok-skip-browser-warning': 'true',
     };
     if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
     const res = await fetch(`${API_URL}${path}`, { headers });
@@ -60,7 +58,6 @@ class ApiClient {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'ngrok-skip-browser-warning': 'true',
         ...(this.token ? { Authorization: `Bearer ${this.token}` } : {})
       },
       body: JSON.stringify(body || {})
@@ -73,7 +70,6 @@ class ApiClient {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
-        'ngrok-skip-browser-warning': 'true',
         ...(this.token ? { Authorization: `Bearer ${this.token}` } : {})
       },
       body: JSON.stringify(body || {})
@@ -86,7 +82,6 @@ class ApiClient {
       method: 'DELETE',
       headers: {
         'Content-Type': 'application/json',
-        'ngrok-skip-browser-warning': 'true',
         ...(this.token ? { Authorization: `Bearer ${this.token}` } : {})
       }
     });

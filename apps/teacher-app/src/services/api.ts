@@ -48,7 +48,6 @@ class ApiClient {
 
     const headers: HeadersInit = { 
       'Content-Type': 'application/json',
-      'ngrok-skip-browser-warning': 'true',
     };
     if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
 
@@ -69,7 +68,6 @@ class ApiClient {
       method: 'POST',
       headers: { 
         'Content-Type': 'application/json',
-        'ngrok-skip-browser-warning': 'true',
         ...(this.token ? { Authorization: `Bearer ${this.token}` } : {})
       },
       body: JSON.stringify(body)

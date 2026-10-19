@@ -2,7 +2,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// Server base URL. Build-time default via --dart-define=API_URL=...,
 /// runtime-overridable from the app's Server settings (survives restarts,
-/// so LAN IP / tunnel URL changes never need a rebuild).
+/// so server URL changes never need a rebuild).
 class Config {
   static const String _defined = String.fromEnvironment('API_URL', defaultValue: 'https://school-management-system-brown-mu.vercel.app');
   static String _override = '';

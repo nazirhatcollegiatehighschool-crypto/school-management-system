@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'api.dart';
 import 'config.dart';
 
-/// Server URL setting — lets the app follow a LAN IP or tunnel URL change
+/// Server URL setting — lets the app point at a different backend URL
 /// without a rebuild. Saved on-device; test before saving.
 Future<void> showServerUrlDialog(BuildContext context) async {
   final ctl = TextEditingController(text: Config.serverUrl);
@@ -13,12 +13,12 @@ Future<void> showServerUrlDialog(BuildContext context) async {
     builder: (ctx) => StatefulBuilder(builder: (ctx, setD) => AlertDialog(
       title: const Text('🔧 Server URL'),
       content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        const Text('Laptop server-এর LAN IP বা tunnel link বদলালে এখানে বসান।\nযেমন: http://192.168.0.112:5000',
+        const Text('ডিফল্ট server ছাড়া অন্য URL লাগলে এখানে বসান।\nযেমন: https://school-management-system-brown-mu.vercel.app',
             style: TextStyle(fontSize: 12.5)),
         const SizedBox(height: 10),
         TextField(controller: ctl, keyboardType: TextInputType.url,
             decoration: const InputDecoration(labelText: 'Server URL *', border: OutlineInputBorder(),
-                hintText: 'http://192.168.0.112:5000')),
+                hintText: 'https://school-management-system-brown-mu.vercel.app')),
         if (status != null) ...[
           const SizedBox(height: 8),
           Text(status!, style: TextStyle(fontSize: 12.5,

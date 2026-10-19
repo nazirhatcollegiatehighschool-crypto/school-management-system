@@ -2,7 +2,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// Server base URL. Build-time default via --dart-define=API_URL=...,
 /// runtime-overridable from the app's Server settings (survives restarts,
-/// so LAN IP / tunnel URL changes never need a rebuild).
+/// so server URL changes never need a rebuild).
 class Config {
   static const String _defined = String.fromEnvironment('API_URL', defaultValue: 'https://school-management-system-brown-mu.vercel.app');
   static String _override = '';
@@ -10,8 +10,7 @@ class Config {
   static String get serverUrl => _override.isNotEmpty ? _override : _defined;
   static String get api => '$serverUrl/api';
   // Raw server root (no /api) — used for browser-opened file downloads
-  // (class PDFs, result-card PDFs): launchUrl opens the real URL, and the
-  // ngrok warning is a browser page the user can pass, unlike in-app JSON.
+  // (class PDFs, result-card PDFs): launchUrl opens the real URL directly.
   static String get downloadBase => serverUrl;
 
   static const String _key = 'server_url_override';

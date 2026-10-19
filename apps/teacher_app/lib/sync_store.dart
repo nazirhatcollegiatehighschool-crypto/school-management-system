@@ -17,7 +17,7 @@ class SyncStore extends ChangeNotifier {
   final ValueNotifier<int> pending = ValueNotifier(0);
   // True connectivity (wifi/mobile) vs ACTUAL server reachability are
   // different things: the phone can have internet while the school server
-  // (laptop/tunnel URL) is unreachable. `serverUp` tracks the latter via
+  // (production server) is unreachable. `serverUp` tracks the latter via
   // lightweight /api/health probes so the UI never shows a misleading
   // "no internet" message when the internet is fine.
   final ValueNotifier<bool> serverUp = ValueNotifier(true);

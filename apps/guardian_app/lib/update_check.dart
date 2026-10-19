@@ -304,7 +304,6 @@ Future<void> _downloadAndInstall(BuildContext context, String appName, String la
     final client = http.Client();
     try {
       final req = http.Request('GET', Uri.parse(url));
-      req.headers['ngrok-skip-browser-warning'] = 'true';
       final streamed = await client.send(req).timeout(const Duration(seconds: 30));
       if (streamed.statusCode != 200) throw Exception('ডাউনলোড ব্যর্থ (${streamed.statusCode})।');
       final total = streamed.contentLength ?? 0;

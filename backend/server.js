@@ -41,8 +41,15 @@ const loginLimiter = rateLimit({
 app.use('/api/auth/login', loginLimiter);
 app.use('/api/auth/guardian-login', loginLimiter);
 
-// Root route for Render health checks
+// Root: serve the Admin Panel SPA when its build is present (Vercel prod),
+// otherwise fall back to the JSON health payload (Render health checks).
+const adminDist = [
+  path.join(__dirname, 'dist'),
+  path.join(__dirname, '..', 'website', 'admin-site', 'dist'),
+].find((d) => fs.existsSync(path.join(d, 'index.html')));
+
 app.get('/', (req, res) => {
+  if (adminDist) return res.sendFile(path.join(adminDist, 'index.html'));
   res.json({ status: "ok", db: "connected" });
 });
 
