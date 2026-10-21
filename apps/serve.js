@@ -33,6 +33,6 @@ app.listen(PORT, () => {
   👨‍👩‍👧 Guardian App: http://localhost:${PORT}/guardian
   ⚙️ Admin Panel:   http://localhost:${PORT}/admin
   
-  📡 Backend API:   https://school-management-system-5jqj.onrender.com
+  📡 Backend API:   https://school-management-system-brown-mu.vercel.app
   `)
 })

@@ -1,5 +1,0 @@
-// apps/teacher-app/public/icon.svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" fill="#667eea" rx="20"/>
-  <text x="256" y="320" font-family="Arial" font-size="200" fill="white" text-anchor="middle">🏫</text>
-</svg>

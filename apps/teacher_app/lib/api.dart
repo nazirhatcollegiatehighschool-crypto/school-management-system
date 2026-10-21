@@ -9,7 +9,7 @@ import 'sync_store.dart';
 
 class Api {
   static String? token;
-  static const Duration _timeout = Duration(seconds: 25);
+  static const Duration _timeout = Duration(seconds: 30);
   static const _tokenKey = 'auth_token';
 
   /// Offline read/write layer. Every successful GET is cached; every mutation
@@ -67,12 +67,19 @@ class Api {
       final res = await http
           .get(Uri.parse('${base.replaceAll(RegExp(r'/+$'), '')}/api/health'),
               headers: _probeHeaders)
-          .timeout(const Duration(seconds: 10));
+          .timeout(const Duration(seconds: 20));
       return res.statusCode == 200;
     } catch (_) {
       return false;
     }
   }
+
+  /// One bounded retry for safe (idempotent) reads when the first attempt hit
+  /// a transient network error. Never retries 4xx/5xx responses — only real
+  /// transport failures — so we can't duplicate work or hammer the server.
+  static Future<http.Response> _getOnce(String path) => http
+      .get(Uri.parse(Config.api + path), headers: _headers)
+      .timeout(_timeout);
 
   static Future<dynamic> get(String path) async {
     // Offline-first: serve the locally stored copy immediately instead of
@@ -81,16 +88,23 @@ class Api {
       final cached = sync.cacheGet(path);
       if (cached != null) return jsOne(cached);
     }
-    // Server known-down (recent probe failed): don't hang 25s, serve cache.
+    // Server known-down (repeated probe failures): don't hang 30s, serve cache.
     // Manual refresh paths use refreshCache(), which always re-probes.
     if (!sync.isOffline && sync.serverKnownDown()) {
       final cached = sync.cacheGet(path);
       if (cached != null) return jsOne(cached);
     }
     try {
-      final res = await http
-          .get(Uri.parse(Config.api + path), headers: _headers)
-          .timeout(_timeout);
+      http.Response res;
+      try {
+        res = await _getOnce(path);
+      } catch (e) {
+        if (!isNetworkError(e)) rethrow;
+        // transient: wait ~1.2s (+jitter) then retry exactly once
+        await Future.delayed(Duration(
+            milliseconds: 1000 + (DateTime.now().microsecond % 400)));
+        res = await _getOnce(path);
+      }
       final data = _handle(res);
       sync.markRequestOk();
       // keep a copy for offline reads
@@ -113,26 +127,11 @@ class Api {
     if (sync.isOffline) {
       return 'ইন্টারনেট নেই — $queuedAction ফোনে সেভ আছে, online হলেই server-এ যাবে';
     }
-    return 'Server-এ পৌঁছানো যাচ্ছে না (ইন্টারনেট আছে) — $queuedAction ফোনে সেভ আছে; laptop server / Server URL ঠিক করে আবার চেষ্টা করুন';
+    return 'Server-এ পৌঁছানো যাচ্ছে না (ইন্টারনেট আছে) — $queuedAction ফোনে সেভ আছে; একটু পরে আবার চেষ্টা করুন';
   }
 
-  static Future<dynamic> post(String path, [Map<String, dynamic>? body]) async {
-    try {
-      final res = await http
-          .post(Uri.parse(Config.api + path), headers: _headers, body: jsonEncode(body ?? {}))
-          .timeout(_timeout);
-      final data = _handle(res);
-      sync.markRequestOk();
-      return data;
-    } catch (e) {
-      if (isNetworkError(e)) {
-        sync.markRequestFailed();
-        await sync.enqueue('POST', path, body);
-        return {'offline_queued': true};
-      }
-      rethrow;
-    }
-  }
+  static Future<dynamic> post(String path, [Map<String, dynamic>? body]) =>
+      _mutate('POST', path, body);
 
   static Future<dynamic> promoteReview(int classId, int sessionId) async {
     return get('/promote/review?class_id=$classId&session_id=$sessionId');
@@ -142,36 +141,42 @@ class Api {
     return post('/promote/execute', body);
   }
 
-  static Future<dynamic> put(String path, [Map<String, dynamic>? body]) async {
-    try {
-      final res = await http
-          .put(Uri.parse(Config.api + path), headers: _headers, body: jsonEncode(body ?? {}))
-          .timeout(_timeout);
-      final data = _handle(res);
-      sync.markRequestOk();
-      return data;
-    } catch (e) {
-      if (isNetworkError(e)) {
-        sync.markRequestFailed();
-        await sync.enqueue('PUT', path, body);
-        return {'offline_queued': true};
-      }
-      rethrow;
-    }
-  }
+  static Future<dynamic> put(String path, [Map<String, dynamic>? body]) =>
+      _mutate('PUT', path, body);
 
-  static Future<dynamic> delete(String path) async {
+  static Future<dynamic> delete(String path) => _mutate('DELETE', path, null);
+
+  /// Mutation variants that mirror the change onto the on-device read cache so
+  /// an offline add/edit is visible in the UI immediately (tagged pending),
+  /// then replaced by the real server row once it syncs. See SyncStore.enqueue.
+  static Future<dynamic> postOptimistic(
+          String path, Map<String, dynamic>? body, Map<String, dynamic> optimistic) =>
+      _mutate('POST', path, body, optimistic: optimistic);
+  static Future<dynamic> putOptimistic(
+          String path, Map<String, dynamic>? body, Map<String, dynamic> optimistic) =>
+      _mutate('PUT', path, body, optimistic: optimistic);
+  static Future<dynamic> deleteOptimistic(String path, Map<String, dynamic> optimistic) =>
+      _mutate('DELETE', path, null, optimistic: optimistic);
+
+  static Future<dynamic> _mutate(String method, String path, Map<String, dynamic>? body,
+      {Map<String, dynamic>? optimistic}) async {
     try {
-      final res = await http
-          .delete(Uri.parse(Config.api + path), headers: _headers)
-          .timeout(_timeout);
+      final uri = Uri.parse(Config.api + path);
+      final http.Response res;
+      if (method == 'POST') {
+        res = await http.post(uri, headers: _headers, body: jsonEncode(body ?? {})).timeout(_timeout);
+      } else if (method == 'PUT') {
+        res = await http.put(uri, headers: _headers, body: jsonEncode(body ?? {})).timeout(_timeout);
+      } else {
+        res = await http.delete(uri, headers: _headers).timeout(_timeout);
+      }
       final data = _handle(res);
       sync.markRequestOk();
       return data;
     } catch (e) {
       if (isNetworkError(e)) {
         sync.markRequestFailed();
-        await sync.enqueue('DELETE', path, null);
+        await sync.enqueue(method, path, body, optimistic: optimistic);
         return {'offline_queued': true};
       }
       rethrow;
@@ -256,6 +261,7 @@ class Api {
       await Future.wait([
         get('/teacher/profile').catchError((_) {}),
         get('/teacher/exams').catchError((_) {}),
+        get('/teacher/current-exam').catchError((_) {}),
         get('/teacher/events').catchError((_) {}),
         get('/teacher/subjects').catchError((_) {}),
         get('/teacher/homework').catchError((_) {}),
@@ -274,8 +280,15 @@ class Api {
   static dynamic _handle(http.Response res) {
     final data = res.body.isEmpty ? {} : jsonDecode(res.body);
     if (res.statusCode >= 200 && res.statusCode < 300) return data;
+    if (res.statusCode == 401 || res.statusCode == 403) {
+      throw ApiAuthException(data['error'] ?? 'সেশন শেষ। আবার লগইন করুন।');
+    }
     throw Exception(data['error'] ?? 'Request failed (${res.statusCode})');
   }
+
+  /// True only for real auth failures (401/403). Server 5xx / parse errors
+  /// are NOT auth failures and must never clear the stored token.
+  static bool isAuthError(Object e) => e is ApiAuthException;
 
   /// True when a mutation was stored on-device (offline) instead of sent.
   /// Data WILL reach the server automatically when internet returns.
@@ -300,8 +313,10 @@ class Api {
           .timeout(_timeout);
       final data = _handle(res);
       sync.markRequestOk();
-      unawaited(sync.cachePut(path, jsOne(data)));
-      return data;
+      await sync.cachePut(path, jsOne(data));
+      // Return the merged view so still-unsynced local edits stay visible
+      // until the server has actually accepted them.
+      return sync.cacheGet(path) ?? data;
     } catch (_) {
       sync.markRequestFailed();
       return null;
@@ -344,4 +359,12 @@ String friendlyError(Object e) {
     return 'কানেকশন পাওয়া যায়নি। ইন্টারনেট চেক করে আবার চেষ্টা করুন।';
   }
   return s.replaceFirst('Exception: ', '').replaceFirst('HandshakeException', 'নিরাপদ কানেকশন ব্যর্থ');
+}
+
+/// Thrown when the server rejects the token (HTTP 401/403).
+class ApiAuthException implements Exception {
+  final String message;
+  ApiAuthException(this.message);
+  @override
+  String toString() => message;
 }

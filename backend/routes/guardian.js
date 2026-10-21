@@ -1,5 +1,6 @@
 const router = require('express').Router();
 const pool = require('../db');
+const { dhakaToday } = require('../dates');
 const { auth } = require('../middleware/auth');
 const { computeResult } = require('../grading');
 const PDFDocument = require('pdfkit');
@@ -121,7 +122,7 @@ router.get('/student/:id/attendance/today', async (req, res) => {
     const stu = await getApprovedStudent(req.user.id, req.params.id);
     if (!stu) return res.status(403).json({ error: 'Not authorized for this student' });
     const { FINAL_BN, WINDOWS } = require('../attendance_fsm');
-    const today = new Date().toISOString().slice(0, 10);
+    const today = dhakaToday();
     const [rows] = await pool.query(
       `SELECT session, status, final_state, remark, created_at FROM attendance
        WHERE student_id=? AND date=?`, [req.params.id, today]);
@@ -351,12 +352,14 @@ router.get('/student/:id/exam-events', async (req, res) => {
     const stu = await getApprovedStudent(req.user.id, req.params.id);
     if (!stu) return res.status(403).json({ error: 'Not authorized for this student' });
     const [rows] = await pool.query(
-      `SELECT e.id, e.name, e.start_date,
+      `SELECT e.id, e.name, e.start_date, e.exam_kind, e.year,
               (SELECT COUNT(*) FROM exams x WHERE x.event_id = e.id AND x.class_id = ? AND x.status='published') AS subject_count
        FROM exam_events e
        WHERE e.id IN (SELECT DISTINCT event_id FROM exams WHERE class_id = ? AND status = 'published')
+         AND e.is_published = 1
+         AND (e.class_ids IS NULL OR e.class_ids @> CAST(? AS JSONB))
        ORDER BY e.id DESC`,
-      [stu.class_id, stu.class_id]
+      [stu.class_id, stu.class_id, stu.class_id]
     );
     res.json(rows);
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
@@ -377,6 +380,21 @@ router.get('/student/:id/marksheet', async (req, res) => {
     if (!event) return res.status(404).json({ error: 'Exam event not found' });
     const result = await computeResult(stu.id, eventId);
     if (!result) return res.status(404).json({ error: 'No result data for this exam' });
+    // Q8 gate: conditional / not-all-pass students may not pull the full
+    // marksheet detail. Only the outcome card is available to them.
+    const [promoRows] = await pool.query(
+      'SELECT decision FROM promotions WHERE student_id = ? AND event_id = ?', [stu.id, eventId]);
+    const isConditional = promoRows.some(p => p.decision === 'grace_promoted' || p.decision === 'admin_override');
+    if (isConditional || result.result_status !== 'PASSED') {
+      return res.status(403).json({
+        error: 'এই ফলাফলের বিস্তারিত মার্কশিট এখনো প্রকাশ করা হয়নি।',
+        marksheet_hidden: true,
+        promotion: promoRows.length ? {
+          decision: promoRows[0].decision,
+          status_bn: promoRows[0].decision === 'retained' ? 'উত্তীর্ণ নয়' : 'উত্তীর্ণ',
+        } : null,
+      });
+    }
     const [[saved]] = await pool.query(
       'SELECT teacher_remarks FROM results WHERE student_id = ? AND exam_id = ?',
       [stu.id, eventId]
@@ -449,8 +467,13 @@ async function loadResultCardPayload(guardianId, studentId, eventId) {
   const examTypes = examTypeList[0].map(x => x.exam_type);
 
   // Promotion decision (if the admin has executed it for this class/event).
-  // Friendly 3-state outcome: উত্তীর্ণ / শর্তসাপেক্ষে উত্তীর্ণ / অনুত্তীর্ণ.
+  // Friendly outcome. Q8 visibility rule:
+  //   - class 6-9  : 'শর্তসাপেক্ষে উত্তীর্ণ' wording IS shown
+  //   - class 10   : only "উত্তীর্ণ / উত্তীর্ণ নয়" — conditional words are hidden
+  //   - a CONDITIONAL student's full marksheet is HIDDEN server-side (they may
+  //     only see the binary outcome). A clean all-pass student sees everything.
   let promotion = null;
+  let marksheet_hidden = false;
   {
     const [prows] = await pool.query(
       `SELECT decision, promoted_roll, to_class, passing_year FROM promotions WHERE student_id = ? AND event_id = ?`,
@@ -460,24 +483,30 @@ async function loadResultCardPayload(guardianId, studentId, eventId) {
       const p = prows[0];
       const promoted = p.decision !== 'retained';
       const conditional = p.decision === 'grace_promoted' || p.decision === 'admin_override';
+      const isClass10 = /class\s*10|ssc/i.test(String(stu.class_name || ''));
       promotion = {
         promoted,
         conditional,
-        status_bn: !promoted ? 'অনুত্তীর্ণ (Retained)' : (conditional ? 'শর্তসাপেক্ষে উত্তীর্ণ' : 'উত্তীর্ণ'),
-        status_en: !promoted ? 'RETAINED' : (conditional ? 'CONDITIONALLY_PROMOTED' : 'PROMOTED'),
+        status_bn: !promoted ? 'অনুত্তীর্ণ (Retained)'
+          : (conditional ? (isClass10 ? 'উত্তীর্ণ' : 'শর্তসাপেক্ষে উত্তীর্ণ') : 'উত্তীর্ণ'),
+        status_en: !promoted ? 'RETAINED'
+          : (conditional ? (isClass10 ? 'PROMOTED' : 'CONDITIONALLY_PROMOTED') : 'PROMOTED'),
         decision: p.decision,
         to_class: p.to_class,
         promoted_roll: p.promoted_roll,
-        passing_year: p.passing_year || null
+        passing_year: p.passing_year || null,
       };
+      // Q8: hide the detailed marksheet unless the student passed everything.
+      if (conditional) marksheet_hidden = true;
     }
   }
-  // Merit position among PASSED classmates (same NCTB tie-breakers as admin).
-  // + class-highest marks per subject: the guardian result card shows, for
-  // every subject family, the class topper's total next to the child's own
-  // ("তোমার ৭৮/১০০, class highest ৯৫") — context without leaking anyone's
-  // identity (rank numbers only, never names).
+  if (!marksheet_hidden && result.result_status !== 'PASSED') marksheet_hidden = true;
+  // Merit position. Prefer the MATERIALIZED positions written at publish
+  // time (Q9): section_position + combined_position are a snapshot, so a
+  // late-joining student cannot silently shift everyone's rank. Fall back
+  // to a live computation only when the snapshot is absent.
   let position = null;
+  let dual_position = null;
   const subjectHighest = {};
   try {
     const [classmates] = await pool.query(
@@ -504,7 +533,22 @@ async function loadResultCardPayload(guardianId, studentId, eventId) {
     const idx = scored.findIndex(s => s.id === stu.id);
     const totalPassed = scored.length;
     if (idx !== -1) position = { rank: idx + 1, of: totalPassed };
+
+    // Materialized snapshot (authoritative when present).
+    const [snap] = await pool.query(
+      `SELECT section_position, combined_position, total_marks_obtained, total_marks_full, pass_all
+         FROM results r JOIN exams e ON e.id = r.exam_id
+        WHERE r.student_id = ? AND e.event_id = ? LIMIT 1`, [stu.id, eventId]);
+    if (snap.length && (snap[0].section_position != null || snap[0].combined_position != null)) {
+      dual_position = {
+        section: snap[0].section_position != null ? snap[0].section_position : (position ? position.rank : null),
+        combined: snap[0].combined_position != null ? snap[0].combined_position : (position ? position.rank : null),
+      };
+    } else if (position) {
+      dual_position = { section: position.rank, combined: position.rank };
+    }
   } catch (e) { /* rank optional */ }
+
 
   // Attendance percentage: all recorded working days since join.
   let attendance = null;
@@ -537,7 +581,7 @@ async function loadResultCardPayload(guardianId, studentId, eventId) {
       head_teacher: head ? { name: head.name, designation: head.designation || 'প্রধান শিক্ষক', url: sigUrl(head) } : null,
     };
   } catch (e) { /* signatures optional */ }
-  return { student: stu, event, result, promotion, position, subject_highest: subjectHighest, attendance, settings, examTypes, signatures };
+  return { student: stu, event, result, promotion, position, dual_position, marksheet_hidden, subject_highest: subjectHighest, attendance, settings, examTypes, signatures };
 }
 
 router.get('/student/:id/result-card', async (req, res) => {
@@ -546,6 +590,17 @@ router.get('/student/:id/result-card', async (req, res) => {
     if (!eventId) return res.status(400).json({ error: 'event_id required' });
     const payload = await loadResultCardPayload(req.user.id, req.params.id, eventId);
     if (!payload) return res.status(403).json({ error: 'Result not published / not authorized' });
+    // Q8: a conditional / not-all-pass student gets ONLY the binary outcome —
+    // the subject-by-subject detail is withheld server-side.
+    if (payload.marksheet_hidden) {
+      return res.json({
+        student: payload.student, event: payload.event,
+        promotion: payload.promotion, position: payload.position,
+        dual_position: payload.dual_position,
+        marksheet_hidden: true, result: null,
+        settings: payload.settings,
+      });
+    }
     res.json(payload);
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
@@ -556,6 +611,9 @@ router.get('/student/:id/result-card.pdf', async (req, res) => {
     if (!eventId) return res.status(400).json({ error: 'event_id required' });
     const payload = await loadResultCardPayload(req.user.id, req.params.id, eventId);
     if (!payload) return res.status(403).json({ error: 'Result not published / not authorized' });
+    if (payload.marksheet_hidden) {
+      return res.status(403).json({ error: 'এই ফলাফলের বিস্তারিত মার্কশিট এখনো প্রকাশ করা হয়নি।' });
+    }
 
     const { student, event, result, promotion, position, attendance, settings, signatures } = payload;
     const fontPath = path.join(__dirname, '..', 'assets', 'fonts', 'Kalpurush.ttf');
@@ -710,7 +768,7 @@ router.get('/student/:id/result-card.pdf', async (req, res) => {
     for (let i = pages.start; i < pages.start + pages.count; i++) {
       doc.switchToPage(i);
       doc.font(NORMAL).fontSize(8).fillColor('#888')
-        .text(`পৃষ্ঠা ${i - pages.start + 1} / ${pages.count}  •  Generated ${new Date().toISOString().slice(0, 10)}`,
+        .text(`পৃষ্ঠা ${i - pages.start + 1} / ${pages.count}  •  Generated ${dhakaToday()}`,
           42, doc.page.height - 30, { align: 'center', width: CW });
     }
     doc.end();
@@ -837,6 +895,50 @@ router.get('/sibling-requests', async (req, res) => {
       [req.user.id]
     );
     res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+// =====================================================================
+// Result analytics (Q9 enhancement): subject-wise % for the latest
+// published event + a trend across past events + session GPA (Q2).
+// Everything is derived from data the app already has via the API.
+// =====================================================================
+router.get('/student/:id/result-analytics', async (req, res) => {
+  try {
+    const stu = await getApprovedStudent(req.user.id, req.params.id);
+    if (!stu) return res.status(403).json({ error: 'Not authorized for this student' });
+
+    // Published events for this student's class, newest first.
+    const [events] = await pool.query(
+      `SELECT DISTINCT e.id, e.name, e.exam_kind, e.year, e.start_date, e.is_published
+         FROM exam_events e
+         JOIN exams x ON x.event_id = e.id
+        WHERE x.class_id = ? AND e.is_published = 1
+        ORDER BY e.start_date DESC NULLS LAST, e.id DESC`, [stu.class_id]);
+
+    const history = [];
+    for (const ev of events) {
+      const r = await computeResult(stu.id, ev.id);
+      if (!r) continue;
+      history.push({
+        event_id: ev.id, event_name: ev.name, exam_kind: ev.exam_kind, year: ev.year,
+        final_gpa: r.final_gpa, result_status: r.result_status,
+        total_marks: r.total_marks, total_full: r.total_full,
+        subjects: (r.families || []).map(f => ({
+          subject: f.subject, total: f.total, full: f.full,
+          scaled: f.scaled, letter_grade: f.letter_grade, grade_point: f.grade_point,
+        })),
+      });
+    }
+
+    // Session GPA (weighted across exam kinds).
+    let session = null;
+    try {
+      const { sessionGpa } = require('../session_gpa');
+      session = await sessionGpa(stu.id, stu.session_id);
+    } catch (e) { /* optional */ }
+
+    res.json({ student: stu, history, session_gpa: session });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 

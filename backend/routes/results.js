@@ -1,14 +1,78 @@
 const router = require('express').Router();
 const pool = require('../db');
+const { dhakaToday } = require('../dates');
 const { auth } = require('../middleware/auth');
 const { computeResult } = require('../grading');
 const { queuePush, getGuardianTokens } = require('../fcm');
 const PDFDocument = require('pdfkit');
+const path = require('path');
+const fs = require('fs');
 
 // Result computation, tabulation and marksheets are school-wide admin operations.
 // Teachers enter marks through /api/teacher — they must NOT compute/tabulate
 // arbitrary classes or read arbitrary student marksheets.
 router.use(auth('admin'));
+
+// Register Bangla font for PDFKit
+function registerBanglaFont(doc) {
+  const fontPath = path.join(__dirname, '..', 'assets', 'fonts', 'Kalpurush.ttf');
+  if (fs.existsSync(fontPath)) {
+    doc.registerFont('Kalpurush', fontPath);
+    return 'Kalpurush';
+  }
+  return 'Helvetica';
+}
+
+// Helper to draw watermark logo
+function drawWatermark(doc, logoPath, pageWidth, pageHeight) {
+  if (!logoPath || !fs.existsSync(logoPath)) return;
+  try {
+    const img = doc.openImage(logoPath);
+    const maxDim = Math.min(pageWidth, pageHeight) * 0.6;
+    const scale = Math.min(maxDim / img.width, maxDim / img.height);
+    const w = img.width * scale;
+    const h = img.height * scale;
+    const x = (pageWidth - w) / 2;
+    const y = (pageHeight - h) / 2;
+    doc.save()
+      .opacity(0.04)
+      .image(logoPath, x, y, { width: w, height: h })
+      .restore();
+  } catch (_) {}
+}
+
+// Helper to draw page frame (decorative borders)
+function drawFrame(doc, margin) {
+  const pw = doc.page.width;
+  const ph = doc.page.height;
+  const m = margin;
+  doc.save()
+    .lineWidth(2)
+    .strokeColor('#0b3d91')
+    .rect(m, m, pw - 2*m, ph - 2*m)
+    .stroke()
+    .lineWidth(0.5)
+    .strokeColor('#cbd5e1')
+    .rect(m + 4, m + 4, pw - 2*m - 8, ph - 2*m - 8)
+    .stroke()
+    .restore();
+}
+
+// Helper to draw rosette decoration
+function drawRosette(doc, cx, cy) {
+  doc.save()
+    .strokeColor('#444')
+    .lineWidth(0.6)
+    .opacity(0.5);
+  for (let r = 30; r <= 180; r += 30) {
+    doc.circle(cx, cy, r).stroke();
+  }
+  doc.moveTo(cx, 20).lineTo(cx, 380).stroke();
+  doc.moveTo(20, cy).lineTo(380, cy).stroke();
+  doc.moveTo(73, 73).lineTo(327, 327).stroke();
+  doc.moveTo(327, 73).lineTo(73, 327).stroke();
+  doc.restore();
+}
 
 // =====================================================================
 // EXAM EVENT LIFECYCLE — canonical kinds, session auto-create, publish flow.
@@ -100,7 +164,7 @@ router.get('/events', async (req, res) => {
 });
 
 router.post('/events', async (req, res) => {
-  const { name, session_id, start_date, exam_date, result_date, exam_kind, year, promotion_linked } = req.body || {};
+  const { name, session_id, start_date, exam_date, result_date, exam_kind, year, promotion_linked, class_ids } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name required' });
   const kind = exam_kind || 'other';
   const yr = year != null && year !== '' ? Number(year) : null;
@@ -116,12 +180,23 @@ router.post('/events', async (req, res) => {
         });
       }
     }
+    const classIdsArr = Array.isArray(class_ids) ? class_ids.map(x=>Number(x)).filter(x=>!isNaN(x)) : null;
     const [result] = await pool.query(
-      'INSERT INTO exam_events (name, session_id, start_date, exam_date, result_date, created_by, exam_kind, year, promotion_linked) VALUES (?,?,?,?,?,?,?,?,?)',
+      'INSERT INTO exam_events (name, session_id, start_date, exam_date, result_date, created_by, exam_kind, year, promotion_linked, class_ids) VALUES (?,?,?,?,?,?,?,?,?,?)',
       [name, session_id || 1, start_date || null, exam_date || null, result_date || null, req.user.id, kind,
-       yr, promotion_linked != null ? Number(promotion_linked) : (isCanon(kind) ? CANON[kind].promotion_linked : 0)]
+       yr, promotion_linked != null ? Number(promotion_linked) : (isCanon(kind) ? CANON[kind].promotion_linked : 0),
+       classIdsArr ? JSON.stringify(classIdsArr) : null]
     );
-    res.status(201).json({ id: result.insertId });
+    const eventId = result.insertId;
+    if (classIdsArr && classIdsArr.length) {
+      try {
+        const vals = classIdsArr.map(()=>'(?,?)').join(',');
+        const params = [];
+        for (const cid of classIdsArr) { params.push(eventId, cid); }
+        await pool.query(`INSERT IGNORE INTO exam_event_classes (event_id, class_id) VALUES ${vals}`, params);
+      } catch(e) { console.error('exam_event_classes insert err', e.message); }
+    }
+    res.status(201).json({ id: eventId });
   } catch (err) {
     console.error(err);
     if (err.code === '23505') return res.status(409).json({ error: 'এই kind+year-এর exam ইতিমধ্যে আছে। আগে delete করুন।' });
@@ -164,7 +239,7 @@ router.delete('/events/:id', async (req, res) => {
 });
 
 router.put('/events/:id', async (req, res) => {
-  const { name, session_id, start_date, exam_date, result_date, exam_kind, year, promotion_linked } = req.body || {};
+  const { name, session_id, start_date, exam_date, result_date, exam_kind, year, promotion_linked, class_ids, entry_open } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name required' });
   try {
     const [[ev]] = await pool.query('SELECT id FROM exam_events WHERE id=?', [req.params.id]);
@@ -191,6 +266,22 @@ router.put('/events/:id', async (req, res) => {
     if (kind !== undefined) { updates.push('exam_kind=?'); params.push(kind); }
     if (yr !== undefined) { updates.push('year=?'); params.push(yr); }
     if (promotion_linked !== undefined) { updates.push('promotion_linked=?'); params.push(Number(promotion_linked)); }
+    if (class_ids !== undefined) {
+      const classIdsArr = Array.isArray(class_ids) ? class_ids.map(x=>Number(x)).filter(x=>!isNaN(x)) : null;
+      updates.push('class_ids=?'); params.push(classIdsArr ? JSON.stringify(classIdsArr) : null);
+      if (classIdsArr && classIdsArr.length) {
+        try {
+          await pool.query('DELETE FROM exam_event_classes WHERE event_id=?', [req.params.id]);
+          const vals = classIdsArr.map(()=>'(?,?)').join(',');
+          const p2 = [];
+          for (const cid of classIdsArr) { p2.push(req.params.id, cid); }
+          await pool.query(`INSERT IGNORE INTO exam_event_classes (event_id, class_id) VALUES ${vals}`, p2);
+        } catch(e){}
+      }
+    }
+    if (entry_open !== undefined) {
+      updates.push('entry_open=?'); params.push(entry_open ? 1 : 0);
+    }
     params.push(req.params.id);
     await pool.query(`UPDATE exam_events SET ${updates.join(', ')} WHERE id=?`, params);
     res.json({ ok: true });
@@ -199,6 +290,19 @@ router.put('/events/:id', async (req, res) => {
     if (err.code === '23505') return res.status(409).json({ error: 'এই kind+year-এর exam ইতিমধ্যে আছে।' });
     res.status(500).json({ error: 'Server error' });
   }
+});
+
+router.post('/events/:id/entry-open', async (req, res) => {
+  try {
+    const { open } = req.body || {};
+    await pool.query('UPDATE exam_events SET entry_open=? WHERE id=?', [open ? 1 : 0, req.params.id]);
+    if (open) {
+      await pool.query('UPDATE exams SET entry_open=1 WHERE event_id=? AND status<>\'published\'', [req.params.id]);
+    } else {
+      await pool.query('UPDATE exams SET entry_open=0 WHERE event_id=?', [req.params.id]);
+    }
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
 // Publish an event: marks it published (Published Exams list), publishes all
@@ -221,9 +325,11 @@ async function eventPublishGate(eventId) {
         WHERE x.event_id=? AND x.class_id=c.id) AS students_done,
       (SELECT COUNT(*) FROM subjects sub WHERE sub.class_id=c.id) AS subjects,
       (SELECT COUNT(DISTINCT x.subject_id) FROM exams x JOIN marks m ON m.exam_id=x.id
-        WHERE x.event_id=? AND x.class_id=c.id) AS subjects_done
+        WHERE x.event_id=? AND x.class_id=c.id) AS subjects_done,
+      (SELECT COUNT(*) FROM exams x WHERE x.event_id=? AND x.class_id=c.id
+        AND x.entry_status <> 'approved') AS not_approved
      FROM classes c WHERE c.id IN (SELECT DISTINCT class_id FROM exams WHERE event_id=?)`,
-    [eventId, eventId, eventId]);
+    [eventId, eventId, eventId, eventId]);
   for (const c of classes) {
     const gaps = [];
     if (Number(c.subjects_done || 0) < Number(c.subjects || 0)) {
@@ -231,6 +337,9 @@ async function eventPublishGate(eventId) {
     }
     if (Number(c.students_done || 0) < Number(c.students || 0)) {
       gaps.push(`${Number(c.students) - Number(c.students_done)} জন student-এর marks বাকি`);
+    }
+    if (Number(c.not_approved || 0) > 0) {
+      gaps.push(`${Number(c.not_approved)} subject এখনো class-teacher approved নয়`);
     }
     if (gaps.length) missing.push({ class_id: c.id, class_name: `${c.name} (${c.section})`, gaps });
   }
@@ -256,8 +365,7 @@ router.post('/events/:id/publish', async (req, res) => {
       `UPDATE exam_events SET is_published=1, published_at=NOW(), notify_guardians=?, notified_at=CASE WHEN ?=1 THEN NOW() ELSE notified_at END WHERE id=?`,
       [notify ? 1 : 0, notify ? 1 : 0, req.params.id]);
     await pool.query(`UPDATE exams SET status='published', entry_open=0 WHERE event_id=?`, [req.params.id]);
-    // Auto result generation: compute totals/GPA/grades for every class in
-    // the event the moment it is published.
+    // Auto result generation
     let autoComputed = [];
     try {
       const [clsRows] = await pool.query('SELECT DISTINCT class_id FROM exams WHERE event_id=?', [req.params.id]);
@@ -268,9 +376,6 @@ router.post('/events/:id/publish', async (req, res) => {
     } catch (e) { console.error('auto-compute on publish failed:', e.message); }
     let notified = 0, push = null, already_notified = false;
     if (notify) {
-      // Idempotent publish-notify: same event notifies guardians EXACTLY ONCE.
-      // A second tap with notify=1 returns already_notified=true + the first
-      // notified_at — no duplicate push, no duplicate inbox rows (dedup_key).
       const [[sent]] = await pool.query(
         `SELECT notified_at FROM exam_events WHERE id=? AND notify_guardians=1 AND notified_at IS NOT NULL`,
         [req.params.id]);
@@ -291,8 +396,6 @@ router.post('/events/:id/publish', async (req, res) => {
           for (const sid of studentIds) {
             params.push(sid, 'Exam Result Published', `${ev.name}-এর ফলাফল প্রকাশিত হয়েছে`, 'result', 'students', ev.id, req.user.id, `result:${ev.id}:${sid}`);
           }
-          // dedup_key makes re-publish inserts no-ops (same event+student can
-          // never create a second inbox row, even under double-click races).
           await pool.query(
             `INSERT INTO notifications (student_id, title, body, type, target_type, related_id, created_by, dedup_key)
              VALUES ${vals} ON CONFLICT (dedup_key) DO NOTHING`, params);
@@ -302,12 +405,31 @@ router.post('/events/:id/publish', async (req, res) => {
         }
       }
     }
-    // Next-year shell: same kind for year+1 (creates the Y+1 session if missing).
+    // Next-year shell: same kind for year+1 (creates the Y+1 session if missing) - AUTO CREATE when publishing/running
     let nextYear = null;
     if (isCanon(ev.exam_kind) && ev.year) {
-      const sess = await findOrCreateSessionByYear(Number(ev.year) + 1);
-      await ensureSessionExams(sess.id);
-      nextYear = sess.name;
+      try {
+        const sess = await findOrCreateSessionByYear(Number(ev.year) + 1);
+        await ensureSessionExams(sess.id);
+        nextYear = sess.name;
+        // Also create a hidden copy linked to this one if not exists
+        const [[exists]] = await pool.query('SELECT id FROM exam_events WHERE exam_kind=? AND year=? AND session_id=?', [ev.exam_kind, Number(ev.year)+1, sess.id]);
+        if (!exists) {
+          const classIdsArr = ev.class_ids ? (typeof ev.class_ids === 'string' ? JSON.parse(ev.class_ids) : ev.class_ids) : null;
+          const [nr] = await pool.query(
+            'INSERT INTO exam_events (name, session_id, created_by, exam_kind, year, promotion_linked, class_ids, entry_open, auto_created_from) VALUES (?,?,?,?,?,?,?,?,?)',
+            [`${CANON[ev.exam_kind].label} ${Number(ev.year)+1}`, sess.id, req.user.id, ev.exam_kind, Number(ev.year)+1, CANON[ev.exam_kind].promotion_linked, classIdsArr ? JSON.stringify(classIdsArr) : null, 0, ev.id]
+          );
+          if (classIdsArr && classIdsArr.length) {
+            try {
+              const vals = classIdsArr.map(()=>'(?,?)').join(',');
+              const params = [];
+              for (const cid of classIdsArr) { params.push(nr.insertId, cid); }
+              await pool.query(`INSERT IGNORE INTO exam_event_classes (event_id, class_id) VALUES ${vals}`, params);
+            } catch(e){}
+          }
+        }
+      } catch(e) { console.error('auto-create next year err', e.message); }
     }
     await pool.query('INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)',
       [req.user.id, 'event_publish', `Published event ${ev.name} (notify=${notify ? 1 : 0}, notified=${notified}, already=${already_notified ? 1 : 0})`]).catch(() => {});
@@ -399,21 +521,46 @@ router.post('/results/compute', async (req, res) => {
 // grades per student, cached into `results`. Used by manual compute,
 // publish flow (auto for every class in the event) and permission changes.
 async function computeEventResults(event_id, class_id) {
-  const [students] = await pool.query('SELECT id FROM students WHERE class_id=?', [class_id]);
+  const [students] = await pool.query(
+    `SELECT s.id, s.section, c.group_name, c.section AS class_section
+       FROM students s JOIN classes c ON c.id = s.class_id WHERE s.class_id=?`, [class_id]);
   let computed = 0, withMarks = 0;
+  const scored = [];
   for (const s of students) {
     const r = await computeResult(s.id, event_id);
     if (!r) continue;
     withMarks++;
     await pool.query(
-      `INSERT INTO results (student_id, exam_id, total_gpa_without_4th, gpa_4th_bonus, final_gpa, result_status)
-       VALUES (?,?,?,?,?,?)
+      `INSERT INTO results (student_id, exam_id, total_gpa_without_4th, gpa_4th_bonus, final_gpa,
+                            result_status, total_marks_obtained, total_marks_full, pass_all)
+       VALUES (?,?,?,?,?,?,?,?,?)
        ON CONFLICT (student_id, exam_id) DO UPDATE SET total_gpa_without_4th=EXCLUDED.total_gpa_without_4th,
          gpa_4th_bonus=EXCLUDED.gpa_4th_bonus, final_gpa=EXCLUDED.final_gpa,
-         result_status=EXCLUDED.result_status, computed_at=NOW()`,
-      [s.id, event_id, r.total_gpa_without_4th, r.gpa_4th_bonus, r.final_gpa, r.result_status]
+         result_status=EXCLUDED.result_status, total_marks_obtained=EXCLUDED.total_marks_obtained,
+         total_marks_full=EXCLUDED.total_marks_full, pass_all=EXCLUDED.pass_all, computed_at=NOW()`,
+      [s.id, event_id, r.total_gpa_without_4th, r.gpa_4th_bonus, r.final_gpa, r.result_status,
+       Number(r.total_marks || 0), Number(r.total_full || 0), r.result_status === 'PASSED' ? 1 : 0]
     );
     computed++;
+    scored.push({
+      id: s.id, sec: String(s.group_name || s.section || s.class_section || ''),
+      gpa: Number(r.final_gpa), bonus: Number(r.gpa_4th_bonus || 0),
+      total: Number(r.total_marks || 0), fourth: Number(r.fourth_score || 0),
+      passed: r.result_status === 'PASSED' ? 1 : 0,
+    });
+  }
+  // Materialize positions (Q9): combined across all sections, plus section-local.
+  scored.sort((a, b) =>
+    (b.total - a.total) || (b.gpa - a.gpa) || (b.passed - a.passed) || (a.id - b.id));
+  const secCounters = {};
+  for (let i = 0; i < scored.length; i++) {
+    const row = scored[i];
+    const combined = i + 1;
+    secCounters[row.sec] = (secCounters[row.sec] || 0) + 1;
+    await pool.query(
+      `UPDATE results SET combined_position=?, section_position=?
+        WHERE student_id=? AND exam_id=?`,
+      [combined, secCounters[row.sec], row.id, event_id]);
   }
   return { ok: true, students: students.length, computed, with_marks: withMarks };
 }
@@ -592,202 +739,250 @@ router.get('/marksheet/:studentId/:eventId', async (req, res) => {
 });
 
 // Multi-page PDF marksheet: page 1 = transcript summary incl. 4th-subject bonus GPA;
-// later pages = per-subject breakdown, attendance, subject comments and complaints/remarks.
-router.get('/marksheet-pdf/:studentId/:eventId', async (req, res) => {
-  try {
-    const [[student]] = await pool.query(
-      `SELECT s.*, c.name AS class_name, c.section, c.group_name
-       FROM students s JOIN classes c ON s.class_id = c.id WHERE s.id = ?`,
-      [req.params.studentId]
-    );
-    if (!student) return res.status(404).json({ error: 'Student not found' });
-    const [[event]] = await pool.query('SELECT * FROM exam_events WHERE id=?', [req.params.eventId]);
-    if (!event) return res.status(404).json({ error: 'Event not found' });
-    const result = await computeResult(student.id, Number(req.params.eventId));
-    if (!result) return res.status(404).json({ error: 'No marksheet available for this student/event' });
-    const [[saved]] = await pool.query(
-      'SELECT teacher_remarks FROM results WHERE student_id=? AND exam_id=?',
-      [student.id, req.params.eventId]
-    );
-    const [settingsRows] = await pool.query('SELECT setting_key, setting_value FROM app_settings');
-    const settings = {};
-    settingsRows.forEach(s => { settings[s.setting_key] = s.setting_value; });
+    // later pages = per-subject breakdown, attendance, subject comments and complaints/remarks.
+    // Design matches reference project: frame borders, watermark logo, Bengali/English headers,
+    // grading scale table, signature blocks.
+    router.get('/marksheet-pdf/:studentId/:eventId', async (req, res) => {
+      try {
+        const [[student]] = await pool.query(
+          `SELECT s.*, c.name AS class_name, c.section, c.group_name
+           FROM students s JOIN classes c ON s.class_id = c.id WHERE s.id = ?`,
+          [req.params.studentId]
+        );
+        if (!student) return res.status(404).json({ error: 'Student not found' });
+        const [[event]] = await pool.query('SELECT * FROM exam_events WHERE id=?', [req.params.eventId]);
+        if (!event) return res.status(404).json({ error: 'Event not found' });
+        const result = await computeResult(student.id, Number(req.params.eventId));
+        if (!result) return res.status(404).json({ error: 'No marksheet available for this student/event' });
+        const [[saved]] = await pool.query(
+          'SELECT teacher_remarks FROM results WHERE student_id=? AND exam_id=?',
+          [student.id, req.params.eventId]
+        );
+        const [settingsRows] = await pool.query('SELECT setting_key, setting_value FROM app_settings');
+        const settings = {};
+        settingsRows.forEach(s => { settings[s.setting_key] = s.setting_value; });
 
-    const [attRows] = await pool.query(
-      'SELECT status, COUNT(*) AS cnt FROM attendance WHERE student_id=? GROUP BY status', [student.id]
-    );
-    const [complaints] = await pool.query(
-      `SELECT n.title, n.body, n.type, n.created_at FROM notifications n
-       WHERE n.student_id=? AND n.type IN ('complaint','special') ORDER BY n.id DESC LIMIT 10`, [student.id]
-    );
-    const [comments] = await pool.query(
-      `SELECT sub.name AS subject_name, e.name AS exam_name, m.comment
-       FROM marks m JOIN exams e ON m.exam_id = e.id JOIN subjects sub ON e.subject_id = sub.id
-       WHERE m.student_id=? AND e.event_id=? AND m.comment IS NOT NULL AND m.comment <> ''
-       ORDER BY m.id`, [student.id, req.params.eventId]
-    );
+        const [attRows] = await pool.query(
+          'SELECT status, COUNT(*) AS cnt FROM attendance WHERE student_id=? GROUP BY status', [student.id]
+        );
 
-    const doc = new PDFDocument({ size: 'A4', margin: 40, bufferPages: true });
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename=marksheet_${student.student_code}_event${req.params.eventId}.pdf`);
-    doc.pipe(res);
+        const doc = new PDFDocument({ size: 'A4', margin: 40, bufferPages: true });
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename=marksheet_${student.student_code}_event${req.params.eventId}.pdf`);
+        doc.pipe(res);
 
-    const CW = doc.page.width - 80;
-    let y = 0;
-    const pageGap = () => {
-      if (y > doc.page.height - 60) { doc.addPage(); y = 40; return true; }
-      return false;
-    };
+        const FONT = registerBanglaFont(doc);
+        const CW = doc.page.width - 80;
+        const MARGIN = 40;
+        let y = MARGIN;
 
-    // -------- Page 1: transcript summary --------
-    const schoolName = settings.school_name || settings.school || settings.school_name_en || 'School';
-    const schoolAddr = settings.school_address || settings.address || settings.school_phone || '';
-    doc.font('Helvetica-Bold').fontSize(16).fillColor('#0b3d91').text(String(schoolName), 40, 50, { align: 'center', width: CW });
-    y = 80;
-    if (schoolAddr) {
-      doc.font('Helvetica').fontSize(9).fillColor('#555555').text(String(schoolAddr), 40, y, { align: 'center', width: CW });
-      y += 14;
-    }
-    doc.fillColor('#111111').font('Helvetica-Bold').fontSize(11).text('Academic Transcript — ' + String(event.name), 40, y, { align: 'center', width: CW });
-    y += 26;
+        // Draw frame and watermark on first page
+        drawFrame(doc, MARGIN);
+        const logoPath = settings.school_logo_path ? path.join(__dirname, '..', 'uploads', 'logos', path.basename(settings.school_logo_path)) : null;
+        drawWatermark(doc, logoPath, doc.page.width, doc.page.height);
+        drawRosette(doc, doc.page.width / 2, doc.page.height / 2);
 
-    doc.font('Helvetica-Bold').fontSize(10).fillColor('#0b3d91').text('Student Information', 40, y);
-    y += 16;
-    doc.fillColor('#111111');
-    const infoLines = [
-      ['Student Name', student.name],
-      ['Student Code', String(student.student_code)],
-      ['Roll', String(student.roll)],
-      ['Class', `${student.class_name}${student.group_name ? ' (' + student.group_name + ')' : ' (' + student.section + ')'}`],
-      ['Religion', student.religion || '—']
-    ];
-    infoLines.forEach(([k, v]) => {
-      doc.font('Helvetica').fontSize(9.5);
-      doc.text(k + ':', 40, y, { width: 130 });
-      doc.font('Helvetica-Bold').text(String(v), 175, y, { width: CW - 135 });
-      y += 13;
-    });
+        const pageGap = () => {
+          if (y > doc.page.height - 80) {
+            doc.addPage();
+            y = MARGIN;
+            drawFrame(doc, MARGIN);
+            drawWatermark(doc, logoPath, doc.page.width, doc.page.height);
+            return true;
+          }
+          return false;
+        };
 
-    y += 12;
-    doc.font('Helvetica-Bold').fontSize(9.5).fillColor('#0b5394').text(
-      `GPA (without 4th subject): ${result.total_gpa_without_4th.toFixed(2)}    4th-subject bonus: ${result.gpa_4th_bonus.toFixed(2)}    Final GPA: ${result.final_gpa.toFixed(2)}`,
-      40, y, { width: CW });
-    y += 16;
-    doc.fillColor(result.result_status === 'PASSED' ? '#1e7d32' : '#c62828').font('Helvetica-Bold').fontSize(12)
-      .text('Result: ' + result.result_status, 40, y);
-    y += 20;
-    doc.fillColor('#111111');
+        // ======================== HEADER ========================
+        const schoolNameEn = settings.school_name || settings.school || 'School';
+        const schoolNameBn = settings.school_name_bn || 'নাজিরহাট কলেজিয়েট উচ্চ বিদ্যালয়';
+        const schoolAddr = settings.school_address || settings.address || '';
+        
+        doc.font(FONT).fontSize(14).fillColor('#0b3d91').text(schoolNameEn, MARGIN, y, { align: 'center', width: CW });
+        y += 18;
+        doc.font(FONT).fontSize(13).fillColor('#0b3d91').text(schoolNameBn, MARGIN, y, { align: 'center', width: CW });
+        y += 16;
+        if (schoolAddr) {
+          doc.font(FONT).fontSize(9).fillColor('#555555').text(schoolAddr, MARGIN, y, { align: 'center', width: CW });
+          y += 12;
+        }
+        
+        doc.font(FONT).fontSize(11).fillColor('#111111').text('Academic Transcript — ' + String(event.name), MARGIN, y, { align: 'center', width: CW });
+        y += 22;
 
-    // grading table
-    const cols = [{ w: 215, t: 'Subject' }, { w: 60, t: 'Total' }, { w: 65, t: 'Scaled %' }, { w: 90, t: 'Grade' }, { w: 85, t: 'GPA' }];
-    const rowH = 18;
-    const tableX = 40;
-    doc.fillColor('#0b5394').rect(tableX, y, CW, rowH).fill();
-    doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(9);
-    let cx = tableX;
-    cols.forEach(c => { doc.text(c.t, cx + 5, y + 5, { width: c.w - 10, align: cx === tableX ? 'left' : 'center' }); cx += c.w; });
-    y += rowH;
-    doc.fillColor('#111111');
-    result.families.forEach((f, i) => {
-      pageGap();
-      if (i % 2 === 0) { doc.fillColor('#eef3f9').rect(tableX, y, CW, rowH).fill(); }
-      doc.fillColor('#111111').font('Helvetica').fontSize(9);
-      const display = (f.is_optional ? '(4th) ' : '') + f.subject;
-      cx = tableX;
-      doc.text(display, cx + 5, y + 5, { width: cols[0].w - 10 }); cx += cols[0].w;
-      doc.text(f.absent ? 'Absent' : `${f.total}/${f.full}`, cx + 5, y + 5, { width: cols[1].w - 10, align: 'center' }); cx += cols[1].w;
-      doc.text(f.absent ? '—' : f.scaled.toFixed(2), cx + 5, y + 5, { width: cols[2].w - 10, align: 'center' }); cx += cols[2].w;
-      doc.text(f.absent ? '—' : f.letter_grade, cx + 5, y + 5, { width: cols[3].w - 10, align: 'center' }); cx += cols[3].w;
-      doc.text(f.absent ? '—' : f.grade_point.toFixed(1), cx + 5, y + 5, { width: cols[4].w - 10, align: 'center' });
-      y += rowH;
-    });
-    doc.strokeColor('#0b5394').lineWidth(1).rect(tableX, y - rowH * result.families.length, CW, rowH * result.families.length).stroke();
-    y += 12;
-    if (saved && saved.teacher_remarks) {
-      pageGap();
-      doc.font('Helvetica-Bold').fontSize(9.5).fillColor('#111111').text('Teacher Remarks:', 40, y);
-      y += 14;
-      doc.font('Helvetica-Oblique').fontSize(9.5).text(String(saved.teacher_remarks), 40, y, { width: CW });
-      y += 20;
-    }
-
-    // -------- Later pages: detail --------
-    doc.addPage();
-    y = 40;
-    doc.font('Helvetica-Bold').fontSize(12).fillColor('#0b5394').text('Subject-wise Marks', 40, y);
-    y += 20;
-    for (const f of result.families) {
-      pageGap();
-      doc.fillColor('#111111').font('Helvetica-Bold').fontSize(9.5)
-        .text(`${f.is_optional ? '(4th Subject) ' : ''}${f.subject} — ${f.letter_grade} (GPA ${f.grade_point.toFixed(1)}, ${f.scaled.toFixed(2)}%)`, 40, y);
-      y += 15;
-      const pd0 = f.paper_details && f.paper_details[0];
-      const detail = f.paper_details && f.paper_details.length > 1
-        ? f.paper_details.map(pd => {
-            const comps = [
-              pd.cq != null ? 'CQ ' + pd.cq : '',
-              pd.mcq != null ? 'MCQ ' + pd.mcq : '',
-              pd.practical != null ? 'Practical ' + pd.practical : '',
-              pd.written != null ? 'Written ' + pd.written : '',
-              pd.marks != null ? 'Total ' + pd.marks : ''
-            ].filter(Boolean).join('  ');
-            return `${pd.subject_name}${comps ? '  ›  ' + comps : ''}  [${pd.letter_grade}]`;
-          })
-        : [pd0 ? `${pd0.subject_name}${pd0.marks != null ? '  ›  Total ' + pd0.marks : ''}  [${pd0.letter_grade}]` : '—'];
-      doc.font('Helvetica').fontSize(9);
-      detail.forEach(line => {
-        if (pageGap()) {}
-        doc.text('• ' + line, 55, y, { width: CW - 15 });
-        y += 13;
-      });
-      y += 4;
-    }
-
-    y += 8;
-    pageGap();
-    doc.font('Helvetica-Bold').fontSize(12).fillColor('#0b5394').text('Attendance Summary', 40, y);
-    y += 16;
-    doc.font('Helvetica').fontSize(9.5).fillColor('#111111')
-      .text(attRows.length ? `Total recorded: ${attRows.reduce((s, r) => s + Number(r.cnt), 0)}  |  ${attRows.map(r => r.status + ': ' + r.cnt).join(', ')}` : 'No attendance records', 40, y, { width: CW });
-    y += 18;
-
-    if (comments.length) {
-      pageGap();
-      doc.font('Helvetica-Bold').fontSize(12).fillColor('#0b5394').text('Subject Comments', 40, y);
-      y += 16;
-      doc.font('Helvetica').fontSize(9.5).fillColor('#111111');
-      comments.forEach(c => {
-        pageGap();
-        doc.text(`• ${c.subject_name} (${c.exam_name}): ${c.comment}`, 55, y, { width: CW - 15 });
+        doc.font(FONT).fontSize(10).fillColor('#0b5394').text('Student Information', MARGIN, y);
         y += 14;
-      });
-      y += 6;
-    }
+        
+        // Student info in a grid (matching reference)
+        const infoLines = [
+          ['Name of Student', student.name],
+          ["Father's Name", student.father_name || '—'],
+          ['Registration No', String(student.student_code)],
+          ["Mother's Name", student.mother_name || '—'],
+          ['Roll No', String(student.roll)],
+          ['Group', student.group_name || student.section || '—'],
+          ['Academic Session', settings.exam_term_name || '—'],
+          ['Date of Birth', student.dob ? String(student.dob).slice(0, 10) : '—'],
+          ['Class', `${student.class_name}${student.group_name ? ' (' + student.group_name + ')' : ' (' + student.section + ')'}`],
+          ['Religion', student.religion || '—']
+        ];
 
-    if (complaints.length) {
-      pageGap();
-      doc.font('Helvetica-Bold').fontSize(12).fillColor('#0b5394').text('Complaints & Remarks History', 40, y);
-      y += 16;
-      doc.font('Helvetica').fontSize(9.5).fillColor('#111111');
-      complaints.forEach(c => {
-        pageGap();
-        doc.text(`• [${String(c.type).toUpperCase()}] ${c.title}: ${c.body} (${String(c.created_at).slice(0, 10)})`, 55, y, { width: CW - 15 });
-        y += 14;
-      });
-    }
+        const col1W = 140, col2W = CW - col1W - 10;
+        infoLines.forEach(([k, v], idx) => {
+          const x = idx % 2 === 0 ? MARGIN : MARGIN + col1W + 20;
+          const w = idx % 2 === 0 ? col1W : col2W;
+          doc.font(FONT).fontSize(9).fillColor('#555555').text(k + ':', x, y, { width: w });
+          doc.font(FONT).fontSize(9).fillColor('#111111').text(String(v), x + 120, y, { width: w - 120 });
+          if (idx % 2 === 1) y += 14;
+        });
+        if (infoLines.length % 2 === 1) y += 14;
+        y += 10;
 
-    const pages = doc.bufferedPageRange();
-    for (let i = pages.start; i < pages.start + pages.count; i++) {
-      doc.switchToPage(i);
-      doc.font('Helvetica').fontSize(8).fillColor('#888888')
-        .text(`Page ${i - pages.start + 1} of ${pages.count}`, 40, doc.page.height - 36, { align: 'center', width: CW });
-      if (i === pages.start) {
-        doc.text('Generated on ' + new Date().toISOString().slice(0, 10), 40, doc.page.height - 26, { align: 'center', width: CW });
-      }
-    }
-    doc.end();
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
-});
+        // ======================== GRADING SCALE ========================
+        const gradeScale = [
+          { grade: 'A+', range: '80 – 100', gp: '5.0' },
+          { grade: 'A',  range: '70 – 79',  gp: '4.0' },
+          { grade: 'A-', range: '60 – 69',  gp: '3.5' },
+          { grade: 'B',  range: '50 – 59',  gp: '3.0' },
+          { grade: 'C',  range: '40 – 49',  gp: '2.0' },
+          { grade: 'D',  range: '33 – 39',  gp: '1.0' },
+          { grade: 'F',  range: '00 – 32',  gp: '0.0' }
+        ];
+        
+        const gsW = 180;
+        const gsX = MARGIN + CW - gsW;
+        doc.font(FONT).fontSize(8).fillColor('#0b5394').text('Grading Scale', gsX, y, { width: gsW, align: 'center' });
+        let gy = y + 12;
+        doc.font(FONT).fontSize(7).fillColor('#0b5394');
+        doc.rect(gsX, gy, 50, 14).fill();
+        doc.rect(gsX + 50, gy, 65, 14).fill();
+        doc.rect(gsX + 115, gy, 65, 14).fill();
+        doc.fillColor('#fff').font(FONT).fontSize(7).font('Helvetica-Bold');
+        doc.text('Letter Grade', gsX + 2, gy + 2, { width: 46, align: 'center' });
+        doc.text('Class Interval', gsX + 52, gy + 2, { width: 61, align: 'center' });
+        doc.text('Grade Point', gsX + 117, gy + 2, { width: 61, align: 'center' });
+        gy += 14;
+        doc.fillColor('#111111').font(FONT).fontSize(7);
+        gradeScale.forEach((g, i) => {
+          if (i % 2 === 0) doc.fillColor('#eef3f9').rect(gsX, gy, gsW, 14).fill();
+          doc.font(FONT).fontSize(7).fillColor('#111111');
+          doc.text(g.grade, gsX + 2, gy + 2, { width: 46, align: 'center' });
+          doc.text(g.range, gsX + 52, gy + 2, { width: 61, align: 'center' });
+          doc.text(g.gp, gsX + 117, gy + 2, { width: 61, align: 'center' });
+          gy += 14;
+        });
+        doc.strokeColor('#0b5394').lineWidth(0.5).rect(gsX, y, gsW, gy - y).stroke();
+        
+        y += 8;
+
+        // ======================== MARKS TABLE ========================
+        const mCols = [
+          { w: 40, t: 'Sl.', key: 'sl', align: 'center' },
+          { w: 180, t: 'Name of Subjects', key: 'subject', align: 'left' },
+          { w: 70, t: 'Marks', key: 'marks', align: 'center' },
+          { w: 80, t: 'Letter Grade', key: 'grade', align: 'center' },
+          { w: 70, t: 'Grade Point', key: 'gp', align: 'center' }
+        ];
+        const mRowH = 18;
+        const mTableX = MARGIN;
+
+        // Header
+        doc.fillColor('#0b5394').rect(mTableX, y, CW, mRowH).fill();
+        doc.fillColor('#fff').font(FONT).fontSize(8).font('Helvetica-Bold');
+        let mcx = mTableX;
+        mCols.forEach(c => {
+          doc.text(c.t, mcx + 3, y + 4, { width: c.w - 6, align: c.align });
+          mcx += c.w;
+        });
+        y += mRowH;
+        doc.fillColor('#111111').font(FONT).fontSize(8);
+
+        // Regular subjects
+        let sl = 1;
+        result.families.forEach((f, i) => {
+          if (!f.is_optional) {
+            pageGap();
+            if (i % 2 === 0) doc.fillColor('#eef3f9').rect(mTableX, y, CW, mRowH).fill();
+            mcx = mTableX;
+            const marksText = f.absent ? 'Absent' : `${f.total}/${f.full}`;
+            const rowData = [sl++, f.subject, marksText, f.absent ? '—' : f.letter_grade, f.absent ? '—' : f.grade_point.toFixed(1)];
+            rowData.forEach((v, ci) => {
+              doc.text(String(v), mcx + 3, y + 4, { width: mCols[ci].w - 6, align: mCols[ci].align });
+              mcx += mCols[ci].w;
+            });
+            y += mRowH;
+          }
+        });
+
+        // 4th subject (optional)
+        const fourthSubs = result.families.filter(f => f.is_optional);
+        if (fourthSubs.length) {
+          pageGap();
+          y += 6;
+          doc.font(FONT).fontSize(8).fillColor('#0b5394').text('Fourth Subject (Optional)', MARGIN, y);
+          y += 12;
+          doc.fillColor('#0b5394').rect(mTableX, y, CW, mRowH).fill();
+          doc.fillColor('#fff').font(FONT).fontSize(8).font('Helvetica-Bold');
+          mcx = mTableX;
+          mCols.forEach(c => {
+            doc.text(c.t, mcx + 3, y + 4, { width: c.w - 6, align: c.align });
+            mcx += c.w;
+          });
+          y += mRowH;
+          doc.fillColor('#111111').font(FONT).fontSize(8);
+          fourthSubs.forEach((f, i) => {
+            pageGap();
+            if (i % 2 === 0) doc.fillColor('#eef3f9').rect(mTableX, y, CW, mRowH).fill();
+            mcx = mTableX;
+            const marksText = f.absent ? 'Absent' : `${f.total}/${f.full}`;
+            const rowData = [sl++, f.subject, marksText, f.absent ? '—' : f.letter_grade, f.absent ? '—' : f.grade_point.toFixed(1)];
+            rowData.forEach((v, ci) => {
+              doc.text(String(v), mcx + 3, y + 4, { width: mCols[ci].w - 6, align: mCols[ci].align });
+              mcx += mCols[ci].w;
+            });
+            y += mRowH;
+          });
+        }
+
+        doc.strokeColor('#0b5394').lineWidth(1).rect(mTableX, y - mRowH * (sl - 1), CW, mRowH * (sl - 1)).stroke();
+        y += 12;
+
+        // ======================== GPA SUMMARY ========================
+        doc.font(FONT).fontSize(9).fillColor('#0b5394').text(
+          `GPA (without 4th subject): ${result.total_gpa_without_4th.toFixed(2)}    4th-subject bonus: ${result.gpa_4th_bonus.toFixed(2)}    Final GPA: ${result.final_gpa.toFixed(2)}`,
+          MARGIN, y, { width: CW });
+        y += 16;
+        doc.fillColor(result.result_status === 'PASSED' ? '#1e7d32' : '#c62828')
+          .font(FONT).fontSize(11).font('Helvetica-Bold')
+          .text('Result: ' + result.result_status, MARGIN, y);
+        y += 24;
+
+        // ======================== SIGNATURES ========================
+        const sigY = doc.page.height - 100;
+        const sigW = 180;
+        const gap = (CW - 2 * sigW) / 2;
+        
+        // Class Teacher signature
+        const ctSigPath = settings.class_teacher_signature ? path.join(__dirname, '..', 'uploads', path.basename(settings.class_teacher_signature)) : null;
+        if (ctSigPath && fs.existsSync(ctSigPath)) {
+          doc.image(ctSigPath, MARGIN + gap / 2, sigY, { width: sigW });
+        } else {
+          doc.moveTo(MARGIN + gap / 2, sigY + 40).lineTo(MARGIN + gap / 2 + sigW, sigY + 40).stroke();
+        }
+        doc.font(FONT).fontSize(8).fillColor('#111111').text('Class Teacher', MARGIN + gap / 2, sigY + 44, { width: sigW, align: 'center' });
+
+        // Headmaster signature
+        const hmSigPath = settings.headmaster_signature ? path.join(__dirname, '..', 'uploads', path.basename(settings.headmaster_signature)) : null;
+        if (hmSigPath && fs.existsSync(hmSigPath)) {
+          doc.image(hmSigPath, MARGIN + gap / 2 + sigW + gap, sigY, { width: sigW });
+        } else {
+          doc.moveTo(MARGIN + gap / 2 + sigW + gap, sigY + 40).lineTo(MARGIN + CW - gap / 2, sigY + 40).stroke();
+        }
+        doc.font(FONT).fontSize(8).fillColor('#111111').text('Headmaster / Principal', MARGIN + gap / 2 + sigW + gap, sigY + 44, { width: sigW, align: 'center' });
+
+        doc.end();
+      } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+    });
 
 router.put('/results/remarks', async (req, res) => {
   const { student_id, exam_id, teacher_remarks } = req.body || {};

@@ -4,6 +4,8 @@ import '../api.dart';
 import 'students_screen.dart';
 import 'teachers_screen.dart';
 import 'classes_screen.dart';
+import 'approvals_screen.dart';
+import 'exam_catalog_screen.dart';
 import 'exams_screen.dart';
 import 'results_screen.dart';
 import 'notices_screen.dart';
@@ -11,7 +13,9 @@ import 'sibling_request_screen.dart';
 import 'settings_screen.dart';
 import 'routines_screen.dart';
 import 'promotion_screen.dart';
+import 'attendance_screen.dart';
 import 'login_screen.dart';
+import 'exam_dashboard_screen.dart';
 import '../widgets/offline_sync_banner.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -108,6 +112,13 @@ class _HomeScreenState extends State<HomeScreen> {
         screen: const ClassesScreen(),
       ),
       (
+        title: 'Exam Session Dashboard',
+        subtitle: 'Sessions, progress, publish, entry',
+        icon: Icons.dashboard_rounded,
+        color: const Color(0xFF6366F1),
+        screen: const ExamDashboardScreen(),
+      ),
+      (
         title: 'Exams & Marks',
         subtitle: 'Assessments & entries',
         icon: Icons.assignment_turned_in_rounded,
@@ -122,6 +133,20 @@ class _HomeScreenState extends State<HomeScreen> {
         screen: const ResultsScreen(),
       ),
       (
+        title: 'Exam Approvals',
+        subtitle: 'Pending marks entry',
+        icon: Icons.rule_folder_rounded,
+        color: const Color(0xFF0D9488),
+        screen: const ApprovalsScreen(),
+      ),
+      (
+        title: 'Exam Weightage',
+        subtitle: 'NCTB catalog & pass rules',
+        icon: Icons.tune_rounded,
+        color: const Color(0xFF7C3AED),
+        screen: const ExamCatalogScreen(),
+      ),
+      (
         title: 'Promotion → SSC',
         subtitle: 'Yearly graduation',
         icon: Icons.how_to_reg_rounded,
@@ -134,6 +159,13 @@ class _HomeScreenState extends State<HomeScreen> {
         icon: Icons.calendar_today_rounded,
         color: const Color(0xFF16A34A),
         screen: const RoutinesScreen(),
+      ),
+      (
+        title: 'Attendance',
+        subtitle: 'Board, requests & report',
+        icon: Icons.fact_check_rounded,
+        color: const Color(0xFF0EA5E9),
+        screen: const AttendanceScreen(),
       ),
       (
         title: 'Notices',

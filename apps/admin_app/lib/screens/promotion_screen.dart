@@ -1,27 +1,57 @@
 import 'package:flutter/material.dart';
 import '../api.dart';
+import '../pdf/admin_pdfs.dart';
+import '../pdf/app_pdf.dart';
 
+/// Promotion Dashboard — Admin UI for student promotion.
+///
+/// Workflow:
+/// 1. Configure promotion rules (per class + exam type)
+/// 2. Select class + promotion-source event
+/// 3. Calculate eligibility (mandatory-pass + grace + GPA rules)
+/// 4. Review auto-calculated statuses, override individual students
+/// 5. Bulk approve / bulk retain
+/// 6. Execute promotion (moves students to the next class, assigns rolls)
+/// 7. Export the promotion report (on-device PDF) and read the audit history
+///
+/// All API paths are mounted under `/api/admin`, e.g. `/admin/promotion/status`.
 class PromotionScreen extends StatefulWidget {
   const PromotionScreen({super.key});
+
   @override
   State<PromotionScreen> createState() => _PromotionScreenState();
 }
 
-class _PromotionScreenState extends State<PromotionScreen> {
+class _PromotionScreenState extends State<PromotionScreen>
+    with SingleTickerProviderStateMixin {
+  late final TabController _tabs = TabController(length: 4, vsync: this);
+
+  // Top-bar selection
   List _classes = [];
   List _events = [];
-  List _review = [];
+  List _sessions = [];
   int? _classId;
   int? _eventId;
-  int _grace = 2;
-  bool _reviewed = false;
+  int? _targetSessionId;
   bool _loading = false;
   String _error = '';
   String _statusMsg = '';
 
-  final Map<int, bool> _promote = {};      // student id -> promote?
-  final Map<int, String> _decision = {};   // server-suggested decision
-  final Map<int, String> _note = {};
+  // Tab 1 — rules
+  List _rules = [];
+  bool _rulesLoading = false;
+
+  // Tab 2 — eligibility calculation
+  List _review = [];
+  Map _calcSummary = {};
+  bool _reviewed = false;
+
+  // Tab 3 — status dashboard
+  List _students = [];
+  String _statusFilter = 'all';
+
+  // Tab 4 — history
+  List _history = [];
 
   @override
   void initState() {
@@ -29,189 +59,1053 @@ class _PromotionScreenState extends State<PromotionScreen> {
     _load();
   }
 
+  @override
+  void dispose() {
+    _tabs.dispose();
+    super.dispose();
+  }
+
+  // ============================================================== DATA LOADING
+
   Future<void> _load() async {
-    setState(() { _loading = true; _error = ''; });
+    setState(() {
+      _loading = true;
+      _error = '';
+    });
     try {
       final results = await Future.wait([
         Api.get('/admin/classes'),
         Api.get('/results/events'),
+        Api.get('/admin/sessions'),
       ]);
+      if (!mounted) return;
       setState(() {
         _classes = results[0] is List ? results[0] : [];
         _events = results[1] is List ? results[1] : [];
+        _sessions = results[2] is List ? results[2] : [];
         _loading = false;
       });
     } catch (e) {
-      setState(() { _loading = false; _error = e.toString().replaceFirst('Exception: ', ''); });
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = _friendly(e);
+      });
     }
   }
 
-  Future<void> _runReview() async {
+  String _friendly(Object e) =>
+      e.toString().replaceFirst('Exception: ', '');
+
+  // Only published promotion-source events are usable: Class 10 promotes from
+  // a TEST event, Class 6–9 from an ANNUAL event.
+  List get _promotionEvents {
+    final cls = _selectedClass;
+    final isClass10 = cls != null &&
+        RegExp(r'class\s*10', caseSensitive: false)
+            .hasMatch(cls['name']?.toString() ?? '');
+    final needKind = isClass10 ? 'test' : 'annual';
+    return _events.where((e) {
+      if (e['is_published'] != 1 && e['is_published'] != true) return false;
+      return e['exam_kind']?.toString() == needKind;
+    }).toList();
+  }
+
+  Map? get _selectedClass {
+    for (final c in _classes) {
+      if ((c['id'] as num?)?.toInt() == _classId) return c;
+    }
+    return null;
+  }
+
+  // ============================================================== TAB 1: RULES
+
+  Future<void> _loadRules() async {
+    if (_classId == null) return;
+    setState(() {
+      _rulesLoading = true;
+    });
+    try {
+      final r = await Api.get('/admin/promotion-rules/class/$_classId');
+      if (!mounted) return;
+      setState(() {
+        _rules = r is List ? r : [];
+        _rulesLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _rulesLoading = false;
+        _error = _friendly(e);
+      });
+    }
+  }
+
+  Future<void> _saveRule(String examType) async {
+    if (_classId == null) return;
+    final grace = await _askGrace(examType);
+    if (grace == null) return;
+    setState(() => _loading = true);
+    try {
+      await Api.put('/admin/promotion-rules', {
+        'class_id': _classId,
+        'exam_type': examType,
+        'is_promotion_source': true,
+        'min_passing_gpa': 2.0,
+        'allow_conditional': true,
+        'grace_failed_subjects': grace,
+        'mandatory_subjects': const <String>[],
+      });
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _statusMsg = '$examType নিয়ম সংরক্ষিত হয়েছে';
+      });
+      _loadRules();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = _friendly(e);
+      });
+    }
+  }
+
+  Future<int?> _askGrace(String examType) async {
+    var value = 0;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: Text('$examType — Grace Limit'),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Text(
+              'কত বিষয়ে fail হলেও ছাত্রটি শর্তসাপেক্ষে উত্তীর্ণ ধরা হবে?',
+              style: TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                IconButton(
+                  onPressed: value > 0 ? () => setD(() => value--) : null,
+                  icon: const Icon(Icons.remove_circle_outline),
+                ),
+                Text('$value',
+                    style: const TextStyle(
+                        fontSize: 26, fontWeight: FontWeight.bold)),
+                IconButton(
+                  onPressed: value < 11 ? () => setD(() => value++) : null,
+                  icon: const Icon(Icons.add_circle_outline),
+                ),
+              ],
+            ),
+          ]),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('বাতিল')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Save')),
+          ],
+        ),
+      ),
+    );
+    return ok == true ? value : null;
+  }
+
+  // ================================================= TAB 2: ELIGIBILITY CALC
+
+  Future<void> _calculate() async {
     if (_classId == null || _eventId == null) {
       setState(() => _error = 'প্রথমে শ্রেণি এবং পরীক্ষা নির্বাচন করুন');
       return;
     }
-    setState(() { _loading = true; _error = ''; _reviewed = false; });
+    setState(() {
+      _loading = true;
+      _error = '';
+      _reviewed = false;
+    });
     try {
-      final r = await Api.post('/promote/review', {
+      final r = await Api.post('/admin/promotion/calculate', {
         'class_id': _classId,
         'event_id': _eventId,
       });
-      final review = r['review'] is List ? (r['review'] as List) : [];
+      if (!mounted) return;
       setState(() {
-        _review = review;
-        _grace = (r['grace_failed'] as num?)?.toInt() ?? 2;
-        _promote.clear();
-        _decision.clear();
-        _note.clear();
-        for (final st in review) {
-          final id = (st['id'] as num).toInt();
-          _promote[id] = (st['decision'] == 'promoted' || st['decision'] == 'grace_promoted');
-          _decision[id] = st['decision']?.toString() ?? 'retained';
-        }
+        _review = r['review'] is List ? (r['review'] as List) : [];
+        _calcSummary = r['summary'] is Map ? Map.from(r['summary']) : {};
         _reviewed = true;
         _loading = false;
       });
     } catch (e) {
-      setState(() { _loading = false; _error = e.toString().replaceFirst('Exception: ', ''); });
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = _friendly(e);
+      });
     }
   }
 
-  Future<void> _saveGrace() async {
-    if (_classId == null) return;
+  Future<void> _override(int studentId, String status, String decision) async {
     setState(() => _loading = true);
     try {
-      await Api.put('/promote/grace', {
-        'class_id': _classId,
-        'exam_type': 'test',
-        'grace_failed': _grace,
+      await Api.put('/admin/promotion/status/$studentId', {
+        'status': status,
+        'decision': decision,
+        'admin_note': 'Admin override from app',
       });
-      setState(() { _loading = false; _statusMsg = 'Grace নিয়ম সংরক্ষিত হয়েছে'; });
-      _runReview();
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _statusMsg = 'ছাত্রের সিদ্ধান্ত পরিবর্তন হয়েছে';
+      });
+      _calculate();
     } catch (e) {
-      setState(() { _loading = false; _error = e.toString().replaceFirst('Exception: ', ''); });
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = _friendly(e);
+      });
     }
   }
 
-  Future<void> _execute() async {
-    if (_classId == null || _eventId == null || _review.isEmpty) return;
+  // ================================================== TAB 3: STATUS DASHBOARD
+
+  Future<void> _loadStatus() async {
+    if (_targetSessionId == null) return;
+    setState(() => _loading = true);
+    try {
+      final params = <String, String>{
+        'target_session_id': _targetSessionId.toString()
+      };
+      final r = await Api.get('/admin/promotion/status', queryParams: params);
+      if (!mounted) return;
+      setState(() {
+        _students = r is List ? r : [];
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = _friendly(e);
+      });
+    }
+  }
+
+  List get _filteredStudents {
+    if (_statusFilter == 'all') return _students;
+    return _students.where((s) => s['status']?.toString() == _statusFilter).toList();
+  }
+
+  List<int> get _selectedIds => _students
+      .where((s) => s['selected'] == true)
+      .map((s) => (s['student_id'] as num).toInt())
+      .toList();
+
+  Future<void> _bulkAction(String action) async {
+    if (_targetSessionId == null) return;
+    final ids = _selectedIds;
+    if (ids.isEmpty) {
+      setState(() => _error = 'কোনো ছাত্র নির্বাচন করা হয়নি');
+      return;
+    }
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Promotion নিশ্চিত করুন'),
-        content: Text('${_promote.values.where((v) => v).length} জনকে SSC Batch এ উত্তীর্ণ করা হবে। '
-            'পরীক্ষা event $_eventId) নিশ্চিত? ইতিমধ্যে দেয়া ফলাফল আবারও পাঠালে roll আপডেট হবে।'),
+        title: Text(action == 'approve' ? 'স্বীকৃতি দিবেন?' : 'রক্ষণ করবেন?'),
+        content: Text('${ids.length} জন ছাত্রকে '
+            '${action == 'approve' ? 'উত্তীর্ণ হিসেবে অনুমোদন' : 'রাখা হয়েছে হিসেবে চিহ্নিত'} করা হবে।'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('বাতিল')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('নিশ্চিত করুন')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('বাতিল')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('নিশ্চিত করুন')),
         ],
       ),
     );
     if (ok != true) return;
 
-    setState(() { _loading = true; _error = ''; });
-    final students = <Map<String, dynamic>>[];
-    for (final st in _review) {
-      final id = (st['id'] as num).toInt();
-      students.add({
-        'id': id,
-        'promote': _promote[id] == true,
-        'decision': _promote[id] == true ? _decision[id] : 'retained',
-        'final_gpa': st['final_gpa'],
-        'note': _note[id] ?? '',
-      });
-    }
+    setState(() => _loading = true);
     try {
-      final r = await Api.post('/promote/execute', {
-        'class_id': _classId,
-        'event_id': _eventId,
-        'students': students,
+      final endpoint = action == 'approve'
+          ? '/admin/promotion/bulk-approve'
+          : '/admin/promotion/bulk-retain';
+      final r = await Api.post(endpoint, {
+        'student_ids': ids,
+        'target_session_id': _targetSessionId,
       });
+      if (!mounted) return;
+      final count = action == 'approve' ? (r['approved'] ?? 0) : (r['retained'] ?? 0);
       setState(() {
         _loading = false;
-        _statusMsg = '${r['promoted'] is List ? (r['promoted'] as List).length : 0} জন উত্তীর্ণ, '
-            '${r['retained'] is List ? (r['retained'] as List).length : 0} জন খুঁজে পাইনি/রাখা হয়েছে';
+        _statusMsg = '$count জন ছাত্রকে '
+            '${action == 'approve' ? 'অনুমোদন' : 'রক্ষণ'} করা হয়েছে';
       });
-      final msgCtx = context;
-      if (!msgCtx.mounted) return;
-      ScaffoldMessenger.of(msgCtx)
-          .showSnackBar(SnackBar(content: Text(_statusMsg)));
-      if (mounted) _runReview();
+      _loadStatus();
     } catch (e) {
-      setState(() { _loading = false; _error = e.toString().replaceFirst('Exception: ', ''); });
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = _friendly(e);
+      });
     }
   }
+
+  Future<void> _executePromotion() async {
+    if (_targetSessionId == null) return;
+    final approvedCount = _students
+        .where((s) =>
+            s['status'] == 'approved' && s['decision'] == 'promoted')
+        .length;
+    if (approvedCount == 0) {
+      setState(() => _error = 'প্রমোট করার জন্য কোনো অনুমোদিত ছাত্র নেই');
+      return;
+    }
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('প্রমোশন নিশ্চিত করুন'),
+        content: Text(
+            '$approvedCount জনকে পরবর্তী শ্রেণিতে স্থানান্তর করা হবে। নিশ্চিত?'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('বাতিল')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('নিশ্চিত করুন')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    setState(() => _loading = true);
+    try {
+      final r = await Api.post('/admin/promotion/execute', {
+        'target_session_id': _targetSessionId,
+      });
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _statusMsg = '${r['moved'] ?? 0} জন স্থানান্তরিত হয়েছে';
+      });
+      _loadStatus();
+      _loadHistory();
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(_statusMsg)));
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = _friendly(e);
+      });
+    }
+  }
+
+  // ================================================ TAB 4: HISTORY & REPORT
+
+  Future<void> _loadHistory() async {
+    if (_targetSessionId == null) return;
+    setState(() => _loading = true);
+    try {
+      final params = <String, String>{
+        'target_session_id': _targetSessionId.toString()
+      };
+      final r = await Api.get('/admin/promotion/history', queryParams: params);
+      if (!mounted) return;
+      setState(() {
+        _history = r is List ? r : [];
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = _friendly(e);
+      });
+    }
+  }
+
+  /// The report is rendered on the phone (like every other PDF in this app),
+  /// so it works even when the server only speaks JSON.
+  Future<void> _exportReport() async {
+    if (_targetSessionId == null) return;
+    setState(() => _loading = true);
+    try {
+      final params = <String, String>{
+        'session_id': _targetSessionId.toString()
+      };
+      final r = await Api.get('/admin/promotion/report', queryParams: params);
+      if (!mounted) return;
+      final rows = r['data'] is List ? (r['data'] as List) : const [];
+      final dynamic settings = await Api.get('/admin/settings');
+      if (!mounted) return;
+      setState(() => _loading = false);
+      final bytes = await AdminPdfs.promotionReport(
+        rows.cast<Map>(),
+        settings: settings is Map ? settings : const {},
+        sessionName: _sessionName(_targetSessionId),
+      );
+      await AppPdf.share(bytes, 'promotion_report_$_targetSessionId.pdf');
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = _friendly(e);
+      });
+    }
+  }
+
+  String _sessionName(int? id) {
+    for (final s in _sessions) {
+      if ((s['id'] as num?)?.toInt() == id) {
+        return s['name']?.toString() ?? '';
+      }
+    }
+    return '';
+  }
+
+  // ================================================================ LABELS
+
+  String _statusLabel(String? status) {
+    switch (status) {
+      case 'eligible':
+        return 'যোগ্য';
+      case 'conditional':
+        return 'শর্তসাপেক্ষ';
+      case 'not_eligible':
+        return 'যোগ্য নয়';
+      case 'pending_results':
+        return 'ফলাফল নেই';
+      case 'pending_review':
+        return 'রিভিউ';
+      case 'approved':
+        return 'অনুমোদিত';
+      case 'promoted':
+        return 'প্রমোটেড';
+      case 'retained':
+        return 'রক্ষিত';
+      case 'admin_override':
+        return 'ওভাররাইড';
+      default:
+        return status ?? '';
+    }
+  }
+
+  String _decisionLabel(String? decision) {
+    switch (decision) {
+      case 'promoted':
+        return 'প্রমোট';
+      case 'retained':
+        return 'রক্ষা';
+      case 'conditional':
+        return 'শর্তসাপেক্ষ';
+      case 'admin_override':
+        return 'ওভাররাইড';
+      default:
+        return decision ?? '';
+    }
+  }
+
+  Color _statusColor(String? status) {
+    switch (status) {
+      case 'eligible':
+        return Colors.green;
+      case 'conditional':
+        return Colors.amber.shade800;
+      case 'approved':
+        return Colors.green.shade700;
+      case 'promoted':
+        return Colors.green;
+      case 'retained':
+        return Colors.red;
+      case 'not_eligible':
+        return Colors.red;
+      case 'pending_review':
+        return Colors.blue;
+      case 'admin_override':
+        return Colors.purple;
+      default:
+        return Colors.grey;
+    }
+  }
+
+  Color _decisionColor(String? decision) {
+    switch (decision) {
+      case 'promoted':
+        return Colors.green;
+      case 'conditional':
+        return Colors.amber.shade800;
+      case 'retained':
+        return Colors.red;
+      case 'admin_override':
+        return Colors.purple;
+      default:
+        return Colors.grey;
+    }
+  }
+
+  // ================================================================ UI
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Class 10 → SSC Promotion')),
-      body: _loading && _review.isEmpty && _classes.isEmpty
+      appBar: AppBar(
+        title: const Text('ছাত্র প্রমোশন ব্যবস্থাপনা'),
+        bottom: TabBar(
+          controller: _tabs,
+          isScrollable: true,
+          tabs: const [
+            Tab(text: 'নিয়ম', icon: Icon(Icons.settings)),
+            Tab(text: 'যোগ্যতা', icon: Icon(Icons.calculate)),
+            Tab(text: 'ড্যাশবোর্ড', icon: Icon(Icons.dashboard)),
+            Tab(text: 'রিপোর্ট', icon: Icon(Icons.assessment)),
+          ],
+        ),
+      ),
+      body: _loading && _classes.isEmpty
           ? const Center(child: CircularProgressIndicator())
-          : ListView(padding: const EdgeInsets.all(12), children: [
-              if (_error.isNotEmpty)
-                Card(color: Colors.red.shade50, child: Padding(padding: const EdgeInsets.all(10), child: Text(_error, style: TextStyle(color: Colors.red.shade800)))),
+          : Column(children: [
+              _topBar(),
+              if (_loading) const LinearProgressIndicator(),
+              if (_error.isNotEmpty) _banner(Icons.error, Colors.red, _error, () {
+                setState(() => _error = '');
+              }),
               if (_statusMsg.isNotEmpty)
-                Card(color: Colors.green.shade50, child: Padding(padding: const EdgeInsets.all(10), child: Text(_statusMsg, style: TextStyle(color: Colors.green.shade800)))),
-              _picker(
-                label: 'শ্রেণি *',
-                value: _classId,
-                items: _classes.map((c) {
-                  return (c['id'] as num).toInt();
-                }).toList(),
-                labels: _classes.map((c) {
-                  final name = "${c['name']}${(c['group_name']?.toString() ?? '').isNotEmpty ? ' (${c['group_name']})' : (c['section']?.toString() ?? '')}";
-                  return name;
-                }).toList(),
-                onChanged: (v) => setState(() => _classId = v),
+                _banner(Icons.check_circle, Colors.green, _statusMsg, null),
+              Expanded(
+                child: TabBarView(controller: _tabs, children: [
+                  _rulesTab(),
+                  _calculateTab(),
+                  _statusTab(),
+                  _historyTab(),
+                ]),
               ),
-              _picker(
-                label: 'পরীক্ষা Event *',
-                value: _eventId,
-                items: _events.map((e) => (e['id'] as num).toInt()).toList(),
-                labels: _events.map((e) => '${e['name'] ?? ''}').toList(),
-                onChanged: (v) => setState(() => _eventId = v),
-              ),
-              const SizedBox(height: 8),
-              Row(children: [
-                const Text('Grace (যত subject fail পর্যন্ত pass দেবে): '),
-                const SizedBox(width: 8),
-                DropdownButton<int>(
-                  value: _grace,
-                  items: [for (var i = 0; i <= 11; i++) DropdownMenuItem(value: i, child: Text('$i'))],
-                  onChanged: (v) => setState(() => _grace = v ?? 0),
-                ),
-                const Spacer(),
-                TextButton(onPressed: _saveGrace, child: const Text('Grace সেভ')),
-              ]),
-              const SizedBox(height: 10),
-              Row(children: [
-                Expanded(child: FilledButton(onPressed: _runReview, child: const Text('রিভিউ করুন'))),
-                const SizedBox(width: 8),
-                Expanded(child: FilledButton.icon(
-                  onPressed: _reviewed && _review.isNotEmpty ? _execute : null,
-                  icon: const Icon(Icons.arrow_forward),
-                  label: const Text('Execute'),
-                )),
-              ]),
-              if (_reviewed) ...[
-                const SizedBox(height: 8),
-                Text('মোট ${_review.length} জনের ফলাফল', style: const TextStyle(fontWeight: FontWeight.bold)),
-                for (final st in _review)
-                  _studentTile(st),
-                const SizedBox(height: 80),
-              ],
             ]),
     );
   }
 
-  Widget _picker({
-    required String label,
-    required int? value,
-    required List<int> items,
-    required List<String> labels,
-    required ValueChanged<int?> onChanged,
-  }) {
+  Widget _banner(IconData icon, Color color, String text, VoidCallback? onClose) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      child: Card(
+        color: color.withValues(alpha: 0.05),
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: Row(children: [
+            Icon(icon, color: color),
+            const SizedBox(width: 8),
+            Expanded(child: Text(text, style: TextStyle(color: color))),
+            if (onClose != null)
+              IconButton(
+                  icon: const Icon(Icons.close),
+                  onPressed: onClose),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _topBar() {
+    final events = _promotionEvents;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+      child: Column(children: [
+        Row(children: [
+          Expanded(
+            child: _picker(
+              'শ্রেণি *',
+              _classId,
+              _classes.map((c) => (c['id'] as num).toInt()).toList(),
+              _classes.map((c) {
+                final g = c['group_name']?.toString() ?? '';
+                final s = c['section']?.toString() ?? '';
+                final extra = g.isNotEmpty ? g : s;
+                return '${c['name']}${extra.isNotEmpty ? ' ($extra)' : ''}';
+              }).toList(),
+              (v) {
+                setState(() {
+                  _classId = v;
+                  _eventId = null;
+                  _reviewed = false;
+                });
+                _loadRules();
+              },
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: _picker(
+              'পরীক্ষা Event *',
+              _eventId,
+              events.map((e) => (e['id'] as num).toInt()).toList(),
+              events.map((e) => e['name']?.toString() ?? '').toList(),
+              (v) {
+                setState(() {
+                  _eventId = v;
+                  _reviewed = false;
+                });
+              },
+            ),
+          ),
+        ]),
+        const SizedBox(height: 4),
+        Row(children: [
+          Expanded(
+            child: _picker(
+              'টার্গেট সেশন',
+              _targetSessionId,
+              _sessions.map((s) => (s['id'] as num).toInt()).toList(),
+              _sessions.map((s) => s['name']?.toString() ?? '').toList(),
+              (v) {
+                setState(() {
+                  _targetSessionId = v;
+                  _students = [];
+                  _history = [];
+                });
+                _loadStatus();
+                _loadHistory();
+              },
+            ),
+          ),
+        ]),
+        if (_classId != null && _eventId != null) ...[
+          const SizedBox(height: 4),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: _calculate,
+              icon: const Icon(Icons.calculate),
+              label: const Text('যোগ্যতা ক্যালকুলেট করুন'),
+            ),
+          ),
+        ],
+      ]),
+    );
+  }
+
+  // ------------------------------------------------------------- TAB 1: RULES
+
+  Widget _rulesTab() {
+    if (_classId == null) {
+      return const Center(
+          child: Text('প্রথমে শ্রেণি নির্বাচন করুন',
+              style: TextStyle(color: Colors.grey)));
+    }
+    return Column(children: [
+      Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(children: [
+          Expanded(
+            child: FilledButton.icon(
+              onPressed: () => _saveRule('annual'),
+              icon: const Icon(Icons.save),
+              label: const Text('Annual'),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: FilledButton.icon(
+              onPressed: () => _saveRule('test'),
+              icon: const Icon(Icons.save),
+              label: const Text('Test'),
+            ),
+          ),
+        ]),
+      ),
+      const SizedBox(height: 8),
+      Expanded(
+        child: _rulesLoading
+            ? const Center(child: CircularProgressIndicator())
+            : _rules.isEmpty
+                ? const Center(
+                    child: Text('কোনো নিয়ম নেই',
+                        style: TextStyle(color: Colors.grey)))
+                : ListView.builder(
+                    padding: const EdgeInsets.all(12),
+                    itemCount: _rules.length,
+                    itemBuilder: (_, i) {
+                      final r = _rules[i];
+                      final isSource = r['is_promotion_source'] == true ||
+                          r['is_promotion_source'] == 1;
+                      return Card(
+                        child: ListTile(
+                          leading: Icon(
+                              isSource ? Icons.star : Icons.star_border,
+                              color: isSource ? Colors.amber : Colors.grey),
+                          title: Text(
+                              r['exam_type']?.toString().toUpperCase() ?? ''),
+                          subtitle: Text(
+                              'Source: ${isSource ? 'হ্যাঁ' : 'না'} • '
+                              'Grace: ${r['grace_failed_subjects'] ?? 0} • '
+                              'Min GPA: ${r['min_passing_gpa']}'),
+                        ),
+                      );
+                    },
+                  ),
+      ),
+    ]);
+  }
+
+  // --------------------------------------------------------- TAB 2: CALCULATE
+
+  Widget _calculateTab() {
+    if (_classId == null || _eventId == null) {
+      return const Center(
+          child: Text('শ্রেণি এবং পরীক্ষা Event নির্বাচন করুন',
+              style: TextStyle(color: Colors.grey, fontSize: 16)));
+    }
+    if (!_reviewed) {
+      return const Center(
+          child: Text('যোগ্যতা ক্যালকুলেট করতে উপরের বাটনে চাপ দিন',
+              style: TextStyle(color: Colors.grey)));
+    }
+return Column(children: [
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: Card(
+            color: Colors.blue.withValues(alpha: 0.05),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+            child: Column(children: [
+              const Text('সারসংক্ষেপ',
+                  style: TextStyle(
+                      fontWeight: FontWeight.bold, fontSize: 16)),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 12,
+                runSpacing: 8,
+                children: [
+                  _summaryChip('মোট', '${_calcSummary['total'] ?? 0}'),
+                  _summaryChip('যোগ্য', '${_calcSummary['eligible'] ?? 0}',
+                      Colors.green),
+                  _summaryChip('শর্তসাপেক্ষ',
+                      '${_calcSummary['conditional'] ?? 0}', Colors.amber),
+                  _summaryChip('যোগ্য নয়',
+                      '${_calcSummary['not_eligible'] ?? 0}', Colors.red),
+                ],
+              ),
+            ]),
+          ),
+        ),
+      ),
+      Expanded(
+        child: _review.isEmpty
+            ? const Center(
+                child: Text('কোনো ছাত্র পাওয়া যায়নি',
+                    style: TextStyle(color: Colors.grey)))
+            : ListView.builder(
+                padding: const EdgeInsets.all(12),
+                itemCount: _review.length,
+                itemBuilder: (_, i) => _reviewTile(_review[i]),
+              ),
+      ),
+    ]);
+  }
+
+  Widget _reviewTile(Map st) {
+    final status = st['status']?.toString() ?? 'pending_results';
+    final decision = st['decision']?.toString();
+    final studentId = (st['student_id'] as num?)?.toInt() ?? 0;
+    final color = _statusColor(status);
+    final failed = st['failed_subjects'] is List
+        ? (st['failed_subjects'] as List)
+        : const [];
+    final mandatory = st['mandatory_failed'] is List
+        ? (st['mandatory_failed'] as List)
+        : const [];
+    return Card(
+      color: color.withValues(alpha: 0.08),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(children: [
+                Expanded(
+                  child: Text(
+                      '${st['name']}  •  রোল ${st['roll'] ?? '-'}',
+                      style: const TextStyle(fontWeight: FontWeight.w600)),
+                ),
+                _statusChip(status),
+                if (decision != null) _decisionChip(decision),
+              ]),
+              if (st['final_gpa'] != null)
+                Text(
+                    'GPA: ${(st['final_gpa'] as num).toStringAsFixed(2)}',
+                    style: const TextStyle(fontSize: 12)),
+              if (failed.isNotEmpty)
+                Text('ফেল: ${failed.join(', ')}',
+                    style: TextStyle(fontSize: 11, color: Colors.red.shade700)),
+              if (mandatory.isNotEmpty)
+                Text('বাধ্যতামূলক ফেল: ${mandatory.join(', ')}',
+                    style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.red.shade700,
+                        fontWeight: FontWeight.w600)),
+              Text('কারণ: ${st['reason'] ?? '-'}',
+                  style: const TextStyle(fontSize: 11, color: Colors.grey)),
+              Row(children: [
+                const Spacer(),
+                TextButton.icon(
+                  onPressed: studentId == 0
+                      ? null
+                      : () => _override(studentId, 'approved', 'promoted'),
+                  icon: const Icon(Icons.check, size: 16),
+                  label: const Text('অনুমোদন'),
+                ),
+                TextButton.icon(
+                  onPressed: studentId == 0
+                      ? null
+                      : () => _override(studentId, 'retained', 'retained'),
+                  icon: const Icon(Icons.block, size: 16),
+                  label: const Text('রাখুন'),
+                ),
+              ]),
+            ]),
+      ),
+    );
+  }
+
+  // ------------------------------------------------------------- TAB 3: STATUS
+
+  Widget _statusTab() {
+    if (_targetSessionId == null) {
+      return const Center(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.warning_amber, size: 64, color: Colors.grey),
+            SizedBox(height: 16),
+            Text('টার্গেট সেশন নির্বাচন করুন',
+                style: TextStyle(fontSize: 16, color: Colors.grey)),
+          ]));
+    }
+    if (_students.isEmpty && !_loading) {
+      return const Center(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.people_outline, size: 64, color: Colors.grey),
+            SizedBox(height: 16),
+            Text('এই সেশনে কোনো ছাত্র নেই',
+                style: TextStyle(fontSize: 16, color: Colors.grey)),
+          ]));
+    }
+    final rows = _filteredStudents;
+    return Column(children: [
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(children: [
+            _filterChip('সব', 'all'),
+            _filterChip('যোগ্য', 'eligible'),
+            _filterChip('শর্তসাপেক্ষ', 'conditional'),
+            _filterChip('অনুমোদিত', 'approved'),
+            _filterChip('রক্ষিত', 'retained'),
+            _filterChip('প্রমোটেড', 'promoted'),
+          ]),
+        ),
+      ),
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: Row(children: [
+          Expanded(
+            child: FilledButton.icon(
+              onPressed: _selectedIds.isEmpty ? null : () => _bulkAction('approve'),
+              icon: const Icon(Icons.check_circle_outline),
+              label: const Text('বাল্ক অনুমোদন'),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: _selectedIds.isEmpty ? null : () => _bulkAction('retain'),
+              icon: const Icon(Icons.block_outlined),
+              label: const Text('বাল্ক রক্ষণ'),
+            ),
+          ),
+        ]),
+      ),
+      const SizedBox(height: 6),
+      Expanded(
+        child: rows.isEmpty
+            ? const Center(
+                child: Text('এই ফিল্টারে কোনো ছাত্র নেই',
+                    style: TextStyle(color: Colors.grey)))
+            : ListView.builder(
+                padding: const EdgeInsets.all(12),
+                itemCount: rows.length,
+                itemBuilder: (_, i) => _studentRow(rows[i]),
+              ),
+      ),
+    ]);
+  }
+
+  Widget _filterChip(String label, String value) => Padding(
+        padding: const EdgeInsets.only(right: 6),
+        child: FilterChip(
+          label: Text(label),
+          selected: _statusFilter == value,
+          onSelected: (selected) =>
+              setState(() => _statusFilter = selected ? value : 'all'),
+        ),
+      );
+
+  Widget _studentRow(Map s) {
+    final status = s['status']?.toString() ?? 'pending_results';
+    final decision = s['decision']?.toString();
+    final fromClass = s['from_class_name'] ?? '';
+    final targetClass = s['target_class_name'] ?? '';
+    final color = _statusColor(status);
+    return Card(
+      color: color.withValues(alpha: 0.08),
+      child: CheckboxListTile(
+        value: s['selected'] == true,
+        onChanged: (v) => setState(() => s['selected'] = v),
+        title: Text('${s['name']}  •  রোল ${s['roll'] ?? '-'}',
+            style: const TextStyle(fontWeight: FontWeight.w600)),
+        subtitle: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                  targetClass.isEmpty
+                      ? '$fromClass  →  (গন্তব্য শ্রেণি নির্ধারিত হয়নি)'
+                      : '$fromClass  →  $targetClass',
+                  style:
+                      const TextStyle(fontSize: 12, color: Colors.grey)),
+              if (s['final_gpa'] != null)
+                Text(
+                    'GPA: ${(s['final_gpa'] as num).toStringAsFixed(2)}',
+                    style: const TextStyle(fontSize: 11)),
+              Row(children: [
+                _statusChip(status),
+                if (decision != null) _decisionChip(decision),
+              ]),
+            ]),
+        controlAffinity: ListTileControlAffinity.leading,
+      ),
+    );
+  }
+
+  // ------------------------------------------------------------- TAB 4: HISTORY
+
+  Widget _historyTab() {
+    return Column(children: [
+      Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(children: [
+          Expanded(
+            child: FilledButton.icon(
+              onPressed: _targetSessionId == null ? null : _exportReport,
+              icon: const Icon(Icons.download),
+              label: const Text('রিপোর্ট (PDF)'),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: _targetSessionId == null ? null : _loadHistory,
+              icon: const Icon(Icons.history),
+              label: const Text('ইতিহাস লোড'),
+            ),
+          ),
+        ]),
+      ),
+      Expanded(
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : _history.isEmpty
+                ? const Center(
+                    child: Text('ইতিহাস খালি',
+                        style: TextStyle(color: Colors.grey)))
+                : ListView.builder(
+                    padding: const EdgeInsets.all(12),
+                    itemCount: _history.length,
+                    itemBuilder: (_, i) => _historyTile(_history[i]),
+                  ),
+      ),
+    ]);
+  }
+
+  Widget _historyTile(Map h) {
+    final created = h['created_at']?.toString() ?? '';
+    return Card(
+      child: ListTile(
+        leading: Icon(_actionIcon(h['action']),
+            color: _actionColor(h['action'])),
+        title: Text('${h['student_name'] ?? ''}  •  ${_actionLabel(h['action'])}'),
+        subtitle: Text(
+            '${h['from_class_name'] ?? ''} → ${h['to_class_name'] ?? ''}'
+            '${h['session_name'] == null ? '' : '  •  ${h['session_name']}'}'
+            '${h['admin_name'] == null ? '' : '  •  ${h['admin_name']}'}'),
+        trailing: Text(created.length >= 16 ? created.substring(0, 16) : created),
+      ),
+    );
+  }
+
+  String _actionLabel(String? action) {
+    switch (action) {
+      case 'eligible_calculated':
+        return 'যোগ্যতা হিসাব';
+      case 'reviewed':
+        return 'রিভিউ';
+      case 'approved':
+        return 'অনুমোদিত';
+      case 'retained':
+        return 'রক্ষিত';
+      case 'bulk_approved':
+        return 'বাল্ক অনুমোদন';
+      case 'bulk_retained':
+        return 'বাল্ক রক্ষণ';
+      case 'admin_override':
+        return 'ওভাররাইড';
+      default:
+        return action ?? '';
+    }
+  }
+
+  IconData _actionIcon(String? action) {
+    switch (action) {
+      case 'eligible_calculated':
+        return Icons.calculate;
+      case 'reviewed':
+        return Icons.rate_review;
+      case 'approved':
+      case 'bulk_approved':
+        return Icons.check_circle;
+      case 'retained':
+      case 'bulk_retained':
+        return Icons.block;
+      case 'admin_override':
+        return Icons.admin_panel_settings;
+      default:
+        return Icons.history;
+    }
+  }
+
+  Color _actionColor(String? action) {
+    switch (action) {
+      case 'approved':
+      case 'bulk_approved':
+        return Colors.green;
+      case 'retained':
+      case 'bulk_retained':
+        return Colors.red;
+      case 'admin_override':
+        return Colors.purple;
+      default:
+        return Colors.blue;
+    }
+  }
+
+  // ------------------------------------------------------------- SMALL WIDGETS
+
+  Widget _picker(String label, int? value, List<int> items, List<String> labels,
+      ValueChanged<int?> onChanged) {
     final pairs = <int, String>{};
     for (var i = 0; i < items.length; i++) {
       pairs[items[i]] = labels[i];
@@ -220,64 +1114,43 @@ class _PromotionScreenState extends State<PromotionScreen> {
       padding: const EdgeInsets.only(bottom: 10),
       child: DropdownButtonFormField<int>(
         initialValue: value,
-        decoration: InputDecoration(labelText: label, border: const OutlineInputBorder()),
-        items: [for (final e in pairs.entries) DropdownMenuItem(value: e.key, child: Text(e.value))],
+        isExpanded: true,
+        decoration: InputDecoration(
+            labelText: label, border: const OutlineInputBorder()),
+        items: [
+          for (final e in pairs.entries)
+            DropdownMenuItem<int>(
+                value: e.key,
+                child: Text(e.value, overflow: TextOverflow.ellipsis))
+        ],
         onChanged: onChanged,
       ),
     );
   }
 
-  Widget _studentTile(Map st) {
-    final id = (st['id'] as num).toInt();
-    final promote = _promote[id] == true;
-    final failedSubjs = (st['failed_subjects'] as List?) ?? [];
-    return Card(
-      color: promote ? Colors.green.shade50 : Colors.orange.shade50,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            Expanded(child: Text('${st['name']}  •  রোল ${st['roll']}', style: const TextStyle(fontWeight: FontWeight.w600))),
-            Text('GPA ${(st['final_gpa'] as num).toStringAsFixed(2)}',
-                style: TextStyle(color: promote ? Colors.green.shade800 : Colors.red.shade800, fontWeight: FontWeight.bold)),
-          ]),
-          Text('${st['result_status']}  •  অনুপস্থিত/ফেল subject: ${st['fail_count'] ?? 0}'
-              '${failedSubjs.isEmpty ? '' : ' (${failedSubjs.join(', ')})'}',
-              style: const TextStyle(fontSize: 11, color: Colors.grey)),
-          Row(children: [
-            SegmentedButton<bool>(
-              segments: const [
-                ButtonSegment(value: true, label: Text('উত্তীর্ণ → SSC')),
-                ButtonSegment(value: false, label: Text('রাখা হবে')),
-              ],
-              selected: {promote},
-              onSelectionChanged: (s) => setState(() {
-                _promote[id] = s.first;
-                if (s.first) {
-                  _decision[id] = (st['decision'] == 'grace_promoted' || st['decision'] == 'admin_override')
-                      ? st['decision'].toString()
-                      : 'promoted';
-                }
-              }),
-            ),
-            const Spacer(),
-            PopupMenuButton<String>(
-              tooltip: 'সিদ্ধান্ত mark',
-              onSelected: (d) => setState(() { _decision[id] = d; }),
-              itemBuilder: (_) => const [
-                PopupMenuItem(value: 'promoted', child: Text('সাধারণ উত্তীর্ণ')),
-                PopupMenuItem(value: 'grace_promoted', child: Text('Grace-এ উত্তীর্ণ')),
-                PopupMenuItem(value: 'admin_override', child: Text('Admin override (যেকোনো যত fail) ')),
-              ],
-            ),
-          ]),
-          if (!promote)
-            TextField(
-              decoration: const InputDecoration(hintText: 'নোট (ঐচ্ছিক): উদাহরণ "বাবা-মায়ের সাথে পড়াশুনা"'),
-              onChanged: (v) => setState(() => _note[id] = v),
-            ),
-        ]),
-      ),
-    );
-  }
+  Widget _statusChip(String? status) => Chip(
+        label: Text(_statusLabel(status ?? ''),
+            style: const TextStyle(fontSize: 11)),
+        backgroundColor: _statusColor(status ?? '').withValues(alpha: 0.15),
+        labelStyle: TextStyle(
+            color: _statusColor(status ?? ''),
+            fontWeight: FontWeight.w600),
+        visualDensity: VisualDensity.compact,
+      );
+
+  Widget _decisionChip(String? decision) => Chip(
+        label: Text(_decisionLabel(decision ?? ''),
+            style: const TextStyle(fontSize: 11)),
+        backgroundColor: _decisionColor(decision ?? '').withValues(alpha: 0.15),
+        labelStyle: TextStyle(
+            color: _decisionColor(decision ?? ''),
+            fontWeight: FontWeight.w600),
+        visualDensity: VisualDensity.compact,
+      );
+
+  Widget _summaryChip(String label, String value, [Color? color]) => Chip(
+        label: Text('$label: $value',
+            style: TextStyle(fontWeight: FontWeight.bold, color: color)),
+        backgroundColor: (color ?? Colors.blue).withValues(alpha: 0.1),
+      );
 }

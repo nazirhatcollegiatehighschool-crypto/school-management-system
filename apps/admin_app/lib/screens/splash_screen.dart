@@ -32,15 +32,18 @@ class _SplashScreenState extends State<SplashScreen> {
       if (!mounted) return;
       Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const HomeScreen()));
     } catch (e) {
-      if (!Api.isNetworkError(e)) {
+      // Only a REAL auth failure (401/403) invalidates the session. A
+      // transient network blip OR a server 5xx (e.g. Vercel cold-start)
+      // must NOT log the admin out — offer in-app retry instead.
+      if (Api.isAuthError(e)) {
         await Api.clearToken();
       }
       if (!mounted) return;
       setState(() {
         _failed = true;
-        _message = Api.isNetworkError(e)
-            ? 'সার্ভারে পৌঁছানো যায়নি। ইন্টারনেট চেক করে "আবার চেষ্টা" চাপুন।'
-            : friendlyError(e);
+        _message = Api.isAuthError(e)
+            ? friendlyError(e)
+            : 'সার্ভারে পৌঁছানো যায়নি। ইন্টারনেট চেক করে "আবার চেষ্টা" চাপুন।';
       });
     }
   }

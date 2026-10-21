@@ -45,6 +45,9 @@ dependencies:
   permission_handler: ^11.4.0
   open_filex: ^4.7.0
   crypto: ^3.0.3
+  pdf: ^3.11.1
+  printing: ^5.13.4
+  file_picker: ^10.1.2
 
 dev_dependencies:
   flutter_test:
@@ -67,6 +70,9 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  assets:
+    - assets/fonts/Kalpurush.ttf
 
   # To add assets to your application, add an assets section, like this:
   # assets:

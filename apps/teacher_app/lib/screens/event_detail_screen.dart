@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import '../api.dart';
 import '../nctb_grading.dart';
-import '../pdf_helper.dart';
+import '../pdf/app_pdf.dart';
+import '../pdf/teacher_pdfs.dart';
 import 'exam_detail_screen.dart';
 
 /// One event + one class: coverage header, student-wise result table,
@@ -74,7 +75,7 @@ class _EventDetailScreenState extends State<EventDetailScreen> {
     final subjName = subj['subject_name']?.toString() ?? 'Exam';
     final examId = await showDialog<int>(
       context: context,
-      builder: (_) => _MarksEntryDialog(
+      builder: (_) => MarksEntryDialog(
         eventId: widget.eventId,
         eventName: widget.eventName,
         classId: _classId!,
@@ -108,7 +109,48 @@ class _EventDetailScreenState extends State<EventDetailScreen> {
     }
   }
 
-  String get _pdfBase => '/teacher/events/${widget.eventId}';
+  /// Seat plan + admit cards are rendered on the phone from the JSON these
+  /// endpoints return; no server-side PDF renderer is involved.
+  Future<void> _showSeatPdf({required bool share}) async {
+    if (_classId == null) return;
+    try {
+      final r = _seatPlan ??
+          await Api.get('/teacher/events/${widget.eventId}/seat-plan?class_id=$_classId&rooms=2');
+      if (!mounted) return;
+      setState(() { _seatPlan = r; });
+      final bytes = await TeacherPdfs.seatPlan(r);
+      if (share) {
+        await AppPdf.share(bytes, 'seatplan_${widget.eventId}_$_classId.pdf');
+      } else {
+        await AppPdf.preview(bytes);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          backgroundColor: Colors.red,
+          content: Text(e.toString().replaceFirst('Exception: ', ''))));
+    }
+  }
+
+  Future<void> _showAdmitPdf({required bool share}) async {
+    if (_classId == null) return;
+    try {
+      final r =
+          await Api.get('/teacher/events/${widget.eventId}/admit-cards?class_id=$_classId');
+      if (!mounted) return;
+      final bytes = await TeacherPdfs.admitCards(r);
+      if (share) {
+        await AppPdf.share(bytes, 'admit_${widget.eventId}_$_classId.pdf');
+      } else {
+        await AppPdf.preview(bytes);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          backgroundColor: Colors.red,
+          content: Text(e.toString().replaceFirst('Exception: ', ''))));
+    }
+  }
 
   static bool _pastDeadline(String raw) {
     try {
@@ -136,10 +178,10 @@ class _EventDetailScreenState extends State<EventDetailScreen> {
               if (_classes.length > 1)
                 DropdownButtonFormField<int>(
                   initialValue: _classId,
-                  decoration: const InputDecoration(labelText: 'Class', border: OutlineInputBorder()),
+                  decoration: const InputDecoration(labelText: 'শ্রেণী নির্বাচন করুন (Section অনুযায়ী)', border: OutlineInputBorder()),
                   items: _classes.map<DropdownMenuItem<int>>((c) => DropdownMenuItem<int>(
                     value: c['class_id'],
-                    child: Text('${c['class_name']} (${c['group_name'] ?? c['section']})'),
+                    child: Text('${c['class_name']} ${c['group_name'] ?? c['section'] ?? ''}'),
                   )).toList(),
                   onChanged: (v) {
                     setState(() { _classId = v; _seatPlan = null; _entryData = null; });
@@ -257,23 +299,19 @@ class _EventDetailScreenState extends State<EventDetailScreen> {
                   FilledButton.tonalIcon(
                     icon: const Icon(Icons.picture_as_pdf_outlined),
                     label: const Text('Seat PDF দেখুন'),
-                    onPressed: () => PdfHelper.view(context, '$_pdfBase/seat-plan.pdf?class_id=$_classId&rooms=2')),
+                    onPressed: () => _showSeatPdf(share: false)),
                   FilledButton.tonalIcon(
                     icon: const Icon(Icons.download_outlined),
-                    label: const Text('Seat PDF ডাউনলোড'),
-                    onPressed: () => PdfHelper.download(context,
-                        '$_pdfBase/seat-plan.pdf?class_id=$_classId&rooms=2',
-                        'seatplan_${widget.eventId}_$_classId.pdf')),
+                    label: const Text('Seat PDF শেয়ার'),
+                    onPressed: () => _showSeatPdf(share: true)),
                   FilledButton.tonalIcon(
                     icon: const Icon(Icons.badge_outlined),
                     label: const Text('Admit PDF দেখুন'),
-                    onPressed: () => PdfHelper.view(context, '$_pdfBase/admit-cards.pdf?class_id=$_classId')),
+                    onPressed: () => _showAdmitPdf(share: false)),
                   FilledButton.tonalIcon(
                     icon: const Icon(Icons.download_outlined),
-                    label: const Text('Admit PDF ডাউনলোড'),
-                    onPressed: () => PdfHelper.download(context,
-                        '$_pdfBase/admit-cards.pdf?class_id=$_classId',
-                        'admit_${widget.eventId}_$_classId.pdf')),
+                    label: const Text('Admit PDF শেয়ার'),
+                    onPressed: () => _showAdmitPdf(share: true)),
                 ]),
                 if (_seatPlan != null) ...[
                   const SizedBox(height: 10),
@@ -399,22 +437,25 @@ class _SubjectCoverageListState extends State<_SubjectCoverageList> {
   }
 }
 
-class _MarksEntryDialog extends StatefulWidget {
+class MarksEntryDialog extends StatefulWidget {
   final int eventId;
   final String eventName;
   final int classId;
   final Map subject;
-  const _MarksEntryDialog({
+  final bool canEdit;
+  const MarksEntryDialog({
+    super.key,
     required this.eventId,
     required this.eventName,
     required this.classId,
     required this.subject,
+    this.canEdit = true,
   });
   @override
-  State<_MarksEntryDialog> createState() => _MarksEntryDialogState();
+  State<MarksEntryDialog> createState() => MarksEntryDialogState();
 }
 
-class _MarksEntryDialogState extends State<_MarksEntryDialog> {
+class MarksEntryDialogState extends State<MarksEntryDialog> {
   List _students = [];
   bool _loading = true;
   bool _saving = false;
@@ -509,6 +550,7 @@ class _MarksEntryDialogState extends State<_MarksEntryDialog> {
   }
 
   Future<void> _save() async {
+    if (!widget.canEdit) { Navigator.pop(context); return; }
     final records = <Map<String, dynamic>>[];
     if (_componentMode) {
       for (final s in _students) {
@@ -597,6 +639,7 @@ class _MarksEntryDialogState extends State<_MarksEntryDialog> {
                 TextField(
                   controller: _partCtls[id]?[c['key']],
                   keyboardType: TextInputType.number,
+                  readOnly: !widget.canEdit,
                   textAlign: TextAlign.center,
                   onChanged: (_) => setState(() {}),
                   decoration: const InputDecoration(
@@ -613,6 +656,7 @@ class _MarksEntryDialogState extends State<_MarksEntryDialog> {
               child: TextField(
                 controller: _ctls[id],
                 keyboardType: TextInputType.number,
+                readOnly: !widget.canEdit,
                 textAlign: TextAlign.center,
                 onChanged: (_) => setState(() {}),
                 decoration: InputDecoration(
@@ -657,14 +701,15 @@ class _MarksEntryDialogState extends State<_MarksEntryDialog> {
       actions: [
         TextButton(
             onPressed: _saving ? null : () => Navigator.pop(context),
-            child: const Text('বাতিল')),
-        FilledButton(
-          onPressed: _saving ? null : _save,
-          child: _saving
-              ? const SizedBox(
-                  height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
-              : const Text('Save'),
-        ),
+            child: Text(widget.canEdit ? 'বাতিল' : 'বন্ধ করুন')),
+        if (widget.canEdit)
+          FilledButton(
+            onPressed: _saving ? null : _save,
+            child: _saving
+                ? const SizedBox(
+                    height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Text('Save'),
+          ),
       ],
     );
   }

@@ -207,22 +207,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                     const SizedBox(height: 14),
 
-                    // ===== Running exam events (Test Exam + year, tap → subjects) =====
-                    if (_events.isNotEmpty) ...[
-                      Text('চলমান পরীক্ষা', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                      const SizedBox(height: 6),
-                      for (final ev in _events.take(4))
-                        _EventCoverageTile(
-                          event: ev,
-                          onTap: () => _open(context, EventDetailScreen(
-                            eventId: ev['id'] as int,
-                            eventName: '${ev['name']}',
-                            event: ev,
-                          )),
-                        ),
-                      const SizedBox(height: 14),
-                    ],
-
                     // ===== Class truancy watch (today) =====
                     _TruancyWatchCard(dateText: '${today.day} ${_monthName(today.month)}, ${today.year}'),
                     const SizedBox(height: 14),

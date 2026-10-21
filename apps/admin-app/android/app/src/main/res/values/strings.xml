@@ -1,7 +1,0 @@
-<?xml version='1.0' encoding='utf-8'?>
-<resources>
-    <string name="app_name">Admin Panel</string>
-    <string name="title_activity_main">Admin Panel</string>
-    <string name="package_name">com.school.admin</string>
-    <string name="custom_url_scheme">com.school.admin</string>
-</resources>

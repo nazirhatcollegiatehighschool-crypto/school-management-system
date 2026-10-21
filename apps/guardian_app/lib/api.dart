@@ -8,7 +8,7 @@ import 'sync_store.dart';
 
 class Api {
   static String? token;
-  static const Duration _timeout = Duration(seconds: 25);
+  static const Duration _timeout = Duration(seconds: 30);
   static const _tokenKey = 'auth_token';
   static const _cachePrefix = 'cache_';
 
@@ -82,7 +82,7 @@ class Api {
     try {
       final res = await http
           .get(Uri.parse('${base.replaceAll(RegExp(r'/+$'), '')}/api/health'))
-          .timeout(const Duration(seconds: 10));
+          .timeout(const Duration(seconds: 20));
       return res.statusCode == 200;
     } catch (_) {
       return false;
@@ -103,9 +103,20 @@ class Api {
       if (cached != null) return jsOne(cached);
     }
     try {
-      final res = await http
-          .get(Uri.parse(Config.api + path), headers: _headers)
-          .timeout(_timeout);
+      http.Response res;
+      try {
+        res = await http
+            .get(Uri.parse(Config.api + path), headers: _headers)
+            .timeout(_timeout);
+      } catch (e) {
+        if (!isNetworkError(e)) rethrow;
+        // transient: wait ~1.2s (+jitter) then retry exactly once
+        await Future.delayed(Duration(
+            milliseconds: 1000 + (DateTime.now().microsecond % 400)));
+        res = await http
+            .get(Uri.parse(Config.api + path), headers: _headers)
+            .timeout(_timeout);
+      }
       final data = _handle(res);
       sync.markRequestOk();
       // keep a copy for offline reads
@@ -128,7 +139,7 @@ class Api {
     if (sync.isOffline) {
       return 'ইন্টারনেট নেই — $queuedAction ফোনে সেভ আছে, online হলেই server-এ যাবে';
     }
-    return 'Server-এ পৌঁছানো যাচ্ছে না (ইন্টারনেট আছে) — $queuedAction ফোনে সেভ আছে; laptop server / Server URL ঠিক করে আবার চেষ্টা করুন';
+    return 'Server-এ পৌঁছানো যাচ্ছে না (ইন্টারনেট আছে) — $queuedAction ফোনে সেভ আছে; একটু পরে আবার চেষ্টা করুন';
   }
 
   static Future<dynamic> post(String path, [Map<String, dynamic>? body]) async {
@@ -229,8 +240,23 @@ class Api {
   static dynamic _handle(http.Response res) {
     final data = res.body.isEmpty ? {} : jsonDecode(res.body);
     if (res.statusCode >= 200 && res.statusCode < 300) return data;
+    if (res.statusCode == 401 || res.statusCode == 403) {
+      throw ApiAuthException(data['error'] ?? 'সেশন শেষ। আবার লগইন করুন।');
+    }
     throw Exception(data['error'] ?? 'Request failed (${res.statusCode})');
   }
+
+  /// True only for real auth failures (401/403). Server 5xx / parse errors
+  /// are NOT auth failures and must never clear the stored token.
+  static bool isAuthError(Object e) => e is ApiAuthException;
+}
+
+/// Thrown when the server rejects the token (HTTP 401/403).
+class ApiAuthException implements Exception {
+  final String message;
+  ApiAuthException(this.message);
+  @override
+  String toString() => message;
 }
 
 dynamic jsOne(dynamic v) {

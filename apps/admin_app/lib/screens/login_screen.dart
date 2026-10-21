@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
 import '../api.dart';
-import '../config.dart';
 import '../fcm_service.dart';
-import '../server_settings.dart';
 import '../update_check.dart';
 import 'home_screen.dart';
 
@@ -39,7 +37,16 @@ class _LoginScreenState extends State<LoginScreen> {
         'username': _user.text.trim(),
         'password': _pass.text,
       });
-      if (r['user']['role'] != 'admin') throw Exception('Admin only');
+      if (r is! Map) {
+        throw Exception('সার্ভার থেকে সঠিক উত্তর আসেনি। আবার চেষ্টা করুন।');
+      }
+      if (r['offline_queued'] == true) {
+        throw Exception(Api.sync.isOffline
+            ? 'ইন্টারনেট নেই — login-এর জন্য ফোনে ইন্টারনেট দরকার।'
+            : 'School server-এ পৌঁছানো যাচ্ছে না — একটু পরে আবার চেষ্টা করুন।');
+      }
+      final dynamic user = r['user'];
+      if (user is! Map || user['role'] != 'admin') throw Exception('This app is for admins only');
       await Api.saveToken(r['token']);
       registerDeviceToken();
       if (!mounted) return;
@@ -245,25 +252,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                   ),
                                 ),
                         ),
-                        // Server URL Dialog button — lets the user point the
-                        // app at another server URL without a rebuild.
-                        Center(
-                          child: TextButton.icon(
-                            style: TextButton.styleFrom(
-                              foregroundColor: Colors.blueGrey.shade600,
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                            ),
-                            icon: const Icon(Icons.dns_outlined, size: 15),
-                            label: Text(
-                              Config.serverUrl,
-                              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500),
-                            ),
-                            onPressed: () async {
-                              await showServerUrlDialog(context);
-                              if (mounted) setState(() {});
-                            },
-                          ),
-                        ),
+                        // Server-URL button intentionally hidden (production).
                       ],
                     ),
                   ),

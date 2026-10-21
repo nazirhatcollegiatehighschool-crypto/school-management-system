@@ -53,6 +53,9 @@ dependencies:
   image_picker: ^1.2.3
   file_picker: ^13.1.0
   share_plus: ^13.3.1
+  uuid: ^4.5.1
+  pdf: ^3.11.1
+  printing: ^5.13.4
 
 dev_dependencies:
   flutter_test:
@@ -78,6 +81,7 @@ flutter:
 
   assets:
     - assets/sounds/
+    - assets/fonts/Kalpurush.ttf
 
   # To add assets to your application, add an assets section, like this:
   # assets:

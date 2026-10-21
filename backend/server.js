@@ -150,6 +150,7 @@ app.use('/api/teacher', require('./routes/teacher'));
 app.use('/api/guardian', require('./routes/guardian'));
 app.use('/api/results', require('./routes/results'));
 app.use('/api/routine', require('./routes/routine'));
+app.use('/api/attendance', require('./routes/attendance'));
 
 // Background class-alert service (see routine_alerts.js). Triggered every minute
 // by a Vercel cron, or by a local setInterval under `node server.js`.
@@ -161,6 +162,27 @@ app.get('/api/cron/routine-alerts', async (req, res) => {
   } catch (e) {
     console.error('routine-alert cron error:', e.message);
     res.status(500).json({ error: 'alert check failed' });
+  }
+});
+
+// Attendance v2 background jobs (Vercel cron or local setInterval).
+const AttendanceV2 = require('./attendance_v2');
+app.get('/api/cron/attendance-reminders', async (req, res) => {
+  try {
+    const sent = await AttendanceV2.runReminders();
+    res.json({ status: 'ok', reminded: sent });
+  } catch (e) {
+    console.error('attendance-reminder cron error:', e.message);
+    res.status(500).json({ error: 'attendance reminder failed' });
+  }
+});
+app.get('/api/cron/attendance-rollup', async (req, res) => {
+  try {
+    const n = await AttendanceV2.runRollup();
+    res.json({ status: 'ok', students: n });
+  } catch (e) {
+    console.error('attendance-rollup cron error:', e.message);
+    res.status(500).json({ error: 'attendance rollup failed' });
   }
 });
 
@@ -265,6 +287,7 @@ ${card('guardian', 'Guardian App', 'অভিভাবকদের জন্য 
 });
 const uploadsRoot = process.env.VERCEL_UPLOAD_DIR || path.join(__dirname, 'uploads');
 app.use('/uploads', express.static(uploadsRoot));
+app.use('/uploads/logos', express.static(path.join(uploadsRoot, 'logos')));
 
 const dist = fs.existsSync(path.join(__dirname, 'dist'))
   ? path.join(__dirname, 'dist')

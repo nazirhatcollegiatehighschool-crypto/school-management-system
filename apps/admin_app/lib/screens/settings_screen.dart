@@ -1,6 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
 import '../api.dart';
 import '../update_check.dart';
+import '../config.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -16,6 +20,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? _msg;
   final _hDate = TextEditingController();
   final _hTitle = TextEditingController();
+  String? _logoUrl;
+  bool _logoLoading = false;
 
   @override
   void initState() {
@@ -35,6 +41,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _Field('headmaster', 'Headmaster Name', r['headmaster'] ?? ''),
           _Field('exam_term_name', 'Default Exam Term Name', r['exam_term_name'] ?? ''),
         ];
+        _logoUrl = r['school_logo_path'];
         _holidays = holidays is List ? holidays : [];
         _loading = false;
       });
@@ -53,6 +60,53 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = friendlyError(e));
+    }
+  }
+
+  Future<void> _pickAndUploadLogo() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.image,
+        allowedExtensions: ['jpg', 'jpeg', 'png', 'webp'],
+        withData: false,
+      );
+      if (result == null || result.files.isEmpty) return;
+
+      setState(() { _logoLoading = true; _error = null; _msg = null; });
+
+      final file = result.files.first;
+      if (file.path == null) {
+        setState(() { _logoLoading = false; _error = 'File path not available'; });
+        return;
+      }
+
+      // Upload via multipart
+      final uri = Uri.parse(Config.api + '/admin/settings/logo');
+      final request = http.MultipartRequest('POST', uri);
+      request.headers['Authorization'] = 'Bearer ${Api.token}';
+      request.files.add(await http.MultipartFile.fromPath('logo', file.path!));
+      final streamed = await request.send().timeout(const Duration(seconds: 30));
+      final resp = await http.Response.fromStream(streamed);
+
+      if (!mounted) return;
+
+      if (resp.statusCode >= 200 && resp.statusCode < 300) {
+        final data = jsonDecode(resp.body);
+        if (data['ok'] == true) {
+          setState(() {
+            _logoUrl = data['logo_url'];
+            _logoLoading = false;
+            _msg = 'Logo uploaded successfully';
+          });
+        } else {
+          setState(() { _logoLoading = false; _error = data['error'] ?? 'Upload failed'; });
+        }
+      } else {
+        setState(() { _logoLoading = false; _error = 'Upload failed (${resp.statusCode})'; });
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() { _logoLoading = false; _error = friendlyError(e); });
     }
   }
 
@@ -95,7 +149,62 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     Text(_error!, style: const TextStyle(color: Colors.red)),
                   if (_msg != null)
                     Text(_msg!, style: TextStyle(color: Colors.green.shade800)),
-                  const Text('ভেরিকাল 정보 — marksheet/admit card-এ ব্যবহৃত হয়',
+                  // School Logo Section
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              const Icon(Icons.image, color: Colors.blue),
+                              const SizedBox(width: 8),
+                              const Text('School Logo',
+                                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                              const Spacer(),
+                              if (_logoLoading)
+                                const SizedBox(
+                                    width: 20, height: 20,
+                                    child: CircularProgressIndicator(strokeWidth: 2))
+                              else
+                                OutlinedButton.icon(
+                                  onPressed: _pickAndUploadLogo,
+                                  icon: const Icon(Icons.upload, size: 18),
+                                  label: const Text('Change Logo'),
+                                ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                          if (_logoUrl != null && _logoUrl!.isNotEmpty)
+                            Center(
+                              child: Container(
+                                constraints: const BoxConstraints(maxHeight: 120, maxWidth: 240),
+                                decoration: BoxDecoration(
+                                  border: Border.all(color: Colors.grey.shade300),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: Image.network(
+                                    Config.downloadBase + _logoUrl!,
+                                    fit: BoxFit.contain,
+                                    errorBuilder: (_, __, ___) =>
+                                        const Icon(Icons.broken_image, size: 60, color: Colors.grey),
+                                  ),
+                                ),
+                              ),
+                          )
+                          else
+                            const Center(
+                                child: Text('No logo uploaded yet',
+                                    style: TextStyle(color: Colors.grey))),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  const Text('ভেরিকাল তথ্য — marksheet/admit card-এ ব্যবহৃত হয়',
                       style: TextStyle(fontSize: 12, color: Colors.grey)),
                   const SizedBox(height: 10),
                   for (final f in _fields) Padding(

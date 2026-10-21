@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:uuid/uuid.dart';
 import '../api.dart';
 import 'attendance_analytics_screen.dart';
 
+/// Attendance v2 — today's pending list + per-session entry + history browse.
 class AttendanceScreen extends StatefulWidget {
   final dynamic teacher;
   final int? initialClassId;
@@ -11,742 +13,702 @@ class AttendanceScreen extends StatefulWidget {
 }
 
 class _AttendanceScreenState extends State<AttendanceScreen> {
-  List _classes = [];
-  int? _selectedClass;
   DateTime _date = DateTime.now();
-  List _students = [];
-  Map<int, String> _status = {};
-  bool _loading = false;
+  Map? _today;
+  List _classes = [];
+  bool _loading = true;
   String? _error;
-  // Two-stage checkpoint: 0 = Stage 1 (initial/morning), 1 = Stage 2 (post-leisure P5).
-  int _sessionTab = 0;
-  // Stage-1 snapshot loaded from server for the verify screen.
-  Map<int, Map<String, dynamic>> _stage1 = {};
-  // Stage-2 per-student resolution: present_now | early_departure | not_found | verified_left.
-  Map<int, String> _stage2 = {};
-  Map<int, String> _stage2Note = {};
-  bool _stage2Loading = false;
+
+  String get _dateStr => _date.toIso8601String().substring(0, 10);
 
   @override
   void initState() {
     super.initState();
-    Api.get('/teacher/profile').then((r) {
-      setState(() {
-        _classes = r['classes'] ?? [];
-        final wanted = widget.initialClassId;
-        if (wanted != null && _classes.any((c) => c['id'] == wanted)) {
-          _selectedClass = wanted;
-          _loadStudents();
-        }
-      });
-    }).catchError((e) {
-      setState(() => _error = e.toString().replaceFirst('Exception: ', ''));
-    });
+    _load();
   }
 
-  Future<void> _pickDate() async {
-    final d = await showDatePicker(
-      context: context,
-      initialDate: _date,
-      firstDate: DateTime(2020),
-      lastDate: DateTime(2035),
-    );
-    if (d != null) {
-      setState(() => _date = d);
-      if (_selectedClass != null) _loadStudents();
-    }
-  }
-
-  Future<void> _loadStudents() async {
-    if (_students.isEmpty) setState(() { _loading = true; _error = null; });
+  Future<void> _load() async {
+    setState(() { _loading = true; _error = null; });
     try {
-      await Api.loadCachedFirst('/teacher/classes/$_selectedClass/students', (r) {
-        if (!mounted) return;
-        final list = r is List ? r : [];
-        setState(() {
-          _students = list;
-          _status = {for (final s in list) s['id'] as int: 'present'};
-          _loading = false;
-        });
+      final r = await Api.get('/attendance/today?date=$_dateStr');
+      if (!mounted) return;
+      setState(() {
+        _today = r is Map ? r : null;
+        _classes = (r is Map && r['classes'] is List) ? r['classes'] as List : [];
+        _loading = false;
       });
-      // Also fetch today's saved session rows so Stage-2 can verify against Stage-1.
-      _loadStage1();
     } catch (e) {
       if (!mounted) return;
       setState(() { _error = e.toString().replaceFirst('Exception: ', ''); _loading = false; });
     }
   }
 
-  /// Load today's saved attendance rows (both sessions) for the selected class.
-  /// Never throws — Stage-2 degrades to "no initial record" state on failure.
-  Future<void> _loadStage1() async {
-    if (_selectedClass == null) return;
-    setState(() => _stage2Loading = true);
-    try {
-      final d = _date.toIso8601String().substring(0, 10);
-      final r = await Api.get('/teacher/attendance/class-day?class_id=$_selectedClass&date=$d');
-      if (!mounted) return;
-      final map = <int, Map<String, dynamic>>{};
-      if (r is Map && r['rows'] is List) {
-        for (final row in (r['rows'] as List)) {
-          if (row is! Map) continue;
-          final sid = row['student_id'] as int?;
-          if (sid == null) continue;
-          final sess = '${row['session'] ?? 'morning'}';
-          map.putIfAbsent(sid, () => {})[sess] = row;
-        }
-      }
-      setState(() {
-        _stage1 = map;
-        // Pre-fill Stage-2: everyone initially present starts as present_now.
-        for (final s in _students) {
-          final sid = s['id'] as int;
-          final m = map[sid]?['morning'];
-          final mStatus = m != null ? '${m['status'] ?? ''}' : '';
-          if (mStatus == 'present' || mStatus == 'late') {
-            _stage2.putIfAbsent(sid, () => 'present_now');
-          } else if (!_stage2.containsKey(sid)) {
-            _stage2[sid] = mStatus == 'leave' ? 'early_departure' : 'present_now';
-          }
-        }
-        _stage2Loading = false;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => _stage2Loading = false);
-    }
-  }
-
-  Future<void> _save() async {
-    try {
-      // Stage-1 saves to the morning session; Stage-2 posts to the p5 session
-      // with initial-status context so the server can verify discrepancies.
-      final session = _sessionTab == 1 ? 'p5' : 'morning';
-      final records = _sessionTab == 1
-          ? _stage2.entries.map((e) {
-              final sid = e.key;
-              final v = e.value;
-              String status;
-              String? note = _stage2Note[sid];
-              switch (v) {
-                case 'present_now':
-                  status = 'present';
-                  break;
-                case 'early_departure':
-                  status = 'leave';
-                  break;
-                case 'verified_left':
-                  status = 'absent';
-                  break;
-                case 'not_found':
-                default:
-                  status = 'absent';
-                  break;
-              }
-              return {'student_id': sid, 'status': status, 'stage2': v, 'remark': note};
-            }).toList()
-          : _status.entries.map((e) => {'student_id': e.key, 'status': e.value}).toList();
-      final r = await Api.post('/teacher/attendance', {
-        'date': _date.toIso8601String().substring(0, 10),
-        'session': session,
-        'records': records,
-      });
-      if (!mounted) return;
-      if (Api.isQueued(r)) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            backgroundColor: Colors.orange,
-            content: Text('ইন্টারনেট নেই — হাজিরা ফোনে সেভ আছে, online হলেই server-এ যাবে'),
-          ),
-        );
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Attendance saved successfully!')),
-      );
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: Colors.redAccent,
-          content: Text(e.toString().replaceFirst('Exception: ', '')),
-        ),
-      );
-    }
-  }
-
-  Future<void> _notifyAbsent() async {
-    final absentIds = _status.entries.where((e) => e.value != 'present').map((e) => e.key).toList();
-    if (absentIds.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('সবাই present — notification পাঠানোর দরকার নেই')),
-      );
-      return;
-    }
-    try {
-      final r = await Api.post('/teacher/notify', {
-        'student_ids': absentIds,
-        'title': 'Attendance alert',
-        'body': 'আপনার সন্তান আজ (${_date.toString().substring(0, 10)}) school-এ absent/late ছিল।',
-        'type': 'attendance',
-      });
-      if (!mounted) return;
-      if (Api.isQueued(r)) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            backgroundColor: Colors.orange,
-            content: Text('ইন্টারনেট নেই — alert queue-তে আছে, online হলে যাবে'),
-          ),
-        );
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${absentIds.length} জনের guardian-কে alert পাঠানো হয়েছে')),
-      );
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: Colors.redAccent,
-          content: Text(e.toString().replaceFirst('Exception: ', '')),
-        ),
-      );
-    }
-  }
-
-  void _markAll(String status) {
-    setState(() {
-      for (final s in _students) {
-        _status[s['id'] as int] = status;
-      }
-    });
+  Future<void> _pickDate() async {
+    final d = await showDatePicker(
+      context: context, initialDate: _date,
+      firstDate: DateTime.now().subtract(const Duration(days: 30)),
+      lastDate: DateTime.now(),
+    );
+    if (d != null) { setState(() => _date = d); _load(); }
   }
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final emerald = theme.colorScheme.primary;
-
-    final presentCount = _status.values.where((v) => v == 'present').length;
-    final absentCount = _status.values.where((v) => v == 'absent').length;
-    final lateCount = _status.values.where((v) => v == 'late').length;
-    final hasAbsentees = absentCount > 0 || lateCount > 0;
-
+    final weekend = _today?['weekend'] == true;
     return Scaffold(
-      backgroundColor: const Color(0xFFF4F7F5),
       appBar: AppBar(
-        title: const Text('হাজিরা (Attendance)'),
+        title: Text('হাজিরা · ${_dateStr}'),
         actions: [
-          if (_students.isNotEmpty)
-            IconButton(
-              icon: Icon(
-                Icons.campaign_rounded,
-                color: hasAbsentees ? const Color(0xFFFCA5A5) : Colors.white70,
-              ),
-              tooltip: 'Absent alert পাঠান',
-              onPressed: _notifyAbsent,
-            ),
+          IconButton(icon: const Icon(Icons.calendar_month), onPressed: _pickDate, tooltip: 'তারিখ'),
           IconButton(
-            icon: const Icon(Icons.insights_rounded),
-            tooltip: 'Analytics',
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const AttendanceAnalyticsScreen()),
-            ),
+            icon: const Icon(Icons.analytics),
+            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AttendanceAnalyticsScreen())),
           ),
         ],
       ),
-      body: Column(
-        children: [
-          // Two-stage checkpoint tabs: Stage 1 (initial) | Stage 2 (post-leisure verify).
-          if (_students.isNotEmpty)
-            Container(
-              color: Colors.white,
-              padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
-              child: Row(children: [
-                Expanded(child: _sessionTabBtn(0, '① প্রাথমিক হাজিরা', Icons.wb_sunny_outlined, emerald)),
-                const SizedBox(width: 8),
-                Expanded(child: _sessionTabBtn(1, '② বিরতির পর যাচাই', Icons.verified_outlined, emerald)),
-              ]),
-            ),
-          // Class and Date Selector Header Container
-          Container(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              border: Border(bottom: BorderSide(color: Colors.grey.withValues(alpha: 0.15))),
-            ),
-            child: Column(
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: DropdownButtonFormField<int>(
-                        initialValue: _selectedClass,
-                        isExpanded: true,
-                        decoration: InputDecoration(
-                          labelText: 'শ্রেণি (Class)',
-                          prefixIcon: Icon(Icons.school_outlined, color: emerald, size: 20),
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                        ),
-                        items: _classes.map<DropdownMenuItem<int>>((c) =>
-                            DropdownMenuItem(value: c['id'], child: Text('${c['name']} (${c['section']})'))).toList(),
-                        onChanged: (v) {
-                          setState(() => _selectedClass = v);
-                          if (v != null) _loadStudents();
-                        },
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    InkWell(
-                      onTap: _pickDate,
-                      borderRadius: BorderRadius.circular(12),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
-                        decoration: BoxDecoration(
-                          color: emerald.withValues(alpha: 0.08),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: emerald.withValues(alpha: 0.25)),
-                        ),
-                        child: Row(
-                          children: [
-                            Icon(Icons.calendar_today_rounded, size: 16, color: emerald),
-                            const SizedBox(width: 8),
-                            Text(
-                              _date.toIso8601String().substring(0, 10),
-                              style: TextStyle(
-                                fontWeight: FontWeight.w700,
-                                fontSize: 13,
-                                color: emerald,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                if (_students.isNotEmpty) ...[
-                  const SizedBox(height: 12),
-                  // Real-time counter & Mark all button
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Row(
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error != null
+              ? _errorView()
+              : _classes.isEmpty
+                  ? _emptyView()
+                  : RefreshIndicator(
+                      onRefresh: _load,
+                      child: ListView(
+                        padding: const EdgeInsets.all(12),
                         children: [
-                          _countChip('P: $presentCount', const Color(0xFF16A34A), const Color(0xFFDCFCE7)),
-                          const SizedBox(width: 6),
-                          _countChip('A: $absentCount', const Color(0xFFDC2626), const Color(0xFFFEE2E2)),
-                          const SizedBox(width: 6),
-                          _countChip('L: $lateCount', const Color(0xFFD97706), const Color(0xFFFEF3C7)),
+                          if (weekend) _weekendBanner(),
+                          ..._classes.map((c) => _classCard(c)),
+                          const SizedBox(height: 60),
                         ],
                       ),
-                      InkWell(
-                        onTap: () => _markAll('present'),
-                        child: Text(
-                          'সবাই Present',
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
-                            color: emerald,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ],
-            ),
-          ),
+                    ),
+    );
+  }
 
-          if (_error != null)
+  Widget _errorView() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Icon(Icons.error_outline, size: 40, color: Colors.red),
+          const SizedBox(height: 8),
+          Text(_error ?? '', textAlign: TextAlign.center),
+          const SizedBox(height: 12),
+          FilledButton(onPressed: _load, child: const Text('আবার চেষ্টা')),
+        ]),
+      ),
+    );
+  }
+
+  Widget _emptyView() {
+    final weekend = _today?['weekend'] == true;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(weekend ? Icons.beach_access : Icons.check_circle, size: 52,
+              color: weekend ? Colors.orange : Colors.green),
+          const SizedBox(height: 10),
+          Text(weekend ? 'শুক্র/শনিবার — স্কুল বন্ধ' : 'আজ কোনো হাজিরার দায়িত্ব নেই',
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 6),
+          Text(weekend ? 'চাইলে "Present call খুলুন" দিয়ে হাজিরা নিতে পারবেন।'
+              : 'আপনি আজকের জন্য শ্রেণি শিক্ষক বা ৫ম পিরিয়ডের শিক্ষক নন।',
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.black54)),
+          const SizedBox(height: 14),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.meeting_room), label: const Text('Present call খুলুন'),
+            onPressed: () => _openPresentCall(),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Widget _weekendBanner() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF7ED),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFFB923C)),
+      ),
+      child: const Row(children: [
+        Icon(Icons.beach_access, color: Color(0xFFEA580C)),
+        SizedBox(width: 10),
+        Expanded(child: Text('শুক্র/শনিবার — স্কুল বন্ধ। Present call খুললেই হাজিরা নেওয়া যাবে।',
+            style: TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF9A3412)))),
+      ]),
+    );
+  }
+
+  Future<void> _openPresentCall() async {
+    final c = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context, isScrollControlled: true,
+      builder: (_) => const _OpenCallSheet(),
+    );
+    if (c == null || !mounted) return;
+    try {
+      final classId = c['class_id'] as int;
+      final session = c['session'] as String;
+      await Api.postOptimistic('/attendance/class/$classId/open',
+          {'date': _dateStr, 'session': session}, {});
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Present call খোলা হয়েছে')));
+      _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))));
+    }
+  }
+
+  Widget _classCard(Map c) {
+    final role = c['role'] as String? ?? 'ct';
+    final roleBn = role == 'ct' ? 'শ্রেণি শিক্ষক' : role == 'p5' ? '৫ম পিরিয়ড' : 'প্রতিনিধি';
+    final roleCol = role == 'ct' ? Colors.blue : role == 'p5' ? Colors.teal : Colors.purple;
+    final sessions = <String>[];
+    if (c['morning'] is Map) sessions.add('morning');
+    if (c['p5'] is Map) sessions.add('p5');
+    final holiday = c['is_holiday'] == true;
+    final occ = c['occasion'] as String?;
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Expanded(
+              child: Text('${c['class_name'] ?? ''} ${c['section'] ?? ''} ${c['group_name'] ?? ''}',
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+            ),
             Container(
-              margin: const EdgeInsets.all(12),
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: const Color(0xFFFEF2F2),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: const Color(0xFFFCA5A5)),
-              ),
-              child: Text(_error!, style: const TextStyle(color: Colors.red)),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(color: roleCol.withValues(alpha: .12),
+                  borderRadius: BorderRadius.circular(6)),
+              child: Text(roleBn, style: TextStyle(color: roleCol, fontSize: 11, fontWeight: FontWeight.bold)),
             ),
-
-          Expanded(
-            child: _loading
-                ? const Center(child: CircularProgressIndicator())
-                : _students.isEmpty
-                    ? _classes.isEmpty
-                        ? const Center(child: _RestrictedCard())
-                        : Center(
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Icon(Icons.touch_app_outlined, size: 48, color: Colors.grey.shade400),
-                                const SizedBox(height: 10),
-                                const Text(
-                                  'উপরে শ্রেণি নির্বাচন করুন',
-                                  style: TextStyle(color: Colors.grey, fontSize: 15, fontWeight: FontWeight.w500),
-                                ),
-                              ],
-                            ),
-                          )
-                    : _sessionTab == 1
-                        ? _buildStage2List(emerald)
-                        : ListView.builder(
-                        padding: const EdgeInsets.fromLTRB(14, 10, 14, 96),
-                        itemCount: _students.length,
-                        itemBuilder: (_, i) {
-                          final s = _students[i];
-                          final id = s['id'] as int;
-                          final currStatus = _status[id] ?? 'present';
-
-                          return Container(
-                            margin: const EdgeInsets.symmetric(vertical: 4),
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(14),
-                              border: Border.all(color: Colors.grey.withValues(alpha: 0.12)),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withValues(alpha: 0.02),
-                                  blurRadius: 6,
-                                  offset: const Offset(0, 2),
-                                ),
-                              ],
-                            ),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                              child: Row(
-                                children: [
-                                  // Roll avatar
-                                  Container(
-                                    width: 38,
-                                    height: 38,
-                                    decoration: BoxDecoration(
-                                      color: emerald.withValues(alpha: 0.10),
-                                      borderRadius: BorderRadius.circular(10),
-                                    ),
-                                    child: Center(
-                                      child: Text(
-                                        '${s['roll']}',
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.w800,
-                                          color: emerald,
-                                          fontSize: 14,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 12),
-
-                                  // Name
-                                  Expanded(
-                                    child: Text(
-                                      s['name'] ?? '',
-                                      style: const TextStyle(
-                                        fontSize: 14.5,
-                                        fontWeight: FontWeight.w600,
-                                        color: Color(0xFF0F172A),
-                                      ),
-                                    ),
-                                  ),
-
-                                  // Segmented status buttons
-                                  Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      _statusButton('P', 'present', currStatus, id, const Color(0xFF16A34A)),
-                                      const SizedBox(width: 6),
-                                      _statusButton('A', 'absent', currStatus, id, const Color(0xFFDC2626)),
-                                      const SizedBox(width: 6),
-                                      _statusButton('L', 'late', currStatus, id, const Color(0xFFD97706)),
-                                    ],
-                                  ),
-                                ],
-                              ),
-                            ),
-                          );
-                        },
-                      ),
+          ]),
+          if (holiday) Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text('📅 ছুটি${occ != null ? ' — $occ' : ''}',
+                style: const TextStyle(color: Colors.orange, fontWeight: FontWeight.w600)),
           ),
+          const SizedBox(height: 8),
+          ...sessions.map((s) => _sessionRow(c, s)),
+        ]),
+      ),
+    );
+  }
+
+  Widget _sessionRow(Map c, String sess) {
+    final m = c[sess] as Map? ?? {};
+    final taken = m['taken'] == true;
+    final open = m['open'] == true;
+    final reason = m['reason'] as String? ?? '';
+    final reasonBn = switch (reason) {
+      'locked' => 'জমা হয়ে গেছে',
+      'window' => 'এখন নেওয়া যাবে',
+      'reopened' => 'Reopen করা হয়েছে',
+      'opened' => 'Present call খোলা',
+      'weekend' => 'ছুটি',
+      'holiday' => 'ছুটি',
+      'outside' => 'পিরিয়ডের সময় নেই',
+      'no_p5' => '৫ম পিরিয়ড নেই',
+      _ => '',
+    };
+    final sessBn = sess == 'p5' ? '৫ম পিরিয়ড' : 'সকাল';
+    final present = m['present'] ?? 0;
+    final absent = m['absent'] ?? 0;
+    final total = m['total'] ?? 0;
+    final takenAt = m['taken_at'] as String?;
+
+    final color = taken ? Colors.green : open ? Colors.blue : Colors.grey;
+    return InkWell(
+      onTap: open || taken ? () => _openEntry(c, sess) : null,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        margin: const EdgeInsets.only(top: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: .06),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: color.withValues(alpha: .25)),
+        ),
+        child: Row(children: [
+          Icon(taken ? Icons.check_circle : open ? Icons.radio_button_unchecked : Icons.lock,
+              color: color, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('$sessBn — $reasonBn',
+                  style: TextStyle(fontWeight: FontWeight.w600, color: color, fontSize: 13)),
+              if (taken) Text('$present উপস্থিত · $absent অনুপস্থিত · $total মোট',
+                  style: const TextStyle(fontSize: 11, color: Colors.black54)),
+              if (taken && takenAt != null) Text('নেওয়া: ${takenAt.substring(0, 16)}',
+                  style: const TextStyle(fontSize: 10, color: Colors.black38)),
+            ]),
+          ),
+          if (taken) const Icon(Icons.chevron_right, color: Colors.black26),
+        ]),
+      ),
+    );
+  }
+
+  void _openEntry(Map c, String sess) {
+    Navigator.push(context, MaterialPageRoute(
+      builder: (_) => _EntryScreen(
+        classId: c['class_id'] as int,
+        className: '${c['class_name'] ?? ''} ${c['section'] ?? ''}',
+        session: sess,
+        date: _dateStr,
+        canSubmit: true,
+      ),
+    )).then((_) => _load());
+  }
+}
+
+// ============================================================ ENTRY SCREEN
+class _EntryScreen extends StatefulWidget {
+  final int classId;
+  final String className;
+  final String session;
+  final String date;
+  final bool canSubmit;
+  const _EntryScreen({required this.classId, required this.className,
+    required this.session, required this.date, required this.canSubmit});
+
+  @override
+  State<_EntryScreen> createState() => _EntryScreenState();
+}
+
+class _EntryScreenState extends State<_EntryScreen> {
+  List _students = [];
+  Map<int, String> _status = {};
+  Map<int, String> _notes = {};
+  Map? _meta;
+  bool _loading = true;
+  bool _saving = false;
+  String? _error;
+  String _search = '';
+  final _searchCtl = TextEditingController();
+
+  String get _sessBn => widget.session == 'p5' ? '৫ম পিরিয়ড' : 'সকাল';
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _searchCtl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    setState(() { _loading = true; _error = null; });
+    try {
+      final r = await Api.get(
+          '/attendance/class/${widget.classId}?date=${widget.date}&session=${widget.session}');
+      if (!mounted) return;
+      final list = (r is Map && r['students'] is List) ? r['students'] as List : [];
+      setState(() {
+        _meta = r is Map ? r : null;
+        _students = list;
+        // default all present
+        _status = {for (final s in list) (s['student_id'] as int): 'present'};
+        // keep existing statuses
+        for (final s in list) {
+          final st = s['status'];
+          if (st != null) _status[s['student_id'] as int] = st as String;
+        }
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() { _error = e.toString().replaceFirst('Exception: ', ''); _loading = false; });
+    }
+  }
+
+  List get _filtered {
+    if (_search.isEmpty) return _students;
+    final q = _search.toLowerCase();
+    return _students.where((s) {
+      final n = (s['name'] ?? '').toString().toLowerCase();
+      final r = (s['roll'] ?? '').toString();
+      return n.contains(q) || r.contains(q);
+    }).toList();
+  }
+
+  int _count(String st) => _status.values.where((v) => v == st).length;
+
+  Future<void> _save() async {
+    if (_saving) return;
+    setState(() => _saving = true);
+    try {
+      final records = _students.map((s) => {
+        'student_id': s['student_id'],
+        'status': _status[s['student_id']] ?? 'present',
+        'remark': _notes[s['student_id']],
+      }).toList();
+      final idem = const Uuid().v4();
+      await Api.postOptimistic(
+          '/attendance/class/${widget.classId}',
+          {'date': widget.date, 'session': widget.session, 'records': records, 'idem_key': idem},
+          {});
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$_sessBn হাজিরা জমা হয়েছে')));
+      Navigator.pop(context);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))));
+    }
+  }
+
+  Future<void> _requestReopen() async {
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (c) {
+        final ctl = TextEditingController();
+        return AlertDialog(
+          title: const Text('Reopen অনুরোধ'),
+          content: TextField(
+            controller: ctl, maxLines: 2,
+            decoration: const InputDecoration(
+                labelText: 'কারণ', border: OutlineInputBorder()),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(c), child: const Text('বাতিল')),
+            FilledButton(onPressed: () => Navigator.pop(c, ctl.text.trim()), child: const Text('পাঠান')),
+          ],
+        );
+      },
+    );
+    if (reason == null || !mounted) return;
+    try {
+      await Api.postOptimistic(
+          '/attendance/class/${widget.classId}/request-reopen',
+          {'date': widget.date, 'session': widget.session, 'reason': reason}, {});
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Reopen অনুরোধ পাঠানো হয়েছে')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) return Scaffold(appBar: AppBar(), body: const Center(child: CircularProgressIndicator()));
+    if (_error != null) {
+      return Scaffold(
+        appBar: AppBar(title: Text(widget.className)),
+        body: Center(child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Text(_error!, textAlign: TextAlign.center),
+            const SizedBox(height: 12),
+            FilledButton(onPressed: _load, child: const Text('আবার চেষ্টা')),
+          ]),
+        )),
+      );
+    }
+    final state = _meta?['state'] as Map? ?? {};
+    final canTake = _meta?['can_take'] == true;
+    final open = state['open'] == true;
+    final holiday = _meta?['holiday'] == true;
+    final occ = _meta?['occasion'] as String?;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('${widget.className} · $_sessBn'),
+        actions: [
+          IconButton(icon: const Icon(Icons.search),
+              onPressed: () => showSearch(context: context, delegate: _RollSearch(_students, _status))),
         ],
       ),
-      floatingActionButton: _students.isEmpty
-          ? null
-          : FloatingActionButton.extended(
-              backgroundColor: emerald,
-              foregroundColor: Colors.white,
-              icon: const Icon(Icons.save_rounded),
-              label: const Text('সংরক্ষণ করুন (Save)', style: TextStyle(fontWeight: FontWeight.bold)),
-              onPressed: _save,
-            ),
-    );
-  }
-
-  Widget _sessionTabBtn(int idx, String label, IconData icon, Color emerald) {
-    final on = _sessionTab == idx;
-    return InkWell(
-      onTap: () => setState(() => _sessionTab = idx),
-      borderRadius: BorderRadius.circular(12),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        padding: const EdgeInsets.symmetric(vertical: 10),
-        decoration: BoxDecoration(
-          color: on ? emerald : emerald.withValues(alpha: 0.07),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: emerald.withValues(alpha: on ? 1 : 0.3)),
-        ),
-        child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-          Icon(icon, size: 17, color: on ? Colors.white : emerald),
-          const SizedBox(width: 6),
-          Text(label, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800,
-              color: on ? Colors.white : emerald)),
-        ]),
-      ),
-    );
-  }
-
-  /// Stage-2 verify list: loads Stage-1 (morning) status per student, lets the
-  /// teacher resolve each initially-present student. Amber = needs verify,
-  /// red styling ONLY for verified unauthorized departure.
-  Widget _buildStage2List(Color emerald) {
-    if (_stage2Loading) {
-      return const Center(
-          child: Padding(padding: EdgeInsets.all(32), child: CircularProgressIndicator()));
-    }
-    final initial = _stage1.values.where((m) => m['morning'] != null).length;
-    String initLabel(int sid) {
-      final m = _stage1[sid]?['morning'];
-      if (m == null) return 'প্রাথমিক রেকর্ড নেই';
-      switch ('${m['status'] ?? ''}') {
-        case 'present': return 'সকালে: উপস্থিত';
-        case 'late': return 'সকালে: দেরি';
-        case 'absent': return 'সকালে: অনুপস্থিত';
-        case 'leave': return 'সকালে: ছুটি';
-        default: return 'সকালে: ${m['status']}';
-      }
-    }
-    final counts = {'present_now': 0, 'early_departure': 0, 'not_found': 0, 'verified_left': 0};
-    for (final s in _students) {
-      final v = _stage2[s['id'] as int] ?? 'present_now';
-      counts[v] = (counts[v] ?? 0) + 1;
-    }
-    return Column(children: [
-      Container(
-        margin: const EdgeInsets.fromLTRB(14, 8, 14, 0),
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: const Color(0xFFFFFBEB),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: const Color(0xFFFDE68A)),
-        ),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text('POST-LEISURE যাচাই — প্রাথমিক রেকর্ড: $initial/${_students.length} জন',
-              style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13)),
-          const SizedBox(height: 6),
-          Wrap(spacing: 6, runSpacing: 6, children: [
-            _countChip('✓ এখন: ${counts['present_now']}', const Color(0xFF16A34A), const Color(0xFFDCFCE7)),
-            _countChip('⛱ ছুটি: ${counts['early_departure']}', const Color(0xFF2563EB), const Color(0xFFDBEAFE)),
-            _countChip('⚠ খুঁজে পাওয়া যায়নি: ${counts['not_found']}', const Color(0xFFD97706), const Color(0xFFFEF3C7)),
-            _countChip('🔴 verified: ${counts['verified_left']}', const Color(0xFFDC2626), const Color(0xFFFEE2E2)),
+      body: Column(children: [
+        // summary strip
+        Container(
+          margin: const EdgeInsets.all(12),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF8FAFC),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0xFFE2E8F0)),
+          ),
+          child: Row(children: [
+            _sumChip('উপস্থিত', _count('present'), Colors.green),
+            _sumChip('অনুপস্থিত', _count('absent'), Colors.red),
+            _sumChip('দেরি', _count('late'), Colors.orange),
+            _sumChip('ছুটি', _count('leave'), Colors.blue),
+            const Spacer(),
+            if (holiday) Text('📅 ${occ ?? 'ছুটি'}', style: const TextStyle(color: Colors.orange, fontWeight: FontWeight.w600)),
           ]),
-        ]),
-      ),
-      Expanded(
-        child: ListView.builder(
-          padding: const EdgeInsets.fromLTRB(14, 10, 14, 96),
-          itemCount: _students.length,
-          itemBuilder: (_, i) {
-            final s = _students[i];
-            final sid = s['id'] as int;
-            final v = _stage2[sid] ?? 'present_now';
-            Color edge = Colors.grey.withValues(alpha: 0.12);
-            if (v == 'not_found') edge = const Color(0xFFF59E0B);
-            if (v == 'verified_left') edge = const Color(0xFFDC2626);
-            return Container(
-              margin: const EdgeInsets.symmetric(vertical: 4),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: edge, width: v == 'present_now' ? 1 : 1.6),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Row(children: [
-                    Container(
-                      width: 36, height: 36,
-                      decoration: BoxDecoration(
-                        color: emerald.withValues(alpha: 0.10),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Center(child: Text('${s['roll']}',
-                          style: TextStyle(fontWeight: FontWeight.w800, color: emerald, fontSize: 14))),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Text('${s['name'] ?? ''}', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-                      Text(initLabel(sid), style: const TextStyle(fontSize: 11.5, color: Colors.black54)),
-                    ])),
-                  ]),
-                  const SizedBox(height: 8),
-                  Wrap(spacing: 6, runSpacing: 6, children: [
-                    _stage2Chip(sid, 'present_now', '✓ এখন উপস্থিত', const Color(0xFF16A34A)),
-                    _stage2Chip(sid, 'early_departure', '⛱ অনুমোদিত প্রস্থান', const Color(0xFF2563EB)),
-                    _stage2Chip(sid, 'not_found', '⚠ পাওয়া যায়নি', const Color(0xFFD97706)),
-                    _stage2Chip(sid, 'verified_left', '🔴 যাচাইকৃত অনুমতিহীন', const Color(0xFFDC2626)),
-                  ]),
-                ]),
-              ),
-            );
-          },
         ),
-      ),
-    ]);
-  }
-
-  Widget _stage2Chip(int sid, String value, String label, Color color) {
-    final on = (_stage2[sid] ?? 'present_now') == value;
-    return InkWell(
-      onTap: () => _onStage2Tap(sid, value),
-      borderRadius: BorderRadius.circular(99),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-        decoration: BoxDecoration(
-          color: on ? color : color.withValues(alpha: 0.08),
-          borderRadius: BorderRadius.circular(99),
-          border: Border.all(color: color.withValues(alpha: on ? 1 : 0.35)),
+        // quick actions
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Row(children: [
+            _quickBtn('সব উপস্থিত', Icons.done_all, Colors.green, () {
+              setState(() => _status = {for (final s in _students) (s['student_id'] as int): 'present'});
+            }),
+            const SizedBox(width: 8),
+            _quickBtn('Reopen চাইন', Icons.lock_open, Colors.orange, _requestReopen),
+          ]),
         ),
-        child: Text(label, style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800,
-            color: on ? Colors.white : color)),
+        const SizedBox(height: 6),
+        // roster
+        Expanded(
+          child: _filtered.isEmpty
+              ? const Center(child: Text('কোনো ছাত্রছাত্রী নেই'))
+              : ListView.builder(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  itemCount: _filtered.length,
+                  itemBuilder: (_, i) => _studentRow(_filtered[i]),
+                ),
+        ),
+      ]),
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: FilledButton.icon(
+            onPressed: (open && canTake && !_saving) ? _save : null,
+            icon: _saving
+                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                : const Icon(Icons.save),
+            label: Text(_saving ? 'জমা হচ্ছে...' : 'হাজিরা জমা দিন'),
+            style: FilledButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              backgroundColor: open && canTake ? const Color(0xFF2563EB) : Colors.grey,
+            ),
+          ),
+        ),
       ),
     );
   }
 
-  /// Sensitive transitions (verified_left) require explicit confirmation +
-  /// verifier note. not_found is reversible with one tap; verified_left needs
-  /// the confirm dialog so "escaped" is never recorded by accident.
-  Future<void> _onStage2Tap(int sid, String value) async {
-    if (value == 'verified_left') {
-      final name = (_students.firstWhere((s) => s['id'] == sid, orElse: () => {'name': ''})['name'] ?? '').toString();
-      final noteCtl = TextEditingController(text: _stage2Note[sid] ?? '');
-      final ok = await showDialog<bool>(
-        context: context,
-        builder: (c) => AlertDialog(
-          title: const Text('🔴 অনুমতিহীন প্রস্থান যাচাই'),
-          content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('"$name" সকালে উপস্থিত ছিল, এখন পাওয়া যাচ্ছে না।\n\nশ্রেণিকক্ষ, অনুমোদিত স্থান ও ছুটির রেকর্ড যাচাই করেছেন কি? শুধু authorized verifier-ই confirm করবেন।'),
-            const SizedBox(height: 10),
-            TextField(controller: noteCtl, maxLines: 2,
-                decoration: const InputDecoration(labelText: 'যাচাই নোট *', border: OutlineInputBorder(), isDense: true)),
-          ]),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('বাতিল')),
-            FilledButton(
-              style: FilledButton.styleFrom(backgroundColor: const Color(0xFFDC2626)),
-              onPressed: () {
-                if (noteCtl.text.trim().isEmpty) {
-                  ScaffoldMessenger.of(c).showSnackBar(
-                      const SnackBar(content: Text('যাচাই নোট লিখুন (কে, কখন, কোথায় খুঁজলেন)')));
-                  return;
-                }
-                Navigator.pop(c, true);
-              },
-              child: const Text('যাচাই Confirm'),
-            ),
-          ],
+  Widget _sumChip(String label, int n, Color c) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 14),
+      child: Column(children: [
+        Text('$n', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: c)),
+        Text(label, style: const TextStyle(fontSize: 11, color: Colors.black54)),
+      ]),
+    );
+  }
+
+  Widget _quickBtn(String label, IconData icon, Color c, VoidCallback onTap) {
+    return Expanded(
+      child: OutlinedButton.icon(
+        onPressed: onTap, icon: Icon(icon, size: 18, color: c), label: Text(label, style: TextStyle(color: c, fontSize: 12)),
+        style: OutlinedButton.styleFrom(
+          side: BorderSide(color: c.withValues(alpha: .4)),
+          padding: const EdgeInsets.symmetric(vertical: 10),
+        ),
+      ),
+    );
+  }
+
+  Widget _studentRow(Map s) {
+    final sid = s['student_id'] as int;
+    final eligible = s['p5_eligible'] != false;
+    final roll = s['roll'] ?? '';
+    final name = s['name'] ?? '';
+    final note = _notes[sid];
+
+    if (widget.session == 'p5' && !eligible) {
+      return Card(
+        margin: const EdgeInsets.only(bottom: 6),
+        child: ListTile(
+          leading: const Icon(Icons.person_off, color: Colors.grey),
+          title: Text('$roll. $name'),
+          subtitle: Text('সকালে অনুপস্থিত — দুপুরে হাজিরা নেওয়া যাবে না',
+              style: const TextStyle(fontSize: 12, color: Colors.black45)),
+          trailing: const Chip(label: Text('—', style: TextStyle(color: Colors.grey))),
         ),
       );
-      noteCtl.dispose();
-      if (ok != true || !mounted) return;
-      setState(() {
-        _stage2[sid] = value;
-        _stage2Note[sid] = noteCtl.text.trim();
-      });
-      return;
     }
-    setState(() => _stage2[sid] = value);
-  }
 
-  Widget _countChip(String text, Color textCol, Color bgCol) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: bgCol,
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: textCol.withValues(alpha: 0.3)),
-      ),
-      child: Text(
-        text,
-        style: TextStyle(color: textCol, fontSize: 11, fontWeight: FontWeight.bold),
+    return Card(
+      margin: const EdgeInsets.only(bottom: 6),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(children: [
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('$roll. $name', style: const TextStyle(fontWeight: FontWeight.w600)),
+              if (note != null && note.isNotEmpty) Text(note, style: const TextStyle(fontSize: 11, color: Colors.black45)),
+            ]),
+          ),
+          _statusBtn(sid, 'present', 'P', Colors.green),
+          const SizedBox(width: 4),
+          _statusBtn(sid, 'absent', 'A', Colors.red),
+          const SizedBox(width: 4),
+          _statusBtn(sid, 'late', 'L', Colors.orange),
+          const SizedBox(width: 4),
+          _statusBtn(sid, 'leave', 'Lv', Colors.blue),
+        ]),
       ),
     );
   }
 
-  Widget _statusButton(String label, String value, String current, int studentId, Color color) {
-    final isSelected = current == value;
+  Widget _statusBtn(int sid, String value, String label, Color color) {
+    final sel = (_status[sid] ?? 'present') == value;
     return InkWell(
-      onTap: () => setState(() => _status[studentId] = value),
+      onTap: () => setState(() => _status[sid] = value),
       borderRadius: BorderRadius.circular(8),
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        width: 32,
-        height: 32,
+        duration: const Duration(milliseconds: 120),
+        width: 34, height: 34,
         decoration: BoxDecoration(
-          color: isSelected ? color : color.withValues(alpha: 0.08),
+          color: sel ? color : color.withValues(alpha: .08),
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(
-            color: isSelected ? color : color.withValues(alpha: 0.25),
-            width: isSelected ? 1.5 : 1.0,
-          ),
+          border: Border.all(color: sel ? color : color.withValues(alpha: .25), width: sel ? 1.5 : 1),
         ),
-        child: Center(
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w800,
-              color: isSelected ? Colors.white : color,
-            ),
-          ),
-        ),
+        child: Center(child: Text(label,
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: sel ? Colors.white : color))),
       ),
     );
   }
 }
 
-class _RestrictedCard extends StatelessWidget {
-  const _RestrictedCard();
+class _RollSearch extends SearchDelegate<String> {
+  final List students;
+  final Map<int, String> status;
+  _RollSearch(this.students, this.status);
+
+  @override
+  String get searchFieldLabel => 'রোল বা নাম খুঁজুন';
+
+  @override
+  List<Widget>? buildActions(BuildContext context) => [
+    IconButton(icon: const Icon(Icons.clear), onPressed: () => query = ''),
+  ];
+
+  @override
+  Widget? buildLeading(BuildContext context) =>
+      IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => close(context, ''));
+
+  @override
+  Widget buildResults(BuildContext context) => _list(context);
+
+  @override
+  Widget buildSuggestions(BuildContext context) => _list(context);
+
+  Widget _list(BuildContext context) {
+    final q = query.toLowerCase();
+    final filtered = q.isEmpty ? students : students.where((s) {
+      return (s['name'] ?? '').toString().toLowerCase().contains(q) ||
+          (s['roll'] ?? '').toString().contains(q);
+    }).toList();
+    return ListView.builder(
+      itemCount: filtered.length,
+      itemBuilder: (_, i) {
+        final s = filtered[i];
+        final st = status[s['student_id']] ?? 'present';
+        final color = switch (st) { 'absent' => Colors.red, 'late' => Colors.orange, 'leave' => Colors.blue, _ => Colors.green };
+        return ListTile(
+          leading: CircleAvatar(child: Text('${s['roll'] ?? ''}', style: const TextStyle(fontSize: 12))),
+          title: Text(s['name'] ?? ''),
+          trailing: Chip(
+            label: Text(st, style: const TextStyle(color: Colors.white, fontSize: 11)),
+            backgroundColor: color,
+          ),
+          onTap: () => close(context, '${s['name']}'),
+        );
+      },
+    );
+  }
+}
+
+// ============================================================ OPEN CALL SHEET
+class _OpenCallSheet extends StatefulWidget {
+  const _OpenCallSheet();
+  @override
+  State<_OpenCallSheet> createState() => _OpenCallSheetState();
+}
+
+class _OpenCallSheetState extends State<_OpenCallSheet> {
+  List _classes = [];
+  int? _classId;
+  String _session = 'morning';
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final r = await Api.get('/teacher/profile');
+      if (!mounted) return;
+      setState(() {
+        _classes = r is Map && r['classes'] is List ? r['classes'] as List : [];
+        if (_classes.isNotEmpty) _classId = _classes[0]['id'] as int;
+        _loading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.all(24),
+      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
       child: Container(
-        decoration: BoxDecoration(
-          color: const Color(0xFFFFFBEB),
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: const Color(0xFFFDE68A)),
-        ),
         padding: const EdgeInsets.all(20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.lock_outline_rounded, size: 44, color: Color(0xFFD97706)),
-            const SizedBox(height: 10),
-            const Text(
-              'Attendance Restricted',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF92400E)),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'শুধুমাত্র designated Class Teacher-ই attendance নিতে পারবেন।\n'
-              'আপনি আপাতত কোনো class-এর class teacher নন।\n'
-              'Admin panel → Class & Class Teacher Allocation-এ আপনার ভূমিকা set করুন।',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.brown.shade700, height: 1.5, fontSize: 13),
-            ),
-          ],
-        ),
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : Column(mainAxisSize: MainAxisSize.min, children: [
+                const Text('Present call খুলুন',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                const SizedBox(height: 16),
+                DropdownButtonFormField<int>(
+                  value: _classId,
+                  decoration: const InputDecoration(labelText: 'শ্রেণি', border: OutlineInputBorder()),
+                  items: _classes.map<DropdownMenuItem<int>>((c) => DropdownMenuItem(
+                      value: c['id'] as int,
+                      child: Text('${c['name'] ?? ''} ${c['section'] ?? ''}'))).toList(),
+                  onChanged: (v) => setState(() => _classId = v),
+                ),
+                const SizedBox(height: 12),
+                SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment(value: 'morning', label: Text('সকাল')),
+                    ButtonSegment(value: 'p5', label: Text('৫ম পিরিয়ড')),
+                  ],
+                  selected: {_session},
+                  onSelectionChanged: (s) => setState(() => _session = s.first),
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: _classId == null
+                        ? null
+                        : () => Navigator.pop(context, {'class_id': _classId, 'session': _session}),
+                    child: const Text('খুলুন'),
+                  ),
+                ),
+              ]),
       ),
     );
   }

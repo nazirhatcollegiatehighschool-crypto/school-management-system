@@ -32,13 +32,14 @@ class _SplashScreenState extends State<SplashScreen> {
       if (!mounted) return;
       Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => HomeScreen(students: r['students'])));
     } catch (e) {
-      // Network blips must NOT log the guardian out mid-offline — keep token,
-      // show a retry button. Only auth failures invalidate the session.
-      if (!Api.isNetworkError(e)) {
+      // Only a REAL auth failure (401/403) invalidates the session. A
+      // transient network blip OR a server 5xx (e.g. Vercel cold-start)
+      // must NOT log the guardian out — offer in-app retry instead.
+      if (Api.isAuthError(e)) {
         await Api.clearToken();
       }
       if (!mounted) return;
-      setState(() { _message = Api.isNetworkError(e) ? 'সার্ভারে পৌঁছানো যায়নি। ইন্টারনেট চেক করে আবার চেষ্টা করুন।' : friendlyError(e); _failed = true; });
+      setState(() { _message = Api.isAuthError(e) ? friendlyError(e) : 'সার্ভারে পৌঁছানো যায়নি। ইন্টারনেট চেক করে আবার চেষ্টা করুন।'; _failed = true; });
     }
   }
 

@@ -50,6 +50,8 @@ class _MarksheetScreenState extends State<MarksheetScreen> {
       final data = await Api.get('/guardian/student/${widget.studentId}/result-card?event_id=$_selectedEventId');
       setState(() {
         _data = data;
+        // Q8: a conditional / not-all-pass student receives result:null — the
+        // detail is withheld server-side, so there are no families to show.
         _families = data['result']?['families'] is List ? (data['result']!['families'] as List) : [];
         _error = null;
         _loadingMarksheet = false;
@@ -211,7 +213,12 @@ class _MarksheetScreenState extends State<MarksheetScreen> {
     final result = _data!['result'] ?? {};
     final promotion = _data!['promotion'];
     final position = _data!['position'];
+    final dual = _data!['dual_position'];
     final attendance = _data!['attendance'];
+    final hidden = _data!['marksheet_hidden'] == true;
+    // Q9 dual merit: section position AND combined class position.
+    final secPos = dual?['section'];
+    final combPos = dual?['combined'];
     return ListView(padding: const EdgeInsets.all(12), children: [
       Card(child: ListTile(
         leading: const Icon(Icons.school, color: Colors.indigo),
@@ -219,6 +226,17 @@ class _MarksheetScreenState extends State<MarksheetScreen> {
         subtitle: Text('${student['class_name'] ?? ''} (${student['section'] ?? ''}) • Roll ${student['roll'] ?? ''}\n${event['name'] ?? ''}'),
         isThreeLine: true,
       )),
+      if (hidden)
+        Card(color: Colors.orange.shade50, child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(children: [
+            const Icon(Icons.lock_outline, color: Colors.orange),
+            const SizedBox(width: 10),
+            const Expanded(child: Text(
+                'এই ফলাফলের বিস্তারিত মার্কশিট এখনো প্রকাশ করা হয়নি। শুধু ফলাফল দেখা যাবে।',
+                style: TextStyle(fontWeight: FontWeight.w600))),
+          ]),
+        )),
       // Interactive Result Card summary: GPA + rank + attendance.
       Card(
         color: Colors.indigo.shade50,
@@ -227,7 +245,7 @@ class _MarksheetScreenState extends State<MarksheetScreen> {
           child: Row(children: [
             Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               const Text('ফাইনাল GPA', style: TextStyle(color: Colors.grey, fontSize: 12)),
-              Text(result['final_gpa']?.toString() ?? '--',
+              Text(result['final_gpa']?.toString() ?? (hidden ? '--' : '--'),
                   style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 26)),
             ]),
             const Spacer(),
@@ -235,7 +253,12 @@ class _MarksheetScreenState extends State<MarksheetScreen> {
               Row(children: [
                 const Icon(Icons.emoji_events, size: 16, color: Colors.amber),
                 const SizedBox(width: 4),
-                Text(position != null ? 'মেধা স্থান: ${position['rank']}/${position['of']}' : 'মেধা স্থান: —',
+                Text(
+                    (combPos != null || secPos != null)
+                        ? 'মেধা: ${secPos ?? '-'} (শাখা) • ${combPos ?? '-'} (সমন্বিত)'
+                        : (position != null
+                            ? 'মেধা স্থান: ${position['rank']}/${position['of']}'
+                            : 'মেধা স্থান: —'),
                     style: const TextStyle(fontWeight: FontWeight.bold)),
               ]),
               const SizedBox(height: 4),
@@ -282,7 +305,8 @@ class _MarksheetScreenState extends State<MarksheetScreen> {
         ),
       ],
       const SizedBox(height: 8),
-      for (final f in _families ?? [])
+      if (!hidden) ...[
+        for (final f in _families ?? [])
         Builder(builder: (_) {
           final hi = (_data!['subject_highest'] is Map)
               ? (_data!['subject_highest'] as Map)[f['subject']?.toString() ?? '']
@@ -304,23 +328,24 @@ class _MarksheetScreenState extends State<MarksheetScreen> {
             ]),
           ])));
         }),
-      const SizedBox(height: 8),
-      Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(children: [
-        Row(children: [
-          const Text('ফলাফল', style: TextStyle(color: Colors.grey)),
-          const Spacer(),
-          Text(result['result_status']?.toString() ?? '',
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16,
-                  color: result['result_status'] == 'PASSED' ? Colors.green : Colors.red)),
-        ]),
-        const SizedBox(height: 6),
-        Row(children: [
-          const Text('ফাইনাল GPA', style: TextStyle(color: Colors.grey)),
-          const Spacer(),
-          Text(result['final_gpa']?.toString() ?? '--',
-              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-        ]),
-      ]))),
+        const SizedBox(height: 8),
+        Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(children: [
+          Row(children: [
+            const Text('ফলাফল', style: TextStyle(color: Colors.grey)),
+            const Spacer(),
+            Text(result['result_status']?.toString() ?? '',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16,
+                    color: result['result_status'] == 'PASSED' ? Colors.green : Colors.red)),
+          ]),
+          const SizedBox(height: 6),
+          Row(children: [
+            const Text('ফাইনাল GPA', style: TextStyle(color: Colors.grey)),
+            const Spacer(),
+            Text(result['final_gpa']?.toString() ?? '--',
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+          ]),
+        ]))),
+      ],
       if ((_data!['remarks'] ?? '') != '')
         Card(child: ListTile(
           leading: const Icon(Icons.chat_outlined),
@@ -330,8 +355,8 @@ class _MarksheetScreenState extends State<MarksheetScreen> {
       const SizedBox(height: 8),
       Center(child: TextButton.icon(
         icon: const Icon(Icons.description_outlined),
-        label: const Text('Result Card দেখুন (PDF ডাউনলোড সহ)'),
-        onPressed: _showResultCard,
+        label: Text(hidden ? 'PDF পাওয়া যাবে না' : 'Result Card দেখুন (PDF ডাউনলোড সহ)'),
+        onPressed: hidden ? null : _showResultCard,
       )),
     ]);
   }

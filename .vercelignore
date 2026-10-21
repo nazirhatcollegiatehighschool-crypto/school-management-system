@@ -1,0 +1,17 @@
+apps/
+apks/
+db/
+database/
+tmp/
+logs/
+runtime/
+bin/
+AdminApp/
+GuardianApp/
+TeacherApp/
+teacher-mobile-app/
+website/**/node_modules/
+*.png
+*.py
+*.bat
+*.salive

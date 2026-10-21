@@ -275,12 +275,40 @@ class _RoutineScreenState extends State<RoutineScreen> {
       'groups': groups,
     };
 
+    // Optimistic row: an offline save appears immediately, tagged pending,
+    // and is replaced by the real server row once it syncs.
+    final slotObj = _slots.firstWhere((s) => s['id'].toString() == slotId,
+        orElse: () => <String, dynamic>{});
+    final subjObj = _subjects.firstWhere((s) => s['id'].toString() == subjectId,
+        orElse: () => <String, dynamic>{});
+    final optimisticItem = <String, dynamic>{
+      'id': existingEntry?['id'] ?? 'pending-${DateTime.now().microsecondsSinceEpoch}',
+      'day': dayNum,
+      'day_name': _days[dayNum],
+      'time_slot_id': int.tryParse(slotId),
+      'slot_order': slotObj['slot_order'],
+      'slot_label': slotObj['label'],
+      'start_time': slotObj['start_time'],
+      'end_time': slotObj['end_time'],
+      'subject': {'id': int.tryParse(subjectId), 'name': subjObj['name']},
+      'notes': notesCtl.text.trim(),
+      'room': roomCtl.text.trim(),
+      'sections': sections,
+      'groups': groups,
+      '_pending': true,
+    };
+    final optimistic = <String, dynamic>{
+      'cache': '/routine/teacher/mine',
+      'action': existingEntry == null ? 'append' : 'update',
+      'item': optimisticItem,
+    };
+
     try {
       dynamic r;
       if (existingEntry == null) {
-        r = await Api.post('/routine/teacher', body);
+        r = await Api.postOptimistic('/routine/teacher', body, optimistic);
       } else {
-        r = await Api.put('/routine/teacher/${existingEntry['id']}', body);
+        r = await Api.putOptimistic('/routine/teacher/${existingEntry['id']}', body, optimistic);
       }
       if (!mounted) return;
       if (Api.isQueued(r)) {
@@ -348,7 +376,12 @@ class _RoutineScreenState extends State<RoutineScreen> {
     );
     if (ok != true) return;
     try {
-      final r = await Api.delete('/routine/teacher/${entry['id']}');
+      final optimistic = <String, dynamic>{
+        'cache': '/routine/teacher/mine',
+        'action': 'remove',
+        'item': {'id': entry['id']},
+      };
+      final r = await Api.deleteOptimistic('/routine/teacher/${entry['id']}', optimistic);
       if (!mounted) return;
       if (Api.isQueued(r)) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -410,7 +443,20 @@ class _RoutineScreenState extends State<RoutineScreen> {
                       child: ListTile(
                         dense: true,
                         leading: CircleAvatar(radius: 16, child: Text('${e['slot_order'] ?? ''}')),
-                        title: Text('${e['subject']?['name'] ?? ''}'),
+                        title: Row(children: [
+                          Flexible(child: Text('${e['subject']?['name'] ?? ''}')),
+                          if (e['_pending'] == true) ...[
+                            const SizedBox(width: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                              decoration: BoxDecoration(
+                                  color: Colors.orange.withValues(alpha: 0.15),
+                                  borderRadius: BorderRadius.circular(6)),
+                              child: const Text('⏳ সিঙ্ক বাকি',
+                                  style: TextStyle(fontSize: 10, color: Colors.deepOrange, fontWeight: FontWeight.w700)),
+                            ),
+                          ],
+                        ]),
                         subtitle: Text('${_classSummary(e).isNotEmpty ? '${_classSummary(e)} | ' : ''}'
                             '${e['slot_label'] ?? ''} (${e['start_time']?.toString().substring(0, 5) ?? ''}–${e['end_time']?.toString().substring(0, 5) ?? ''})'),
                         trailing: Row(mainAxisSize: MainAxisSize.min, children: [

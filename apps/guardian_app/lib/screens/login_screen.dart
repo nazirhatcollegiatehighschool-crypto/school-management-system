@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
 import '../api.dart';
-import '../config.dart';
 import '../fcm_service.dart';
-import '../server_settings.dart';
 import '../update_check.dart';
 import 'home_screen.dart';
 
@@ -54,7 +52,9 @@ class _LoginScreenState extends State<LoginScreen> {
         throw Exception('সার্ভার থেকে সঠিক উত্তর আসেনি। আবার চেষ্টা করুন।');
       }
       if (Api.isQueued(r)) {
-        throw Exception('ইন্টারনেট নেই — login-এর জন্য online থাকতে হবে।');
+        throw Exception(Api.sync.isOffline
+            ? 'ইন্টারনেট নেই — login-এর জন্য ফোনে ইন্টারনেট দরকার।'
+            : 'School server-এ পৌঁছানো যাচ্ছে না — একটু পরে আবার চেষ্টা করুন।');
       }
       final dynamic token = r['token'];
       if (token is! String || token.isEmpty) {
@@ -323,26 +323,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                   ),
                                 ),
                         ),
-                        const SizedBox(height: 12),
-
-                        // Server URL Dialog button
-                        Center(
-                          child: TextButton.icon(
-                            style: TextButton.styleFrom(
-                              foregroundColor: Colors.blueGrey.shade600,
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                            ),
-                            icon: const Icon(Icons.dns_outlined, size: 15),
-                            label: Text(
-                              Config.serverUrl,
-                              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500),
-                            ),
-                            onPressed: () async {
-                              await showServerUrlDialog(context);
-                              if (mounted) setState(() {});
-                            },
-                          ),
-                        ),
+                        // Server-URL button intentionally hidden (production).
                       ],
                     ),
                   ),

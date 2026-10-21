@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
 import '../api.dart';
+import '../pdf/admin_pdfs.dart';
+import '../pdf/app_pdf.dart';
 
 class ResultsScreen extends StatefulWidget {
   const ResultsScreen({super.key});
@@ -163,25 +164,63 @@ class _ResultsScreenState extends State<ResultsScreen> with SingleTickerProvider
     }
   }
 
+  Map? _classById(int id) {
+    for (final c in _drillClasses) {
+      if (c is Map && '${c['id']}' == '$id') return c;
+    }
+    return null;
+  }
+
+  /// Whole-class result cards, rendered **on this phone** from the tabulation
+  /// JSON the screen already loaded. The old build opened the server's
+  /// `/results/class-pdf` in a browser, which needs a reachable server.
   Future<void> _pdfAll() async {
     if (_drill == null || _drillClass == null) return;
-    final url = '${Api.downloadBase}/results/class-pdf?event_id=${_drill!['id']}&class_id=$_drillClass';
+    setState(() => _drillBusy = true);
     try {
-      await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+      var rows = _drillStudents;
+      var subjects = _drillSubjects;
+      if (rows.isEmpty) {
+        final r = await Api.get(
+            '/results/tabulation?event_id=${_drill!['id']}&class_id=$_drillClass');
+        rows = (r['rows'] as List?) ?? [];
+        subjects = (r['subjects'] as List?) ?? [];
+        setState(() { _drillStudents = rows; _drillSubjects = subjects; });
+      }
+      if (rows.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('এই class-এ কোনো result নেই')));
+        return;
+      }
+      final dynamic settings = await Api.get('/admin/settings');
+      final bytes = await AdminPdfs.classResultCards(
+        {'subjects': subjects, 'rows': rows},
+        eventName: '${_drill!['name'] ?? ''}',
+        cls: _classById(_drillClass!) ?? const {},
+        settings: settings is Map ? settings : const {},
+      );
+      await AppPdf.share(bytes, 'result_cards_class$_drillClass.pdf');
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('PDF খোলা যায়নি: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(backgroundColor: Colors.red, content: Text('PDF error: $e')));
+    } finally {
+      if (mounted) setState(() => _drillBusy = false);
     }
   }
 
+  /// One student's result card, rendered on this phone from the marksheet JSON.
   Future<void> _pdfOne(int studentId) async {
     if (_drill == null) return;
-    final url = '${Api.downloadBase}/guardian/student/$studentId/result-card.pdf?event_id=${_drill!['id']}';
     try {
-      await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+      final data = await Api.get('/results/marksheet/$studentId/${_drill!['id']}');
+      final bytes = await AdminPdfs.resultCard(data is Map ? data : const {});
+      await AppPdf.share(bytes, 'result_card_$studentId.pdf');
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('PDF খোলা যায়নি: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(backgroundColor: Colors.red, content: Text('PDF error: $e')));
     }
   }
 

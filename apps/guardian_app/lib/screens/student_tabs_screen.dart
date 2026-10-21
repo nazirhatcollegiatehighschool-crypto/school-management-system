@@ -19,6 +19,8 @@ class _StudentTabsScreenState extends State<StudentTabsScreen> {
   int _tab = 0;
   List? _routine;
   List? _attendance;
+  Map? _attSummary; // v2 monthly summary {percent, present_days, ...}
+  List? _attRecords; // v2 records with who-took
   List? _marks;
   List? _homework;
   List? _notifications;
@@ -64,12 +66,14 @@ class _StudentTabsScreenState extends State<StudentTabsScreen> {
         Api.get('/guardian/student/$id/homework'),
         Api.get('/guardian/student/$id/notifications'),
         Api.get('/guardian/student/$id/complaints'),
+        Api.get('/attendance/guardian/$id').catchError((_) => null),
       ]);
       await Api.cachePut(cacheKey, {
         'routine': results[0], 'attendance': results[1], 'marks': results[2],
         'homework': results[3], 'notifications': results[4],
         'complaints': results[5] is Map ? (results[5] as Map)['complaints'] : null,
         'remarks': results[5] is Map ? (results[5] as Map)['remarks'] : null,
+        'att_v2': results[6] is Map ? results[6] : null,
       });
       if (!mounted) return;
       setState(() {
@@ -81,6 +85,11 @@ class _StudentTabsScreenState extends State<StudentTabsScreen> {
         if (results[5] is Map) {
           _complaints = (results[5] as Map)['complaints'];
           _remarks = (results[5] as Map)['remarks'];
+        }
+        if (results[6] is Map) {
+          final m = results[6] as Map;
+          _attSummary = m['summary'] is Map ? m['summary'] as Map : null;
+          _attRecords = m['records'] is List ? m['records'] as List : null;
         }
       });
     } catch (e) {
@@ -202,6 +211,86 @@ class _StudentTabsScreenState extends State<StudentTabsScreen> {
   Color _statusColor(String s) =>
       s == 'present' ? const Color(0xFF16A34A) : s == 'absent' ? const Color(0xFFDC2626) : const Color(0xFFD97706);
 
+  Widget _attSummaryCard(Map s) {
+    final pct = (s['percent'] is num) ? (s['percent'] as num).toDouble() : 0.0;
+    final present = s['present_days'] ?? 0;
+    final late = s['late_days'] ?? 0;
+    final leave = s['leave_days'] ?? 0;
+    final absent = s['absent_days'] ?? 0;
+    final school = s['school_days'] ?? 0;
+    final col = pct >= 75 ? const Color(0xFF16A34A) : pct >= 50 ? const Color(0xFFF59E0B) : const Color(0xFFDC2626);
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(colors: [col, col.withValues(alpha: .8)]),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(children: [
+        Text('এই মাসের হাজিরা', style: TextStyle(color: Colors.white.withValues(alpha: .9), fontSize: 13)),
+        const SizedBox(height: 4),
+        Text('${pct.toStringAsFixed(1)}%', style: const TextStyle(color: Colors.white, fontSize: 34, fontWeight: FontWeight.w800)),
+        const SizedBox(height: 10),
+        Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+          _sumItem('উপস্থিত', present + late, Colors.white),
+          _sumItem('অনুপস্থিত', absent, Colors.white),
+          _sumItem('ছুটি', leave, Colors.white),
+          _sumItem('মোট দিন', school, Colors.white),
+        ]),
+      ]),
+    );
+  }
+
+  Widget _sumItem(String label, int n, Color c) {
+    return Column(children: [
+      Text('$n', style: TextStyle(color: c, fontSize: 18, fontWeight: FontWeight.w800)),
+      Text(label, style: TextStyle(color: c.withValues(alpha: .85), fontSize: 11)),
+    ]);
+  }
+
+  Widget _attRow(Map a) {
+    final st = (a['status'] ?? a['final_state'] ?? '').toString().toLowerCase();
+    final sess = (a['session'] ?? 'morning').toString();
+    final sessBn = sess == 'p5' ? '৫ম পিরিয়ড' : 'সকাল';
+    final by = a['recorded_by'] as String?;
+    final at = a['recorded_at'] as String?;
+    final label = switch (st) {
+      'present' => 'উপস্থিত', 'absent' => 'অনুপস্থিত',
+      'late' => 'দেরি', 'leave' => 'ছুটি', _ => st,
+    };
+    final color = _statusColor(st);
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.grey.withValues(alpha: 0.12)),
+      ),
+      child: ListTile(
+        dense: true,
+        leading: Container(
+          width: 12, height: 12,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        title: Text('${a['date'].toString().substring(0, 10)} · $sessBn',
+            style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
+        subtitle: (by != null && by.isNotEmpty)
+            ? Text('নেওয়াছেন: $by${at != null ? ' · ${at.substring(0, 16)}' : ''}',
+                style: const TextStyle(fontSize: 12, color: Colors.black54))
+            : (a['remark'] != null ? Text(a['remark'], style: TextStyle(fontSize: 12, color: Colors.grey.shade600)) : null),
+        trailing: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.10),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: color.withValues(alpha: 0.3)),
+          ),
+          child: Text(label, style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 12)),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -308,58 +397,16 @@ class _StudentTabsScreenState extends State<StudentTabsScreen> {
       return RoutineView(routines: data);
     }
     if (_tab == 1) {
-      if (_attendance == null) return const Center(child: CircularProgressIndicator());
-      if (_attendance!.isEmpty) return const Center(child: Text('কোনো হাজিরা রেকর্ড পাওয়া যায়নি'));
-      return ListView.builder(
+      // v2 data preferred (summary + who-took + leave), fallback to legacy list
+      final recs = (_attRecords != null && _attRecords!.isNotEmpty) ? _attRecords! : _attendance;
+      if (recs == null) return const Center(child: CircularProgressIndicator());
+      if (recs.isEmpty) return const Center(child: Text('কোনো হাজিরা রেকর্ড পাওয়া যায়নি'));
+      return ListView(
         padding: const EdgeInsets.all(12),
-        itemCount: _attendance!.length,
-        itemBuilder: (_, i) {
-          final a = _attendance![i];
-          final status = (a['status'] ?? '').toString().toLowerCase();
-          final statusColor = _statusColor(status);
-          final statusLabel = status == 'present' ? 'উপস্থিত' : status == 'absent' ? 'অনুপস্থিত' : 'বিলম্ব';
-
-          return Container(
-            margin: const EdgeInsets.symmetric(vertical: 4),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: Colors.grey.withValues(alpha: 0.12)),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.02),
-                  blurRadius: 6,
-                  offset: const Offset(0, 2),
-                ),
-              ],
-            ),
-            child: ListTile(
-              dense: true,
-              leading: Container(
-                width: 12,
-                height: 12,
-                decoration: BoxDecoration(color: statusColor, shape: BoxShape.circle),
-              ),
-              title: Text(
-                a['date'].toString().substring(0, 10),
-                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
-              ),
-              trailing: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: statusColor.withValues(alpha: 0.10),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: statusColor.withValues(alpha: 0.3)),
-                ),
-                child: Text(
-                  statusLabel,
-                  style: TextStyle(color: statusColor, fontWeight: FontWeight.bold, fontSize: 12),
-                ),
-              ),
-              subtitle: a['remark'] != null ? Text(a['remark'], style: TextStyle(fontSize: 12, color: Colors.grey.shade600)) : null,
-            ),
-          );
-        },
+        children: [
+          if (_attSummary != null) _attSummaryCard(_attSummary!),
+          ...recs.map((a) => _attRow(a)),
+        ],
       );
     }
 if (_tab == 2) {
