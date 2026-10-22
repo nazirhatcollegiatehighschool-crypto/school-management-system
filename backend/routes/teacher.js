@@ -361,7 +361,7 @@ router.get('/exams', async (req, res) => {
        WHERE (e.source = 'admin' AND (c.teacher_id = ? OR sub.teacher_id = ?)
               AND (e.event_id IS NULL OR EXISTS (
                 SELECT 1 FROM exam_events ev
-                WHERE ev.id=e.event_id AND ev.entry_open=1 AND ev.is_published=0
+                WHERE ev.id=e.event_id AND ev.is_published=0
                   AND e.entry_open=1 AND e.status<>'published'
               )))
           OR (e.source = 'teacher' AND (e.created_by = ? OR e.id IN (SELECT exam_id FROM exam_shares WHERE teacher_id = ?)))
@@ -439,8 +439,7 @@ router.get('/exams/:id', async (req, res) => {
   try {
     const exam = await teacherCanAccessExam(req.params.id, req.user.id);
     if (!exam) return res.status(404).json({ error: 'Exam not found' });
-    if (exam.event_id && (Number(exam.entry_open) !== 1 ||
-        Number(exam.event_entry_open) !== 1 || Number(exam.event_is_published) === 1)) {
+    if (exam.event_id && (Number(exam.entry_open) !== 1 || Number(exam.event_is_published) === 1)) {
       return res.status(404).json({ error: 'এই পরীক্ষায় number entry এখন বন্ধ।' });
     }
     // Subject eligibility: only students enrolled in this subject via
@@ -646,7 +645,7 @@ router.post('/exams/:id/finalize', async (req, res) => {
       return res.status(403).json({ error: 'Only the subject teacher can finalize this exam.' });
     }
     if (Number(exam.entry_open) === 0 ||
-        (exam.event_id && (Number(exam.event_entry_open) !== 1 || Number(exam.event_is_published) === 1))) {
+        (exam.event_id && Number(exam.event_is_published) === 1)) {
       return res.status(403).json({ error: 'Marks entry is closed by admin.' });
     }
     const examId = exam.id;
@@ -682,7 +681,7 @@ router.post('/exams/:id/finalize-confirm', async (req, res) => {
       return res.status(409).json({ error: 'Exam already published' });
     }
     if (Number(exam.can_enter) !== 1 || Number(exam.entry_open) === 0 ||
-        (exam.event_id && (Number(exam.event_entry_open) !== 1 || Number(exam.event_is_published) === 1))) {
+        (exam.event_id && Number(exam.event_is_published) === 1)) {
       return res.status(403).json({ error: 'Marks entry is closed by admin.' });
     }
     const examId = exam.id;
@@ -738,7 +737,7 @@ async function submitExamMarks(exam, records, userId) {
   }
   // Admin 1-click permission: entry_open=0 revokes teacher marks entry.
   if (Number(exam.entry_open) === 0 ||
-      (exam.event_id && (Number(exam.event_entry_open) !== 1 || Number(exam.event_is_published) === 1))) {
+      (exam.event_id && Number(exam.event_is_published) === 1)) {
     throw Object.assign(new Error('Marks entry is closed by admin for this exam.'), { status: 403 });
   }
   // Q3 lock rule: once the class teacher approves the subject-exam, the
@@ -2110,7 +2109,7 @@ router.get('/current-exam', async (req, res) => {
       'SELECT id, name FROM sessions WHERE is_active=1 ORDER BY id LIMIT 1');
     const [[ev]] = await pool.query(
       `SELECT * FROM exam_events ev
-       WHERE ev.exam_kind='test' AND ev.session_id=? AND ev.is_published=0 AND ev.entry_open=1
+       WHERE ev.exam_kind='test' AND ev.session_id=? AND ev.is_published=0
          AND EXISTS (SELECT 1 FROM exams x WHERE x.event_id=ev.id AND x.entry_open=1 AND x.status<>'published')
        ORDER BY ev.id LIMIT 1`,
       [sess ? sess.id : 0]);
@@ -2167,7 +2166,7 @@ router.get('/events', async (req, res) => {
        JOIN exams x ON x.event_id=e.id
        LEFT JOIN classes c ON c.id=x.class_id
        WHERE (c.teacher_id=? OR x.created_by=? OR EXISTS(SELECT 1 FROM subjects sub WHERE sub.class_id=c.id AND sub.teacher_id=?))
-         AND e.is_published=0 AND e.entry_open=1
+         AND e.is_published=0
          AND EXISTS (
            SELECT 1 FROM exams ex JOIN classes ec ON ec.id=ex.class_id
            WHERE ex.event_id=e.id AND ex.status<>'published' AND ex.entry_open=1
@@ -2399,7 +2398,7 @@ router.get('/events/:id/entry-subjects', async (req, res) => {
   try {
     const [[ev]] = await pool.query('SELECT * FROM exam_events WHERE id=?', [req.params.id]);
     if (!ev) return res.status(404).json({ error: 'Event not found' });
-    if (Number(ev.entry_open) !== 1 || Number(ev.is_published) === 1) {
+    if (Number(ev.is_published) === 1) {
       return res.status(404).json({ error: 'এই পরীক্ষায় number entry এখন বন্ধ।' });
     }
     const [[cls]] = await pool.query('SELECT id, name, section, group_name, teacher_id FROM classes WHERE id=?', [classId]);
@@ -2430,7 +2429,8 @@ router.get('/events/:id/entry-subjects', async (req, res) => {
       pending_count: Number(s.student_count) - Number(s.entered_count),
       submitted: Number(s.entered_count) > 0,
       exam_published: s.exam_status === 'published',
-      entry_open: s.exam_entry_open == null || s.exam_entry_open === undefined ? 1 : Number(s.exam_entry_open),
+      entry_open: s.exam_entry_open == null || s.exam_entry_open === undefined
+        ? (Number(ev.entry_open) === 1 ? 1 : 0) : Number(s.exam_entry_open),
       // NCTB component-wise structure (empty array = single-total entry).
       components: [
         ...(s.cq_full != null ? [{ key: 'cq', label: 'CQ', full: Number(s.cq_full) }] : []),
@@ -2464,9 +2464,6 @@ router.post('/events/:id/marks', async (req, res) => {
     if (ev.is_published) {
       return res.status(403).json({ error: 'Result already published. Contact admin for changes.' });
     }
-    if (Number(ev.entry_open) !== 1) {
-      return res.status(403).json({ error: 'Marks entry is closed by admin for this exam.' });
-    }
     const [[sub]] = await pool.query(
       'SELECT id, name, class_id, full_marks, teacher_id, cq_full, mcq_full, practical_full, written_full, ca_full FROM subjects WHERE id=?',
       [subject_id]);
@@ -2485,6 +2482,9 @@ router.post('/events/:id/marks', async (req, res) => {
       'SELECT * FROM exams WHERE event_id=? AND class_id=? AND subject_id=? LIMIT 1',
       [req.params.id, class_id, subject_id]);
     if (!exam) {
+      if (Number(ev.entry_open) !== 1) {
+        return res.status(403).json({ error: 'এই পরীক্ষায় number entry admin বন্ধ করেছেন।' });
+      }
       const examType = KIND_TO_EXAM_TYPE[ev.exam_kind] || 'class_test';
       const [ins] = await pool.query(
         `INSERT INTO exams (name, exam_type, class_id, subject_id, source, created_by, event_id, status)
