@@ -358,7 +358,12 @@ router.get('/exams', async (req, res) => {
        FROM exams e
        JOIN classes c ON e.class_id = c.id
        JOIN subjects sub ON e.subject_id = sub.id
-       WHERE (e.source = 'admin' AND (c.teacher_id = ? OR sub.teacher_id = ?))
+       WHERE (e.source = 'admin' AND (c.teacher_id = ? OR sub.teacher_id = ?)
+              AND (e.event_id IS NULL OR EXISTS (
+                SELECT 1 FROM exam_events ev
+                WHERE ev.id=e.event_id AND ev.entry_open=1 AND ev.is_published=0
+                  AND e.entry_open=1 AND e.status<>'published'
+              )))
           OR (e.source = 'teacher' AND (e.created_by = ? OR e.id IN (SELECT exam_id FROM exam_shares WHERE teacher_id = ?)))
        ORDER BY e.created_at DESC`,
       [req.user.id, req.user.id, req.user.id, req.user.id, req.user.id, req.user.id]
@@ -407,9 +412,11 @@ router.post('/exams', async (req, res) => {
 
 async function teacherCanAccessExam(examId, userId) {
   const [rows] = await pool.query(
-    `SELECT e.*, cls.teacher_id AS class_teacher_id, sub.teacher_id AS subject_teacher_id FROM exams e
+    `SELECT e.*, cls.teacher_id AS class_teacher_id, sub.teacher_id AS subject_teacher_id,
+            ev.entry_open AS event_entry_open, ev.is_published AS event_is_published FROM exams e
      LEFT JOIN classes cls ON e.class_id = cls.id
      LEFT JOIN subjects sub ON e.subject_id = sub.id
+     LEFT JOIN exam_events ev ON ev.id = e.event_id
      WHERE e.id = ? AND (
         (e.source = 'admin' AND (sub.teacher_id = ? OR cls.teacher_id = ?))
         OR (e.source = 'teacher' AND (e.created_by = ? OR e.id IN (SELECT exam_id FROM exam_shares WHERE teacher_id = ?)))
@@ -432,6 +439,10 @@ router.get('/exams/:id', async (req, res) => {
   try {
     const exam = await teacherCanAccessExam(req.params.id, req.user.id);
     if (!exam) return res.status(404).json({ error: 'Exam not found' });
+    if (exam.event_id && (Number(exam.entry_open) !== 1 ||
+        Number(exam.event_entry_open) !== 1 || Number(exam.event_is_published) === 1)) {
+      return res.status(404).json({ error: 'এই পরীক্ষায় number entry এখন বন্ধ।' });
+    }
     // Subject eligibility: only students enrolled in this subject via
     // student_subjects. If NO enrollments exist for this subject yet (legacy
     // classes), fall back to all active class students so old data keeps working.
@@ -634,7 +645,8 @@ router.post('/exams/:id/finalize', async (req, res) => {
     if (Number(exam.can_enter) !== 1) {
       return res.status(403).json({ error: 'Only the subject teacher can finalize this exam.' });
     }
-    if (Number(exam.entry_open) === 0) {
+    if (Number(exam.entry_open) === 0 ||
+        (exam.event_id && (Number(exam.event_entry_open) !== 1 || Number(exam.event_is_published) === 1))) {
       return res.status(403).json({ error: 'Marks entry is closed by admin.' });
     }
     const examId = exam.id;
@@ -668,6 +680,10 @@ router.post('/exams/:id/finalize-confirm', async (req, res) => {
     if (!exam) return res.status(404).json({ error: 'Exam not found' });
     if (exam.status === 'published') {
       return res.status(409).json({ error: 'Exam already published' });
+    }
+    if (Number(exam.can_enter) !== 1 || Number(exam.entry_open) === 0 ||
+        (exam.event_id && (Number(exam.event_entry_open) !== 1 || Number(exam.event_is_published) === 1))) {
+      return res.status(403).json({ error: 'Marks entry is closed by admin.' });
     }
     const examId = exam.id;
     const [classStudents] = await pool.query('SELECT id, name, roll, student_code FROM students WHERE class_id=? AND (status IS NULL OR status=?)', [exam.class_id, 'active']);
@@ -721,7 +737,8 @@ async function submitExamMarks(exam, records, userId) {
     ), { status: 403 });
   }
   // Admin 1-click permission: entry_open=0 revokes teacher marks entry.
-  if (Number(exam.entry_open) === 0) {
+  if (Number(exam.entry_open) === 0 ||
+      (exam.event_id && (Number(exam.event_entry_open) !== 1 || Number(exam.event_is_published) === 1))) {
     throw Object.assign(new Error('Marks entry is closed by admin for this exam.'), { status: 403 });
   }
   // Q3 lock rule: once the class teacher approves the subject-exam, the
@@ -2091,18 +2108,12 @@ router.get('/current-exam', async (req, res) => {
   try {
     const [[sess]] = await pool.query(
       'SELECT id, name FROM sessions WHERE is_active=1 ORDER BY id LIMIT 1');
-    let [[ev]] = await pool.query(
-      "SELECT * FROM exam_events WHERE exam_kind='test' AND session_id=? AND is_published=0 ORDER BY id LIMIT 1",
+    const [[ev]] = await pool.query(
+      `SELECT * FROM exam_events ev
+       WHERE ev.exam_kind='test' AND ev.session_id=? AND ev.is_published=0 AND ev.entry_open=1
+         AND EXISTS (SELECT 1 FROM exams x WHERE x.event_id=ev.id AND x.entry_open=1 AND x.status<>'published')
+       ORDER BY ev.id LIMIT 1`,
       [sess ? sess.id : 0]);
-    if (!ev) {
-      [[ev]] = await pool.query(
-        "SELECT * FROM exam_events WHERE exam_kind='test' AND session_id=? ORDER BY id LIMIT 1",
-        [sess ? sess.id : 0]);
-    }
-    if (!ev) {
-      [[ev]] = await pool.query(
-        "SELECT * FROM exam_events WHERE exam_kind='test' ORDER BY id DESC LIMIT 1");
-    }
     if (!ev) return res.json({ event: null, session: sess || null, classes: [] });
     const [classes] = await pool.query(
       `SELECT DISTINCT c.id AS class_id, c.name AS class_name, c.section, c.group_name,
@@ -2111,8 +2122,10 @@ router.get('/current-exam', async (req, res) => {
        FROM classes c
        JOIN exams x ON x.event_id=? AND x.class_id=c.id
        WHERE (c.teacher_id=? OR x.created_by=? OR EXISTS(SELECT 1 FROM subjects sub WHERE sub.id=x.subject_id AND sub.teacher_id=?))
+         AND EXISTS (SELECT 1 FROM exams ox WHERE ox.event_id=? AND ox.class_id=c.id
+                     AND ox.entry_open=1 AND ox.status<>'published')
        ORDER BY c.name, c.section, c.group_name`,
-      [req.user.id, ev.id, req.user.id, req.user.id, req.user.id]);
+      [req.user.id, ev.id, req.user.id, req.user.id, req.user.id, ev.id]);
     for (const c of classes) {
       const [subs] = await pool.query(
         `SELECT sub.id AS subject_id, sub.name AS subject_name, sub.teacher_id, sub.full_marks,
@@ -2154,19 +2167,14 @@ router.get('/events', async (req, res) => {
        JOIN exams x ON x.event_id=e.id
        LEFT JOIN classes c ON c.id=x.class_id
        WHERE (c.teacher_id=? OR x.created_by=? OR EXISTS(SELECT 1 FROM subjects sub WHERE sub.class_id=c.id AND sub.teacher_id=?))
-         AND (e.is_published = 1
-              OR (e.entry_open = 1 AND EXISTS(
-                  SELECT 1 FROM exams ex
-                  WHERE ex.event_id = e.id
-                    AND ex.status <> 'published'
-                    AND (
-                        ex.created_by = ?
-                        OR c.teacher_id = ?
-                        OR ex.subject_id IN (SELECT id FROM subjects WHERE class_id=c.id AND teacher_id=?)
-                    )
-                  AND ex.entry_open = 1
-              ))
-             )
+         AND e.is_published=0 AND e.entry_open=1
+         AND EXISTS (
+           SELECT 1 FROM exams ex JOIN classes ec ON ec.id=ex.class_id
+           WHERE ex.event_id=e.id AND ex.status<>'published' AND ex.entry_open=1
+             AND (ec.teacher_id=? OR ex.created_by=? OR EXISTS (
+               SELECT 1 FROM subjects sub WHERE sub.id=ex.subject_id AND sub.teacher_id=?
+             ))
+         )
        ORDER BY e.is_published ASC, e.id DESC`,
       [req.user.id, req.user.id, req.user.id, req.user.id, req.user.id, req.user.id]);
     for (const ev of events) {
@@ -2391,6 +2399,9 @@ router.get('/events/:id/entry-subjects', async (req, res) => {
   try {
     const [[ev]] = await pool.query('SELECT * FROM exam_events WHERE id=?', [req.params.id]);
     if (!ev) return res.status(404).json({ error: 'Event not found' });
+    if (Number(ev.entry_open) !== 1 || Number(ev.is_published) === 1) {
+      return res.status(404).json({ error: 'এই পরীক্ষায় number entry এখন বন্ধ।' });
+    }
     const [[cls]] = await pool.query('SELECT id, name, section, group_name, teacher_id FROM classes WHERE id=?', [classId]);
     if (!cls) return res.status(404).json({ error: 'Class not found' });
     const [[mine]] = await pool.query('SELECT id FROM classes WHERE id=? AND teacher_id=?', [classId, req.user.id]);
@@ -2452,6 +2463,9 @@ router.post('/events/:id/marks', async (req, res) => {
     if (!ev) return res.status(404).json({ error: 'Event not found' });
     if (ev.is_published) {
       return res.status(403).json({ error: 'Result already published. Contact admin for changes.' });
+    }
+    if (Number(ev.entry_open) !== 1) {
+      return res.status(403).json({ error: 'Marks entry is closed by admin for this exam.' });
     }
     const [[sub]] = await pool.query(
       'SELECT id, name, class_id, full_marks, teacher_id, cq_full, mcq_full, practical_full, written_full, ca_full FROM subjects WHERE id=?',
