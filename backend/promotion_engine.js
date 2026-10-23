@@ -350,15 +350,19 @@ async function executeRun(runId, userId) {
   if (!run) throw Object.assign(new Error('run not found'), { status: 404 });
   const [alloc] = await pool.query('SELECT * FROM section_allocations WHERE run_id=? ORDER BY to_section, assigned_roll', [runId]);
   const [[srcCls]] = await pool.query('SELECT id, name FROM classes WHERE id=?', [run.from_class_id]);
-  const [[ev]] = await pool.query('SELECT id, year FROM exam_events WHERE id=?', [run.event_id]);
+  const [[ev]] = await pool.query('SELECT id, year, session_id FROM exam_events WHERE id=?', [run.event_id]);
+  const [[targetSession]] = ev
+    ? await pool.query('SELECT id FROM sessions WHERE name=?', [String(Number(ev.year) + 1)])
+    : [[], []];
+  if (!targetSession) throw Object.assign(new Error('Next academic session is not provisioned'), { status: 400 });
 
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
     for (const a of alloc) {
       await conn.query(
-        'UPDATE students SET class_id=?, section=?, roll=? WHERE id=?',
-        [a.to_class_id, a.to_section, a.assigned_roll, a.student_id]);
+        'UPDATE students SET class_id=?, section=?, roll=?, session_id=? WHERE id=?',
+        [a.to_class_id, a.to_section, a.assigned_roll, targetSession.id, a.student_id]);
       await conn.query(
         `INSERT INTO promotions
            (student_id, event_id, class_id, from_class, to_class, promoted_roll, decision,

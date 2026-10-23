@@ -5,6 +5,7 @@ const { dhakaToday } = require('../dates');
 const { auth } = require('../middleware/auth');
 const { computeResult } = require('../grading');
 const { queuePush, getGuardianTokens } = require('../fcm');
+const { balanceRun, executeRun } = require('../promotion_engine');
 const PDFDocument = require('pdfkit');
 const path = require('path');
 const fs = require('fs');
@@ -552,6 +553,7 @@ router.post('/events/:id/publish', async (req, res) => {
     }
     // Next-year shell: same kind for year+1 (creates the Y+1 session if missing) - AUTO CREATE when publishing/running
     let nextYear = null;
+    let autoPromotions = [];
     if (isCanon(ev.exam_kind) && ev.year) {
       try {
         const sess = await findOrCreateSessionByYear(Number(ev.year) + 1);
@@ -576,9 +578,32 @@ router.post('/events/:id/publish', async (req, res) => {
         }
       } catch(e) { console.error('auto-create next year err', e.message); }
     }
+    // A published Class 10 Test is the promotion decision. Move eligible
+    // students into next year's SSC Batch using the configured promotion rules.
+    if (ev.exam_kind === 'test' && ev.year && nextYear) {
+      try {
+        const [classes] = await pool.query(
+          `SELECT DISTINCT c.id, c.name FROM exams e JOIN classes c ON c.id=e.class_id
+           WHERE e.event_id=? AND LOWER(c.name) LIKE 'class 10%'`, [ev.id]);
+        for (const cls of classes) {
+          const [[priorRun]] = await pool.query(
+            `SELECT id, status FROM promotion_runs WHERE event_id=? AND from_class_id=?`, [ev.id, cls.id]);
+          if (priorRun && priorRun.status === 'executed') {
+            autoPromotions.push({ class_id: cls.id, status: 'already_promoted', moved: 0 });
+            continue;
+          }
+          const run = await balanceRun(ev.id, cls.id);
+          const executed = await executeRun(run.run_id, req.user.id);
+          autoPromotions.push({ class_id: cls.id, status: 'promoted', moved: executed.moved, run_id: run.run_id });
+        }
+      } catch (e) {
+        console.error('automatic test promotion failed:', e.message);
+        autoPromotions.push({ error: e.message });
+      }
+    }
     await pool.query('INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)',
       [req.user.id, 'event_publish', `Published event ${ev.name} (notify=${notify ? 1 : 0}, notified=${notified}, already=${already_notified ? 1 : 0})`]).catch(() => {});
-    res.json({ ok: true, notified, already_notified, push, next_year_session: nextYear, auto_computed: autoComputed });
+    res.json({ ok: true, notified, already_notified, push, next_year_session: nextYear, auto_computed: autoComputed, auto_promotions: autoPromotions });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
