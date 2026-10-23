@@ -32,6 +32,7 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
   String _motherName = '';
   String _birthCertNo = '';
   String _address = '';
+  bool _receivesScholarship = false;
   bool _saving = false;
   String? _error;
   // Live roll-check state: null = unchecked/empty, true = taken, false = free.
@@ -172,6 +173,7 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
         'mother_name': _motherName.isNotEmpty ? _motherName.trim() : null,
         'birth_cert_no': _birthCertNo.isNotEmpty ? _birthCertNo.trim() : null,
         'address': _address.isNotEmpty ? _address.trim() : null,
+        'receives_scholarship': _receivesScholarship,
       });
       if (!mounted) return;
       if (Api.isQueued(r)) {
@@ -366,6 +368,13 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
               onChanged: (v) => setState(() => _religion = v ?? ''),
             ),
             const SizedBox(height: 12),
+
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('উপবৃত্তি পায়'),
+            value: _receivesScholarship,
+            onChanged: (v) => setState(() => _receivesScholarship = v),
+          ),
 
             // Father
             TextFormField(

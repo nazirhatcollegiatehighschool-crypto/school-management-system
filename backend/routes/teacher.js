@@ -11,6 +11,8 @@ const { SESSION_MORNING, SESSION_P5, FINAL, FINAL_BN, synthesize, guardWindow, c
 const PDFDocument = require('pdfkit');
 const path = require('path');
 const fs = require('fs');
+const { loadSchoolLogo } = require('../lib/school_logo');
+const { uploadTeacherSignature, deleteTeacherSignature, getClassSignatories } = require('../lib/teacher_signatures');
 
 // The MySQL->PostgreSQL translator rewrites `IN (?)` into `= ANY(?)`, which
 // makes PG try to read the single value as an array literal and aborts the
@@ -112,17 +114,13 @@ router.post('/signature', sigUpload.single('signature'), async (req, res) => {
       return res.status(400).json({ error: e.message });
     }
     try { fs.unlinkSync(rawPath); } catch (_) {}
-    // remove previous stamp file
-    const [[prev]] = await pool.query('SELECT signature FROM users WHERE id=?', [req.user.id]);
-    if (prev && prev.signature) {
-      const old = path.join(sigDir, path.basename(prev.signature));
-      if (fs.existsSync(old) && old !== finalPath) { try { fs.unlinkSync(old); } catch (_) {} }
-    }
+    const storedSignature = await uploadTeacherSignature(fs.readFileSync(finalPath), req.user.id);
+    try { fs.unlinkSync(finalPath); } catch (_) {}
     await pool.query('UPDATE users SET signature=?, signature_name=? WHERE id=?',
-      [finalName, (req.body && req.body.name ? String(req.body.name).slice(0, 100) : null) || req.user.name, req.user.id]);
+      [storedSignature, (req.body && req.body.name ? String(req.body.name).slice(0, 100) : null) || req.user.name, req.user.id]);
     await pool.query('INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)',
       [req.user.id, 'signature_upload', 'Teacher uploaded signature stamp']);
-    res.json({ ok: true, signature: finalName, url: '/uploads/signatures/' + finalName });
+    res.json({ ok: true, signature: storedSignature, url: storedSignature });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -130,10 +128,7 @@ router.post('/signature', sigUpload.single('signature'), async (req, res) => {
 router.delete('/signature', async (req, res) => {
   try {
     const [[u]] = await pool.query('SELECT signature FROM users WHERE id=?', [req.user.id]);
-    if (u && u.signature) {
-      const p = path.join(sigDir, path.basename(u.signature));
-      if (fs.existsSync(p)) { try { fs.unlinkSync(p); } catch (_) {} }
-    }
+    if (u && u.signature) await deleteTeacherSignature(u.signature);
     await pool.query('UPDATE users SET signature=NULL, signature_name=NULL WHERE id=?', [req.user.id]);
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
@@ -248,7 +243,7 @@ router.get('/profile', async (req, res) => {
       'SELECT is_class_teacher, designation, sort_order, signature, signature_name FROM users WHERE id=?', [req.user.id]
     );
     const is_class_teacher = uRows[0]?.is_class_teacher || [];
-    const sig = uRows[0]?.signature ? '/uploads/signatures/' + uRows[0].signature : null;
+    const sig = uRows[0]?.signature || null;
     res.json({ teacher: { ...req.user, designation: uRows[0]?.designation || null, sort_order: uRows[0]?.sort_order ?? null, signature_url: sig, signature_name: uRows[0]?.signature_name || null }, subjects, classes, is_class_teacher });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
@@ -259,6 +254,7 @@ router.get('/profile', async (req, res) => {
 // admin removes the current holder (admin panel / designation_slots).
 router.put('/profile', async (req, res) => {
   const { name, designation } = req.body || {};
+  if (designation !== undefined) return res.status(403).json({ error: 'পদবি admin panel থেকে নির্ধারণ করা হয়।' });
   if (name === undefined && designation === undefined) {
     return res.status(400).json({ error: 'Nothing to update' });
   }
@@ -305,7 +301,7 @@ router.put('/profile', async (req, res) => {
       'SELECT id, role, username, name, designation, sort_order, is_class_teacher, signature, signature_name FROM users WHERE id=?', [req.user.id]);
     const u = rows[0];
     if (!u) return res.status(404).json({ error: 'User not found' });
-    u.signature_url = u.signature ? '/uploads/signatures/' + u.signature : null;
+    u.signature_url = u.signature || null;
     const token = signToken(u);
     res.json({ ok: true, token, user: u });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
@@ -354,11 +350,25 @@ router.get('/exams', async (req, res) => {
     const [rows] = await pool.query(
       `SELECT e.*, c.name AS class_name, c.section, sub.name AS subject_name,
               CASE WHEN e.created_by = ? THEN 1 ELSE 0 END AS is_mine,
-              CASE WHEN sub.teacher_id = ? THEN 1 ELSE 0 END AS subject_mine
+              CASE WHEN sub.teacher_id = ? THEN 1 ELSE 0 END AS subject_mine,
+              EXISTS(SELECT 1 FROM mark_edit_requests mr
+                     WHERE mr.exam_id=e.id AND mr.status='pending') AS reentry_pending
        FROM exams e
        JOIN classes c ON e.class_id = c.id
        JOIN subjects sub ON e.subject_id = sub.id
-       WHERE (e.source = 'admin' AND (c.teacher_id = ? OR sub.teacher_id = ?))
+       WHERE (e.source = 'admin' AND (c.teacher_id = ? OR sub.teacher_id = ?)
+              AND (e.event_id IS NULL OR EXISTS (
+                SELECT 1 FROM exam_events ev
+                WHERE ev.id=e.event_id AND ev.is_published=0
+                  AND (ev.exam_kind <> 'special_model_test' OR EXISTS (
+                    SELECT 1 FROM students eligible
+                    WHERE eligible.class_id=e.class_id AND eligible.session_id=ev.session_id
+                      AND (eligible.status IS NULL OR eligible.status='active')
+                  ))
+                  AND ((e.entry_open=1 AND e.status<>'published')
+                    OR e.entry_status IN ('submitted','approved')
+                    OR EXISTS(SELECT 1 FROM mark_edit_requests mr WHERE mr.exam_id=e.id AND mr.status='pending'))
+              )))
           OR (e.source = 'teacher' AND (e.created_by = ? OR e.id IN (SELECT exam_id FROM exam_shares WHERE teacher_id = ?)))
        ORDER BY e.created_at DESC`,
       [req.user.id, req.user.id, req.user.id, req.user.id, req.user.id, req.user.id]
@@ -407,9 +417,13 @@ router.post('/exams', async (req, res) => {
 
 async function teacherCanAccessExam(examId, userId) {
   const [rows] = await pool.query(
-    `SELECT e.*, cls.teacher_id AS class_teacher_id, sub.teacher_id AS subject_teacher_id FROM exams e
+    `SELECT e.*, cls.teacher_id AS class_teacher_id, sub.teacher_id AS subject_teacher_id,
+                ev.entry_open AS event_entry_open, ev.is_published AS event_is_published,
+                ev.exam_kind AS event_exam_kind, ev.session_id AS event_session_id
+     FROM exams e
      LEFT JOIN classes cls ON e.class_id = cls.id
      LEFT JOIN subjects sub ON e.subject_id = sub.id
+     LEFT JOIN exam_events ev ON ev.id = e.event_id
      WHERE e.id = ? AND (
         (e.source = 'admin' AND (sub.teacher_id = ? OR cls.teacher_id = ?))
         OR (e.source = 'teacher' AND (e.created_by = ? OR e.id IN (SELECT exam_id FROM exam_shares WHERE teacher_id = ?)))
@@ -432,14 +446,29 @@ router.get('/exams/:id', async (req, res) => {
   try {
     const exam = await teacherCanAccessExam(req.params.id, req.user.id);
     if (!exam) return res.status(404).json({ error: 'Exam not found' });
+    const [[reentryRequest]] = await pool.query(
+      `SELECT r.id, r.teacher_id, r.reason, r.status, r.created_at,
+              u.name AS teacher_name
+       FROM mark_edit_requests r JOIN users u ON u.id=r.teacher_id
+       WHERE r.exam_id=? AND r.status='pending' ORDER BY r.created_at DESC LIMIT 1`,
+      [req.params.id]
+    );
+    const reviewable = ['submitted', 'approved'].includes(exam.entry_status) || !!reentryRequest;
+    if (exam.event_id && ((Number(exam.entry_open) !== 1 && !reviewable) || Number(exam.event_is_published) === 1)) {
+      return res.status(404).json({ error: 'এই পরীক্ষায় number entry এখন বন্ধ।' });
+    }
     // Subject eligibility: only students enrolled in this subject via
     // student_subjects. If NO enrollments exist for this subject yet (legacy
     // classes), fall back to all active class students so old data keeps working.
+    const modelSessionClause = exam.event_exam_kind === 'special_model_test'
+      ? ' AND s.session_id = ?' : '';
+    const modelSessionParams = exam.event_exam_kind === 'special_model_test'
+      ? [exam.event_session_id] : [];
     const [[enrollCount]] = await pool.query(
       `SELECT COUNT(*) AS c FROM student_subjects ss
        JOIN students s ON s.id = ss.student_id
-       WHERE ss.subject_id = ? AND s.class_id = ?`,
-      [exam.subject_id, exam.class_id]
+       WHERE ss.subject_id = ? AND s.class_id = ?${modelSessionClause}`,
+      [exam.subject_id, exam.class_id, ...modelSessionParams]
     );
     let students;
     let eligibilityEnforced = false;
@@ -449,16 +478,16 @@ router.get('/exams/:id', async (req, res) => {
         `SELECT s.id, s.name, s.roll
          FROM students s
          JOIN student_subjects ss ON ss.student_id = s.id AND ss.subject_id = ?
-         WHERE s.class_id = ? AND (s.status IS NULL OR s.status = 'active')
+         WHERE s.class_id = ? AND (s.status IS NULL OR s.status = 'active')${modelSessionClause}
          ORDER BY s.roll`,
-        [exam.subject_id, exam.class_id]
+        [exam.subject_id, exam.class_id, ...modelSessionParams]
       );
     } else {
       [students] = await pool.query(
         `SELECT s.id, s.name, s.roll
-         FROM students s WHERE s.class_id = ? AND (s.status IS NULL OR s.status = 'active')
+         FROM students s WHERE s.class_id = ? AND (s.status IS NULL OR s.status = 'active')${modelSessionClause}
          ORDER BY s.roll`,
-        [exam.class_id]
+        [exam.class_id, ...modelSessionParams]
       );
     }
     const [marks] = await pool.query(
@@ -486,7 +515,7 @@ router.get('/exams/:id', async (req, res) => {
       ],
     } : null;
     if (markStructure) markStructure.has_components = markStructure.components.length > 0;
-    res.json({ exam: { ...exam, subject_name: subj ? subj.name : exam.subject_name, full_marks: subj ? subj.full_marks : null, subject_mine: subjectMine ? 1 : 0, is_class_teacher: isClassTeacher ? 1 : 0, can_enter: canEnter ? 1 : 0, mark_structure: markStructure, eligibility_enforced: eligibilityEnforced ? 1 : 0 }, students, marks, settings: await schoolSettings() });
+    res.json({ exam: { ...exam, subject_name: subj ? subj.name : exam.subject_name, full_marks: subj ? subj.full_marks : null, subject_mine: subjectMine ? 1 : 0, is_class_teacher: isClassTeacher ? 1 : 0, can_enter: canEnter ? 1 : 0, mark_structure: markStructure, eligibility_enforced: eligibilityEnforced ? 1 : 0 }, students, marks, reentry_request: reentryRequest || null, settings: await schoolSettings(), signatures: await getClassSignatories(exam.class_id) });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -527,17 +556,16 @@ router.post('/exams/:id/marks', async (req, res) => {
 // ------------------------------------------------------------------
 // Q3/Q4/Q6 workflow: draft → submitted → approved → (admin publishes)
 //
-// Subject teacher submits a COMPLETE, IN-RANGE sheet. The class teacher
-// of that class approves it. If the person submitting IS the class
-// teacher of that class, the submission self-approves (Q6) — they own
-// the academic result of their class, so no second key is required.
+// The assigned subject teacher submits a COMPLETE, IN-RANGE sheet. The
+// class teacher of that class may approve or reject it, but cannot submit
+// marks for another teacher's subject.
 // ------------------------------------------------------------------
 router.post('/exams/:id/submit', async (req, res) => {
   try {
     const exam = await teacherCanAccessExam(req.params.id, req.user.id);
     if (!exam) return res.status(404).json({ error: 'Exam not found or not your subject' });
-    if (Number(exam.can_enter) !== 1 && Number(exam.is_class_teacher) !== 1) {
-      return res.status(403).json({ error: 'শুধু subject teacher বা class teacher submit করতে পারেন।' });
+    if (Number(exam.can_enter) !== 1) {
+      return res.status(403).json({ error: 'শুধু assigned subject teacher marks submit করতে পারেন। Class teacher শুধু দেখতে ও review করতে পারেন।' });
     }
     if (exam.status === 'published') return res.status(409).json({ error: 'Result already published.' });
     if (exam.entry_status === 'approved') return res.status(409).json({ error: 'Already approved.' });
@@ -549,15 +577,6 @@ router.post('/exams/:id/submit', async (req, res) => {
         error: 'অসম্পূর্ণ/ভুল নম্বর — submit করা যায় না।',
         error_count: v.error_count, errors: v.errors,
       });
-    }
-    const selfApprove = Number(exam.is_class_teacher) === 1;
-    if (selfApprove) {
-      await pool.query(
-        `UPDATE exams SET entry_status='approved', submitted_at=NOW(), submitted_by=?,
-                approved_at=NOW(), approved_by=?, reject_reason=NULL WHERE id=?`,
-        [req.user.id, req.user.id, exam.id]);
-      await log(req.user.id, 'exam_submit_selfapprove', `Exam ${exam.id} self-approved (class teacher)`);
-      return res.json({ ok: true, entry_status: 'approved', self_approved: true });
     }
     await pool.query(
       `UPDATE exams SET entry_status='submitted', submitted_at=NOW(), submitted_by=?, reject_reason=NULL WHERE id=?`,
@@ -608,6 +627,84 @@ router.post('/exams/:id/ct-approve', async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
+// Subject teacher requests another entry window after submitting. One request
+// is recorded per subject exam; the class teacher can authorize it directly.
+router.post('/exams/:id/reentry-request', async (req, res) => {
+  const reason = String((req.body && req.body.reason) || '').trim().slice(0, 500);
+  if (!reason) return res.status(400).json({ error: 'পরিবর্তনের কারণ লিখুন।' });
+  try {
+    const exam = await teacherCanAccessExam(req.params.id, req.user.id);
+    if (!exam) return res.status(404).json({ error: 'Exam not found' });
+    if (Number(exam.can_enter) !== 1) {
+      return res.status(403).json({ error: 'শুধু assigned subject teacher re-entry request করতে পারেন।' });
+    }
+    if (!['submitted', 'approved'].includes(exam.entry_status)) {
+      return res.status(409).json({ error: 'শুধু submitted বা approved subject-এর re-entry চাওয়া যাবে।' });
+    }
+    const [[anchor]] = await pool.query(
+      'SELECT id, student_id FROM marks WHERE exam_id=? ORDER BY id LIMIT 1', [exam.id]);
+    if (!anchor) return res.status(409).json({ error: 'এই subject-এ কোনো submitted marks নেই।' });
+    const [created] = await pool.query(
+      `INSERT INTO mark_edit_requests (mark_id, student_id, exam_id, teacher_id, reason)
+       VALUES (?,?,?,?,?)`, [anchor.id, anchor.student_id, exam.id, req.user.id, reason]);
+    if (exam.class_teacher_id) {
+      await pool.query(
+        `INSERT INTO notifications (title, body, type, target_type, related_id, created_by)
+         VALUES (?,?,?,?,?,?)`,
+        ['Re-entry approval needed', `${req.user.name} ${exam.subject_name || 'subject'}-এর re-entry চেয়েছেন: ${reason}`, 'special', 'teacher', created.insertId, req.user.id]);
+    }
+    res.status(201).json({ ok: true, id: created.insertId, status: 'pending' });
+  } catch (err) {
+    if (err.code === '23505' || err.code === 'ER_DUP_ENTRY' || err.errno === 1062) {
+      return res.status(409).json({ error: 'এই subject-এর re-entry request ইতিমধ্যে pending আছে।' });
+    }
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Class-teacher one-tap approval unlocks the subject sheet for a fresh
+// five-hour correction window. The subject teacher must submit it again.
+router.post('/exams/:id/reentry-approve', async (req, res) => {
+  try {
+    const exam = await teacherCanAccessExam(req.params.id, req.user.id);
+    if (!exam) return res.status(404).json({ error: 'Exam not found' });
+    if (Number(exam.is_class_teacher) !== 1) {
+      return res.status(403).json({ error: 'শুধু ওই class-এর class teacher re-entry approve করতে পারেন।' });
+    }
+    if (!['submitted', 'approved'].includes(exam.entry_status)) {
+      return res.status(409).json({ error: 'এই exam এখন re-entry approval-এর অবস্থায় নেই।' });
+    }
+    const [[request]] = await pool.query(
+      `SELECT id FROM mark_edit_requests
+       WHERE exam_id=? AND status='pending' ORDER BY created_at DESC LIMIT 1`, [exam.id]);
+    if (!request) return res.status(404).json({ error: 'কোনো pending re-entry request নেই।' });
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      await conn.query(
+        `UPDATE mark_edit_requests SET status='approved', decided_at=NOW(), decided_by=? WHERE id=? AND status='pending'`,
+        [req.user.id, request.id]);
+      await conn.query(
+        `UPDATE exams SET entry_status='draft', submitted_at=NULL, submitted_by=NULL,
+                approved_at=NULL, approved_by=NULL, reject_reason=NULL WHERE id=?`, [exam.id]);
+      await conn.query(
+        `UPDATE marks SET edit_until=NOW() + INTERVAL '5 hours' WHERE exam_id=?`, [exam.id]);
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+    await log(req.user.id, 'exam_reentry_approve', `Re-entry request ${request.id} approved for exam ${exam.id}`);
+    res.json({ ok: true, entry_status: 'draft', request_id: request.id });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 router.post('/exams/:id/ct-reject', async (req, res) => {
   const reason = (req.body && req.body.reason) || null;
   try {
@@ -634,12 +731,15 @@ router.post('/exams/:id/finalize', async (req, res) => {
     if (Number(exam.can_enter) !== 1) {
       return res.status(403).json({ error: 'Only the subject teacher can finalize this exam.' });
     }
-    if (Number(exam.entry_open) === 0) {
+    if (Number(exam.entry_open) === 0 ||
+        (exam.event_id && Number(exam.event_is_published) === 1)) {
       return res.status(403).json({ error: 'Marks entry is closed by admin.' });
     }
     const examId = exam.id;
     // Get all students in the exam's class
-    const [classStudents] = await pool.query('SELECT id, name, roll, student_code FROM students WHERE class_id=? AND (status IS NULL OR status=?)', [exam.class_id, 'active']);
+    const [classStudents] = await pool.query(
+      `SELECT id, name, roll, student_code FROM students WHERE class_id=? AND (status IS NULL OR status=?)${exam.event_exam_kind === 'special_model_test' ? ' AND session_id=?' : ''}`,
+      exam.event_exam_kind === 'special_model_test' ? [exam.class_id, 'active', exam.event_session_id] : [exam.class_id, 'active']);
     // Get students who already have marks
     const [markedStudents] = await pool.query('SELECT DISTINCT student_id FROM marks WHERE exam_id=?', [examId]);
     const markedIds = new Set(markedStudents.map(m => m.student_id));
@@ -669,8 +769,14 @@ router.post('/exams/:id/finalize-confirm', async (req, res) => {
     if (exam.status === 'published') {
       return res.status(409).json({ error: 'Exam already published' });
     }
+    if (Number(exam.can_enter) !== 1 || Number(exam.entry_open) === 0 ||
+        (exam.event_id && Number(exam.event_is_published) === 1)) {
+      return res.status(403).json({ error: 'Marks entry is closed by admin.' });
+    }
     const examId = exam.id;
-    const [classStudents] = await pool.query('SELECT id, name, roll, student_code FROM students WHERE class_id=? AND (status IS NULL OR status=?)', [exam.class_id, 'active']);
+    const [classStudents] = await pool.query(
+      `SELECT id, name, roll, student_code FROM students WHERE class_id=? AND (status IS NULL OR status=?)${exam.event_exam_kind === 'special_model_test' ? ' AND session_id=?' : ''}`,
+      exam.event_exam_kind === 'special_model_test' ? [exam.class_id, 'active', exam.event_session_id] : [exam.class_id, 'active']);
     const [markedStudents] = await pool.query('SELECT DISTINCT student_id FROM marks WHERE exam_id=?', [examId]);
     const markedIds = new Set(markedStudents.map(m => m.student_id));
     const absentStudents = classStudents.filter(s => !markedIds.has(s.id));
@@ -721,15 +827,16 @@ async function submitExamMarks(exam, records, userId) {
     ), { status: 403 });
   }
   // Admin 1-click permission: entry_open=0 revokes teacher marks entry.
-  if (Number(exam.entry_open) === 0) {
+  if (Number(exam.entry_open) === 0 ||
+      (exam.event_id && Number(exam.event_is_published) === 1)) {
     throw Object.assign(new Error('Marks entry is closed by admin for this exam.'), { status: 403 });
   }
   // Q3 lock rule: once the class teacher approves the subject-exam, the
   // subject teacher can no longer edit. The class teacher must unlock it
   // first (or the admin re-opens it).
-  if (exam.entry_status === 'approved') {
+  if (exam.entry_status === 'submitted' || exam.entry_status === 'approved') {
     throw Object.assign(new Error(
-      'এই subject approve হয়ে গেছে — edit করতে class teacher-এর unlock দরকার।'
+      'এই subject submit করা হয়েছে — edit করতে class teacher-এর re-entry approval দরকার।'
     ), { status: 403 });
   }
   // Entry deadline: an explicit date+time closes entry exactly then.
@@ -756,7 +863,9 @@ async function submitExamMarks(exam, records, userId) {
   const defaultTotal = Number(subj && subj.full_marks) || 100;
   const layout = subj ? { full_marks: defaultTotal, cq_full: subj.cq_full, mcq_full: subj.mcq_full, practical_full: subj.practical_full, written_full: subj.written_full, ca_full: subj.ca_full } : { full_marks: defaultTotal };
   const studentIds = records.map(r => r.student_id);
-  const [classStudents] = await pool.query('SELECT id, status FROM students WHERE class_id=?', [exam.class_id]);
+  const [classStudents] = await pool.query(
+    `SELECT id, status FROM students WHERE class_id=?${exam.event_exam_kind === 'special_model_test' ? ' AND session_id=?' : ''}`,
+    exam.event_exam_kind === 'special_model_test' ? [exam.class_id, exam.event_session_id] : [exam.class_id]);
   const allowed = new Set(classStudents.filter(s => !s.status || s.status === 'active').map(s => String(s.id)));
   const inactive = new Set(classStudents.filter(s => s.status && s.status !== 'active').map(s => String(s.id)));
   for (const sid of studentIds) {
@@ -840,12 +949,110 @@ router.get('/classes/:id/students', async (req, res) => {
       return res.status(403).json({ error: 'You are not the class teacher of this class' });
     }
     const fields = isClassTeacher
-      ? 'id, student_code, name, roll, dob, gender, religion, blood_group, phone, email, guardian_name, guardian_phone, guardian_email, father_name, mother_name, birth_cert_no, address, optional_subject, photo'
+      ? 'id, student_code, name, roll, dob, gender, religion, blood_group, receives_scholarship, phone, email, guardian_name, guardian_phone, guardian_email, father_name, mother_name, birth_cert_no, address, optional_subject, photo'
       : 'id, student_code, name, roll, optional_subject, photo';
     const [rows] = await pool.query(
       `SELECT ${fields} FROM students WHERE class_id=? AND (status IS NULL OR status=?) ORDER BY roll`, [req.params.id, 'active']
     );
     res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+router.get('/classes/:id/summary', async (req, res) => {
+  const classId = Number(req.params.id);
+  try {
+    const [[cls]] = await pool.query('SELECT id, teacher_id FROM classes WHERE id=?', [classId]);
+    if (!cls || Number(cls.teacher_id) !== Number(req.user.id)) return res.status(403).json({ error: 'শুধু class teacher class summary দেখতে পারবেন।' });
+    const [gender] = await pool.query(
+      `SELECT COALESCE(NULLIF(LOWER(gender),''),'unknown') AS label, COUNT(*) AS count
+       FROM students WHERE class_id=? AND (status IS NULL OR status='active') GROUP BY COALESCE(NULLIF(LOWER(gender),''),'unknown')`, [classId]);
+    const [religion] = await pool.query(
+      `SELECT COALESCE(NULLIF(religion,''),'উল্লেখ নেই') AS label, COUNT(*) AS count
+       FROM students WHERE class_id=? AND (status IS NULL OR status='active') GROUP BY COALESCE(NULLIF(religion,''),'উল্লেখ নেই')`, [classId]);
+    const [[scholarship]] = await pool.query(
+      `SELECT COUNT(*) AS count FROM students WHERE class_id=? AND (status IS NULL OR status='active') AND receives_scholarship=TRUE`, [classId]);
+    res.json({ gender, religion, scholarship_count: Number(scholarship?.count || 0) });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+router.get('/students/:id/profile-history', async (req, res) => {
+  try {
+    const [[student]] = await pool.query(
+      `SELECT s.*, c.name AS class_name, c.section, c.group_name, c.teacher_id
+       FROM students s JOIN classes c ON c.id=s.class_id WHERE s.id=?`, [req.params.id]);
+    if (!student) return res.status(404).json({ error: 'Student not found' });
+    if (Number(student.teacher_id) !== Number(req.user.id)) return res.status(403).json({ error: 'শুধু নিজের class-এর class teacher এই profile দেখতে পারবেন।' });
+    const [[attendance]] = await pool.query(
+      `SELECT COUNT(DISTINCT date) AS school_days,
+        COUNT(DISTINCT CASE WHEN status IN ('present','late') THEN date END) AS attended_days,
+        COUNT(DISTINCT CASE WHEN status='absent' THEN date END) AS absent_days,
+        COUNT(DISTINCT CASE WHEN status='late' THEN date END) AS late_days
+       FROM attendance WHERE student_id=?`, [req.params.id]);
+    const [reports] = await pool.query(
+      `SELECT report_date, subject_name, homework_status, learning_status, performance,
+              uniform_brought, note, teacher_id FROM student_daily_reports
+       WHERE student_id=? ORDER BY report_date DESC, updated_at DESC`, [req.params.id]);
+    const [complaints] = await pool.query(
+      `SELECT n.title, n.body, n.created_at, u.name AS teacher_name
+       FROM notifications n LEFT JOIN users u ON u.id=n.created_by
+       WHERE n.student_id=? AND n.type='complaint' ORDER BY n.id DESC LIMIT 100`, [req.params.id]);
+    const [promotions] = await pool.query(
+      `SELECT from_class, to_class, from_section, to_section, decision, passing_year, created_at
+       FROM promotions WHERE student_id=? ORDER BY created_at, id`, [req.params.id]);
+    const missingUniform = reports.filter(row => row.uniform_brought === false || row.uniform_brought === 0).length;
+    const repeats = promotions.filter(row => ['retained','not_eligible','failed','repeated'].includes(String(row.decision || '').toLowerCase()));
+    res.json({ student, attendance: attendance || {}, daily_reports: reports, complaints,
+      uniform_missing_reports: missingUniform, repeated_classes: repeats });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+async function canReportClass(classId, teacherId) {
+  const [[cls]] = await pool.query('SELECT teacher_id FROM classes WHERE id=?', [classId]);
+  if (!cls) return false;
+  if (Number(cls.teacher_id) === Number(teacherId)) return true;
+  const [[subject]] = await pool.query(
+    'SELECT id FROM subjects WHERE class_id=? AND teacher_id=? LIMIT 1', [classId, teacherId]);
+  return !!subject;
+}
+
+router.get('/classes/:id/daily-reports', async (req, res) => {
+  const classId = Number(req.params.id);
+  const date = String(req.query.date || dhakaToday());
+  try {
+    if (!(await canReportClass(classId, req.user.id))) return res.status(403).json({ error: 'এই class-এর report দেখার অনুমতি নেই।' });
+    const [rows] = await pool.query(
+      `SELECT r.*, s.name AS student_name, s.roll, u.name AS teacher_name
+       FROM student_daily_reports r JOIN students s ON s.id=r.student_id
+       JOIN users u ON u.id=r.teacher_id
+       WHERE r.class_id=? AND r.report_date=? ORDER BY s.name, r.subject_name`, [classId, date]);
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+router.post('/classes/:id/daily-reports', async (req, res) => {
+  const classId = Number(req.params.id);
+  const { student_id, subject_name, homework_status, learning_status, performance, uniform_brought, note } = req.body || {};
+  const date = String(req.body?.date || dhakaToday());
+  if (!student_id || !String(subject_name || '').trim() || !['done','not_done'].includes(homework_status) ||
+      !['learned','partial','not_learned'].includes(learning_status) || !['good','average','poor'].includes(performance)) {
+    return res.status(400).json({ error: 'শিক্ষার্থী, বিষয়, homework, শেখা ও performance status দিতে হবে।' });
+  }
+  try {
+    if (!(await canReportClass(classId, req.user.id))) return res.status(403).json({ error: 'এই class-এর report দেওয়ার অনুমতি নেই।' });
+    const [[student]] = await pool.query('SELECT id FROM students WHERE id=? AND class_id=? AND (status IS NULL OR status=?)', [student_id, classId, 'active']);
+    if (!student) return res.status(404).json({ error: 'এই class-এর সক্রিয় শিক্ষার্থী পাওয়া যায়নি।' });
+    await pool.query(
+      `INSERT INTO student_daily_reports
+        (student_id,class_id,teacher_id,report_date,subject_name,homework_status,learning_status,performance,uniform_brought,note)
+       VALUES (?,?,?,?,?,?,?,?,?,?)
+       ON CONFLICT (student_id,teacher_id,report_date,subject_name) DO UPDATE SET
+         homework_status=EXCLUDED.homework_status, learning_status=EXCLUDED.learning_status,
+         performance=EXCLUDED.performance, uniform_brought=EXCLUDED.uniform_brought,
+         note=EXCLUDED.note, updated_at=NOW()`,
+      [student_id, classId, req.user.id, date, String(subject_name).trim().slice(0,120), homework_status,
+       learning_status, performance, uniform_brought === false || uniform_brought === 0 ? false : true,
+       note == null ? null : String(note).trim().slice(0,500)]);
+    res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -874,7 +1081,7 @@ router.get('/classes/:id/roll-check', async (req, res) => {
 router.put('/students/:id', async (req, res) => {
   const { name, dob, gender, religion, blood_group, phone, email, guardian_name,
     guardian_phone, guardian_email, father_name, mother_name, birth_cert_no,
-    address, optional_subject } = req.body || {};
+    address, optional_subject, receives_scholarship } = req.body || {};
   try {
     const [[stu]] = await pool.query(
       `SELECT s.id, s.class_id, c.teacher_id FROM students s JOIN classes c ON c.id=s.class_id WHERE s.id=?`,
@@ -904,6 +1111,7 @@ router.put('/students/:id', async (req, res) => {
     set('birth_cert_no', birth_cert_no || null);
     set('address', address || null);
     set('optional_subject', optional_subject || null);
+    if (receives_scholarship !== undefined) set('receives_scholarship', receives_scholarship === true || receives_scholarship === 1 ? 1 : 0);
     if (!updates.length) return res.status(400).json({ error: 'Nothing to update' });
     params.push(req.params.id);
     await pool.query(`UPDATE students SET ${updates.join(', ')} WHERE id=?`, params);
@@ -915,7 +1123,7 @@ router.put('/students/:id', async (req, res) => {
 
 // New admission (class-teacher only): 6-digit code auto-generated, roll auto = MAX(roll)+1.
 router.post('/students', async (req, res) => {
-  const { name, dob, roll, class_id, religion, guardian_id, guardian_name, guardian_phone, guardian_email, address, father_name, mother_name, birth_cert_no, gender, blood_group, optional_subject, phone, email } = req.body || {};
+  const { name, dob, roll, class_id, religion, guardian_id, guardian_name, guardian_phone, guardian_email, address, father_name, mother_name, birth_cert_no, gender, blood_group, optional_subject, phone, email, receives_scholarship } = req.body || {};
   if (!name || !class_id) return res.status(400).json({ error: 'name and class_id required' });
   try {
     const [[cls]] = await pool.query('SELECT id, name, teacher_id FROM classes WHERE id=?', [class_id]);
@@ -940,9 +1148,9 @@ router.post('/students', async (req, res) => {
     const effectiveRoll = roll !== undefined && roll !== null && roll !== '' ? Number(roll) : rollRow.next_roll;
     const code = await genStudentCode();
     const [result] = await pool.query(
-      `INSERT INTO students (student_code, name, dob, roll, class_id, religion, guardian_id, guardian_name, guardian_phone, guardian_email, address, father_name, mother_name, birth_cert_no, gender, blood_group, optional_subject, phone, email)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [code, name, dob || null, effectiveRoll, class_id, religion || null, guardian_id || null, guardian_name || null, guardian_phone || null, guardian_email || null, address || null, father_name || null, mother_name || null, birth_cert_no || null, gender || null, blood_group || null, optional_subject || null, phone || null, email || null]
+      `INSERT INTO students (student_code, name, dob, roll, class_id, religion, guardian_id, guardian_name, guardian_phone, guardian_email, address, father_name, mother_name, birth_cert_no, gender, blood_group, optional_subject, phone, email, receives_scholarship)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [code, name, dob || null, effectiveRoll, class_id, religion || null, guardian_id || null, guardian_name || null, guardian_phone || null, guardian_email || null, address || null, father_name || null, mother_name || null, birth_cert_no || null, gender || null, blood_group || null, optional_subject || null, phone || null, email || null, receives_scholarship ? 1 : 0]
     );
     await autoAssignReligionSubjects(result.insertId, class_id, religion, req.user.id);
     await pool.query('INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)',
@@ -1056,7 +1264,7 @@ router.get('/classes/:id/guardians', async (req, res) => {
     const [cls] = await pool.query('SELECT id FROM classes WHERE id=? AND teacher_id=?', [req.params.id, req.user.id]);
     if (cls.length === 0) return res.status(403).json({ error: 'You are not the class teacher of this class' });
     const [rows] = await pool.query(
-      `SELECT s.id AS student_id, s.name AS student_name, s.roll,
+      `SELECT s.id AS student_id, s.name AS student_name, s.roll, s.gender, s.religion, s.receives_scholarship,
               s.guardian_name, s.guardian_phone,
               g.username AS guardian_login
        FROM students s
@@ -1432,11 +1640,13 @@ router.post('/ct-marks', async (req, res) => {
 router.get('/homework', async (req, res) => {
   try {
     const [rows] = await pool.query(
-      `SELECT h.id, h.title, h.description, h.due_date, h.created_at,
-              c.name AS class_name, c.section, sub.name AS subject_name
+      `SELECT h.id, h.title, h.description, h.due_date, h.subject_id, h.created_at,
+              c.name AS class_name, c.section, sub.name AS subject_name,
+              u.name AS teacher_name, u.phone AS teacher_phone
        FROM homework h
        JOIN classes c ON h.class_id = c.id
        LEFT JOIN subjects sub ON h.subject_id = sub.id
+       LEFT JOIN users u ON h.created_by = u.id
        WHERE h.class_id IN (SELECT id FROM classes WHERE teacher_id = ?)
           OR h.subject_id IN (SELECT id FROM subjects WHERE teacher_id = ?)
        ORDER BY h.id DESC LIMIT 100`,
@@ -1447,46 +1657,42 @@ router.get('/homework', async (req, res) => {
 });
 
 router.post('/homework', async (req, res) => {
-  const { class_id, subject_id, title, description, due_date } = req.body || {};
-  if (!class_id || !title) return res.status(400).json({ error: 'class_id and title required' });
+  const { class_id, subject_id, title, description } = req.body || {};
+  if (!class_id || !subject_id || !description || !String(description).trim()) {
+    return res.status(400).json({ error: 'class_id, subject_id and lesson description required' });
+  }
   try {
-    let classOk = false;
-    if (subject_id) {
-      const [subj] = await pool.query('SELECT class_id, id FROM subjects WHERE id=? AND teacher_id=?', [subject_id, req.user.id]);
-      if (subj.length === 0) return res.status(403).json({ error: 'This subject is not assigned to you' });
-      if (Number(subj[0].class_id) !== Number(class_id)) {
-        return res.status(400).json({ error: 'class_id does not match the subject\'s class' });
-      }
-      classOk = true;
+    const [subj] = await pool.query(
+      'SELECT id, class_id, name FROM subjects WHERE id=? AND teacher_id=?',
+      [subject_id, req.user.id]
+    );
+    if (subj.length === 0) return res.status(403).json({ error: 'This subject is not assigned to you' });
+    if (Number(subj[0].class_id) !== Number(class_id)) {
+      return res.status(400).json({ error: 'class_id does not match the subject\'s class' });
     }
     const [[cls]] = await pool.query('SELECT id, teacher_id FROM classes WHERE id=?', [class_id]);
     if (!cls) return res.status(404).json({ error: 'Class not found' });
-    if (!classOk && cls.teacher_id !== req.user.id) {
-      return res.status(403).json({ error: 'কেবলমাত্র নির্ধারিত ক্লাস টিচারই এই ক্লাসের হোমওয়ার্ক দিতে পারবেন।' });
-    }
     const [result] = await pool.query(
       `INSERT INTO homework (class_id, subject_id, title, description, due_date, created_by)
-       VALUES (?,?,?,?,?,?)`,
-      [class_id, subject_id || null, title, description || null, due_date || null, req.user.id]
+       VALUES (?,?,?,?,NULL,?)`,
+      [class_id, subject_id, title || 'আজকের পড়া', String(description).trim(), req.user.id]
     );
     // Notify the guardians of that class (deep-link payload: type=homework)
     const [students] = await pool.query('SELECT id FROM students WHERE class_id=?', [class_id]);
     const studentIds = students.map(s => s.id);
     await pool.query(
       'INSERT INTO notifications (class_id, title, body, type, target_type, related_id, created_by) VALUES (?,?,?,?,?,?,?)',
-      [class_id, 'New homework assigned', `${title}${due_date ? ' — Due: ' + due_date : ''}`, 'homework', 'class', result.insertId, req.user.id]
+      [class_id, 'আজকের পড়া যোগ হয়েছে', `${subj[0].name}: ${String(description).trim().slice(0, 180)}`, 'homework', 'class', result.insertId, req.user.id]
     );
     const tokens = await getGuardianTokens(studentIds);
-    const subjName = subject_id
-      ? (await pool.query('SELECT name FROM subjects WHERE id=?', [subject_id]))[0][0]?.name
-      : '';
+    const subjName = subj[0].name;
     const queued = await queuePush(tokens,
-      'New homework assigned for your child',
-      `${title}${subjName ? ' (' + subjName + ')' : ''}${due_date ? ' — due ' + due_date : ''}`,
+      'আপনার সন্তানের আজকের পড়া যোগ হয়েছে',
+      `${subjName}: ${String(description).trim().slice(0, 180)}`,
       { type: 'homework', homework_id: String(result.insertId), class_id: String(class_id) }
     );
     await pool.query('INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)',
-      [req.user.id, 'homework_create', 'Homework "' + title + '" for class ' + class_id]);
+      [req.user.id, 'lesson_log_create', 'Daily lesson for ' + subjName + ' in class ' + class_id]);
     res.status(201).json({ id: result.insertId, ok: true, push: queued });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
@@ -2091,18 +2297,12 @@ router.get('/current-exam', async (req, res) => {
   try {
     const [[sess]] = await pool.query(
       'SELECT id, name FROM sessions WHERE is_active=1 ORDER BY id LIMIT 1');
-    let [[ev]] = await pool.query(
-      "SELECT * FROM exam_events WHERE exam_kind='test' AND session_id=? AND is_published=0 ORDER BY id LIMIT 1",
+    const [[ev]] = await pool.query(
+      `SELECT * FROM exam_events ev
+       WHERE ev.exam_kind='test' AND ev.session_id=? AND ev.is_published=0
+         AND EXISTS (SELECT 1 FROM exams x WHERE x.event_id=ev.id AND x.entry_open=1 AND x.status<>'published')
+       ORDER BY ev.id LIMIT 1`,
       [sess ? sess.id : 0]);
-    if (!ev) {
-      [[ev]] = await pool.query(
-        "SELECT * FROM exam_events WHERE exam_kind='test' AND session_id=? ORDER BY id LIMIT 1",
-        [sess ? sess.id : 0]);
-    }
-    if (!ev) {
-      [[ev]] = await pool.query(
-        "SELECT * FROM exam_events WHERE exam_kind='test' ORDER BY id DESC LIMIT 1");
-    }
     if (!ev) return res.json({ event: null, session: sess || null, classes: [] });
     const [classes] = await pool.query(
       `SELECT DISTINCT c.id AS class_id, c.name AS class_name, c.section, c.group_name,
@@ -2111,8 +2311,10 @@ router.get('/current-exam', async (req, res) => {
        FROM classes c
        JOIN exams x ON x.event_id=? AND x.class_id=c.id
        WHERE (c.teacher_id=? OR x.created_by=? OR EXISTS(SELECT 1 FROM subjects sub WHERE sub.id=x.subject_id AND sub.teacher_id=?))
+         AND EXISTS (SELECT 1 FROM exams ox WHERE ox.event_id=? AND ox.class_id=c.id
+                     AND ox.entry_open=1 AND ox.status<>'published')
        ORDER BY c.name, c.section, c.group_name`,
-      [req.user.id, ev.id, req.user.id, req.user.id, req.user.id]);
+      [req.user.id, ev.id, req.user.id, req.user.id, req.user.id, ev.id]);
     for (const c of classes) {
       const [subs] = await pool.query(
         `SELECT sub.id AS subject_id, sub.name AS subject_name, sub.teacher_id, sub.full_marks,
@@ -2148,27 +2350,27 @@ router.get('/current-exam', async (req, res) => {
 
 router.get('/events', async (req, res) => {
   try {
+    const publishedOnly = req.query.published === '1';
     const [events] = await pool.query(
       `SELECT DISTINCT e.*, s.name AS session_name FROM exam_events e
        LEFT JOIN sessions s ON s.id=e.session_id
        JOIN exams x ON x.event_id=e.id
        LEFT JOIN classes c ON c.id=x.class_id
        WHERE (c.teacher_id=? OR x.created_by=? OR EXISTS(SELECT 1 FROM subjects sub WHERE sub.class_id=c.id AND sub.teacher_id=?))
-         AND (e.is_published = 1
-              OR (e.entry_open = 1 AND EXISTS(
+         AND e.is_published = ?
+         AND EXISTS(
                   SELECT 1 FROM exams ex
                   WHERE ex.event_id = e.id
-                    AND ex.status <> 'published'
+                    AND (? = 1 OR (ex.status <> 'published' AND ex.entry_open = 1))
                     AND (
                         ex.created_by = ?
                         OR c.teacher_id = ?
                         OR ex.subject_id IN (SELECT id FROM subjects WHERE class_id=c.id AND teacher_id=?)
                     )
-                  AND ex.entry_open = 1
-              ))
-             )
+                  )
        ORDER BY e.is_published ASC, e.id DESC`,
-      [req.user.id, req.user.id, req.user.id, req.user.id, req.user.id, req.user.id]);
+      [req.user.id, req.user.id, req.user.id, publishedOnly ? 1 : 0,
+       publishedOnly ? 1 : 0, req.user.id, req.user.id, req.user.id]);
     for (const ev of events) {
       // If event has class_ids specified, only show those classes that teacher has access to
       let classFilter = '';
@@ -2391,6 +2593,9 @@ router.get('/events/:id/entry-subjects', async (req, res) => {
   try {
     const [[ev]] = await pool.query('SELECT * FROM exam_events WHERE id=?', [req.params.id]);
     if (!ev) return res.status(404).json({ error: 'Event not found' });
+    if (Number(ev.is_published) === 1) {
+      return res.status(404).json({ error: 'এই পরীক্ষায় number entry এখন বন্ধ।' });
+    }
     const [[cls]] = await pool.query('SELECT id, name, section, group_name, teacher_id FROM classes WHERE id=?', [classId]);
     if (!cls) return res.status(404).json({ error: 'Class not found' });
     const [[mine]] = await pool.query('SELECT id FROM classes WHERE id=? AND teacher_id=?', [classId, req.user.id]);
@@ -2471,6 +2676,9 @@ router.post('/events/:id/marks', async (req, res) => {
       'SELECT * FROM exams WHERE event_id=? AND class_id=? AND subject_id=? LIMIT 1',
       [req.params.id, class_id, subject_id]);
     if (!exam) {
+      if (Number(ev.entry_open) !== 1) {
+        return res.status(403).json({ error: 'এই পরীক্ষায় number entry admin বন্ধ করেছেন।' });
+      }
       const examType = KIND_TO_EXAM_TYPE[ev.exam_kind] || 'class_test';
       const [ins] = await pool.query(
         `INSERT INTO exams (name, exam_type, class_id, subject_id, source, created_by, event_id, status)
@@ -2548,24 +2756,25 @@ router.get('/events/:id/seat-plan.pdf', async (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename=seatplan_event${d.ev.id}_class${classId}.pdf`);
     const school = settings.school_name || settings.school || 'School';
     const schoolAddr = settings.school_address || settings.address || '';
-    const logoPath = settings.school_logo_path ? path.join(__dirname, '..', 'uploads', 'logos', path.basename(settings.school_logo_path)) : null;
+    const logoPath = await loadSchoolLogo(settings.school_logo_path);
 
     // Draw frame, watermark, rosette on first page
     drawFrame(doc, 40);
     drawWatermark(doc, logoPath, doc.page.width, doc.page.height);
     drawRosette(doc, doc.page.width / 2, doc.page.height / 2);
 
-    doc.font(F.B).fontSize(15).fillColor('#0b3d91').text(String(school), 40, 44, { align: 'center', width: CW });
-    doc.font(F.B).fontSize(12).fillColor('#111').text('Seat Plan — ' + d.ev.name, 40, 66, { align: 'center', width: CW });
+    doc.font(F.B).fontSize(15).fillColor('#111111').text(String(school), 40, 44, { align: 'center', width: CW });
+    if (schoolAddr) doc.font(F.N).fontSize(9).fillColor('#555').text(String(schoolAddr), 40, 63, { align: 'center', width: CW });
+    if (logoPath) { try { doc.image(logoPath, doc.page.width / 2 - 20, 73, { fit: [40, 40] }); } catch (_) {} }
+    doc.font(F.B).fontSize(12).fillColor('#111').text('Seat Plan - ' + d.ev.name, 40, 116, { align: 'center', width: CW });
     if (schoolAddr) {
-      doc.font(F.N).fontSize(9).fillColor('#555').text(String(schoolAddr), 40, 84, { align: 'center', width: CW });
       doc.font(F.N).fontSize(10).fillColor('#333')
-        .text(`${d.cls.name}${d.cls.group_name ? ' (' + d.cls.group_name + ')' : ' (' + d.cls.section + ')'}  •  মোট ${d.students.length} জন`, 40, 100, { align: 'center', width: CW });
+        .text(`${d.cls.name}${d.cls.group_name ? ' (' + d.cls.group_name + ')' : ' (' + d.cls.section + ')'}  •  মোট ${d.students.length} জন`, 40, 132, { align: 'center', width: CW });
     } else {
       doc.font(F.N).fontSize(10).fillColor('#333')
-        .text(`${d.cls.name}${d.cls.group_name ? ' (' + d.cls.group_name + ')' : ' (' + d.cls.section + ')'}  •  মোট ${d.students.length} জন`, 40, 84, { align: 'center', width: CW });
+        .text(`${d.cls.name}${d.cls.group_name ? ' (' + d.cls.group_name + ')' : ' (' + d.cls.section + ')'}  •  মোট ${d.students.length} জন`, 40, 132, { align: 'center', width: CW });
     }
-    let y = 120;
+    let y = 152;
     for (const rm of d.rooms) {
       if (y > doc.page.height - 120) { 
         doc.addPage(); 
@@ -2574,10 +2783,10 @@ router.get('/events/:id/seat-plan.pdf', async (req, res) => {
         drawWatermark(doc, logoPath, doc.page.width, doc.page.height);
       }
       const count = rm.seats.reduce((s, p) => s + (p[1] ? 2 : 1), 0);
-      doc.font(F.B).fontSize(11).fillColor('#0b5394').text(`${rm.room} (${count} students)`, 40, y);
+      doc.font(F.B).fontSize(11).fillColor('#333333').text(`${rm.room} (${count} students)`, 40, y);
       y += 18;
       const cols = [{ w: 50, t: 'Desk' }, { w: (CW - 50) / 2, t: 'Left Seat' }, { w: (CW - 50) / 2, t: 'Right Seat' }];
-      doc.fillColor('#0b5394').rect(40, y, CW, 18).fill();
+      doc.fillColor('#555555').rect(40, y, CW, 18).fill();
       doc.fillColor('#fff').font(F.B).fontSize(9);
       let cx = 40;
       cols.forEach(c => { doc.text(c.t, cx + 5, y + 5, { width: c.w - 10 }); cx += c.w; });
@@ -2590,7 +2799,7 @@ router.get('/events/:id/seat-plan.pdf', async (req, res) => {
           drawFrame(doc, 40);
           drawWatermark(doc, logoPath, doc.page.width, doc.page.height);
         }
-        if (i % 2 === 0) { doc.fillColor('#eef3f9').rect(40, y, CW, 17).fill(); }
+        if (i % 2 === 0) { doc.fillColor('#f1f1f1').rect(40, y, CW, 17).fill(); }
         doc.fillColor('#111').fontSize(9);
         cx = 40;
         const cells = [String(i + 1), p[0] ? `${p[0].roll}. ${p[0].name}` : '', p[1] ? `${p[1].roll}. ${p[1].name}` : '—'];
@@ -2622,21 +2831,21 @@ function drawFrame(doc, margin) {
   const m = margin;
   doc.save()
     .lineWidth(2)
-    .strokeColor('#0b3d91')
+    .strokeColor('#222222')
     .rect(m, m, pw - 2*m, ph - 2*m)
     .stroke()
     .lineWidth(0.5)
-    .strokeColor('#cbd5e1')
+    .strokeColor('#777777')
     .rect(m + 4, m + 4, pw - 2*m - 8, ph - 2*m - 8)
     .stroke()
     .restore();
 }
 
 // Draw watermark logo
-function drawWatermark(doc, logoPath, pageWidth, pageHeight) {
-  if (!logoPath || !fs.existsSync(logoPath)) return;
+function drawWatermark(doc, logoImage, pageWidth, pageHeight) {
+  if (!logoImage || (typeof logoImage === 'string' && !fs.existsSync(logoImage))) return;
   try {
-    const img = doc.openImage(logoPath);
+    const img = doc.openImage(logoImage);
     const maxDim = Math.min(pageWidth, pageHeight) * 0.6;
     const scale = Math.min(maxDim / img.width, maxDim / img.height);
     const w = img.width * scale;
@@ -2645,7 +2854,7 @@ function drawWatermark(doc, logoPath, pageWidth, pageHeight) {
     const y = (pageHeight - h) / 2;
     doc.save()
       .opacity(0.04)
-      .image(logoPath, x, y, { width: w, height: h })
+      .image(logoImage, x, y, { width: w, height: h })
       .restore();
   } catch (_) {}
 }
@@ -2710,7 +2919,7 @@ router.get('/events/:id/admit-cards', async (req, res) => {
     const d = await admitData(req.params.id, classId, req.user.id);
     if (d.error) return res.status(d.status).json({ error: d.error });
     res.json({ event: d.ev, class: d.cls, subjects: d.subjects, students: d.students,
-      settings: await schoolSettings() });
+      settings: await schoolSettings(), signatures: await getClassSignatories(classId) });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -2721,9 +2930,10 @@ router.get('/events/:id/admit-cards.pdf', async (req, res) => {
     const d = await admitData(req.params.id, classId, req.user.id);
     if (d.error) return res.status(d.status).json({ error: d.error });
     const settings = await schoolSettings();
+    const signatures = await getClassSignatories(classId);
     const school = settings.school_name || settings.school || 'School';
     const schoolAddr = settings.school_address || settings.address || '';
-    const logoPath = settings.school_logo_path ? path.join(__dirname, '..', 'uploads', 'logos', path.basename(settings.school_logo_path)) : null;
+    const logoPath = await loadSchoolLogo(settings.school_logo_path);
     const doc = new PDFDocument({ size: 'A4', margin: 36 });
     const bufPromise = bufferPdfDoc(doc);
     const F = pdfFont(doc);
@@ -2747,14 +2957,15 @@ router.get('/events/:id/admit-cards.pdf', async (req, res) => {
         drawWatermark(doc, logoPath, doc.page.width, doc.page.height);
       }
       let y = top;
-      doc.roundedRect(36, y, CW, cardH, 8).stroke('#0b5394');
+      doc.roundedRect(36, y, CW, cardH, 2).stroke('#333333');
       y += 10;
-      doc.font(F.B).fontSize(12).fillColor('#0b3d91').text(String(school), 46, y, { align: 'center', width: CW - 20 });
+      doc.font(F.B).fontSize(12).fillColor('#111111').text(String(school), 46, y, { align: 'center', width: CW - 20 });
       y += 17;
       if (schoolAddr) {
         doc.font(F.N).fontSize(8).fillColor('#555').text(String(schoolAddr), 46, y, { align: 'center', width: CW - 20 });
         y += 12;
       }
+      if (logoPath) { try { doc.image(logoPath, doc.page.width / 2 - 19, y, { fit: [38, 38] }); y += 39; } catch (_) {} }
       doc.font(F.B).fontSize(10).fillColor('#111').text('ADMIT CARD — ' + d.ev.name, 46, y, { align: 'center', width: CW - 20 });
       y += 16;
       const info = [
@@ -2771,7 +2982,7 @@ router.get('/events/:id/admit-cards.pdf', async (req, res) => {
       });
       y += 4;
       if (d.subjects.length) {
-        doc.font(F.B).fontSize(8.5).fillColor('#0b5394').text('Subjects:', 52, y);
+        doc.font(F.B).fontSize(8.5).fillColor('#333333').text('Subjects:', 52, y);
         y += 12;
         doc.font(F.N).fontSize(8).fillColor('#333');
         d.subjects.slice(0, 8).forEach(sb => {
@@ -2780,10 +2991,18 @@ router.get('/events/:id/admit-cards.pdf', async (req, res) => {
           y += 11;
         });
       }
-      const sigY = top + cardH - 30;
-      doc.font(F.N).fontSize(8.5).fillColor('#111');
-      doc.text("Guardian's Signature", 60, sigY, { width: 160, align: 'center' });
-      doc.text('Headmaster', doc.page.width - 220, sigY, { width: 160, align: 'center' });
+      const sigY = top + cardH - 66;
+      const signatories = [signatures.class_teacher, signatures.head_teacher];
+      const signX = [60, doc.page.width - 220];
+      signatories.forEach((signer, index) => {
+        const x = signX[index];
+        if (signer && signer.data_base64) {
+          try { doc.image(Buffer.from(signer.data_base64, 'base64'), x + 30, sigY, { fit: [100, 24], align: 'center' }); } catch (_) {}
+        }
+        doc.moveTo(x, sigY + 27).lineTo(x + 160, sigY + 27).strokeColor('#111').lineWidth(0.6).stroke();
+        doc.font(F.B).fontSize(8).fillColor('#111').text(String(signer?.name || ''), x, sigY + 30, { width: 160, align: 'center', lineBreak: false });
+        doc.font(F.N).fontSize(7.5).text(String(signer?.designation || (index === 0 ? 'শ্রেণি শিক্ষক' : 'প্রধান শিক্ষক')), x, sigY + 42, { width: 160, align: 'center', lineBreak: false });
+      });
     });
     doc.end();
     const buf = await bufPromise;

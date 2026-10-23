@@ -25,6 +25,7 @@ class _StudentTabsScreenState extends State<StudentTabsScreen> {
   List? _homework;
   List? _notifications;
   List? _complaints;
+  List? _dailyReports;
   List? _remarks;
   String? _error;
 
@@ -57,6 +58,7 @@ class _StudentTabsScreenState extends State<StudentTabsScreen> {
           _notifications = cached['notifications'];
           _complaints = cached.containsKey('complaints') ? cached['complaints'] : null;
           _remarks = cached.containsKey('remarks') ? cached['remarks'] : null;
+          _dailyReports = cached['daily_reports'];
         });
       }
       final results = await Future.wait([
@@ -67,6 +69,7 @@ class _StudentTabsScreenState extends State<StudentTabsScreen> {
         Api.get('/guardian/student/$id/notifications'),
         Api.get('/guardian/student/$id/complaints'),
         Api.get('/attendance/guardian/$id').catchError((_) => null),
+        Api.get('/guardian/student/$id/daily-reports').catchError((_) => <dynamic>[]),
       ]);
       await Api.cachePut(cacheKey, {
         'routine': results[0], 'attendance': results[1], 'marks': results[2],
@@ -74,6 +77,7 @@ class _StudentTabsScreenState extends State<StudentTabsScreen> {
         'complaints': results[5] is Map ? (results[5] as Map)['complaints'] : null,
         'remarks': results[5] is Map ? (results[5] as Map)['remarks'] : null,
         'att_v2': results[6] is Map ? results[6] : null,
+        'daily_reports': results[7],
       });
       if (!mounted) return;
       setState(() {
@@ -91,6 +95,7 @@ class _StudentTabsScreenState extends State<StudentTabsScreen> {
           _attSummary = m['summary'] is Map ? m['summary'] as Map : null;
           _attRecords = m['records'] is List ? m['records'] as List : null;
         }
+        _dailyReports = results[7] is List ? results[7] as List : [];
       });
     } catch (e) {
       setState(() => _error = 'অফলাইন ডেটা দেখানো হচ্ছে: ${e.toString().replaceFirst('Exception: ', '')}');
@@ -208,8 +213,23 @@ class _StudentTabsScreenState extends State<StudentTabsScreen> {
     );
   }
 
-  Color _statusColor(String s) =>
-      s == 'present' ? const Color(0xFF16A34A) : s == 'absent' ? const Color(0xFFDC2626) : const Color(0xFFD97706);
+  Color _statusColor(String s) {
+    switch (s) {
+      case 'present':
+        return const Color(0xFF16A34A);
+      case 'absent':
+        return const Color(0xFFDC2626);
+      case 'late':
+        return const Color(0xFFD97706);
+      case 'leave':
+        return const Color(0xFF2563EB);
+      case 'early_departure_with_leave':
+      case 'early_departure_no_leave':
+        return const Color(0xFF7C3AED);
+      default:
+        return const Color(0xFF6B7280);
+    }
+  }
 
   Widget _attSummaryCard(Map s) {
     final pct = (s['percent'] is num) ? (s['percent'] as num).toDouble() : 0.0;
@@ -255,9 +275,15 @@ class _StudentTabsScreenState extends State<StudentTabsScreen> {
     final by = a['recorded_by'] as String?;
     final at = a['recorded_at'] as String?;
     final label = switch (st) {
-      'present' => 'উপস্থিত', 'absent' => 'অনুপস্থিত',
-      'late' => 'দেরি', 'leave' => 'ছুটি', _ => st,
+      'present' => 'উপস্থিত',
+      'absent' => 'অনুপস্থিত',
+      'late' => 'দেরি',
+      'leave' => 'ছুটি',
+      'early_departure_with_leave' => 'ছুটি নিয়ে প্রস্থান',
+      'early_departure_no_leave' => 'ছুটি ছাড়া প্রস্থান',
+      _ => st,
     };
+    final remark = (a['remark'] ?? '').toString().trim();
     final color = _statusColor(st);
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 4),
@@ -274,10 +300,13 @@ class _StudentTabsScreenState extends State<StudentTabsScreen> {
         ),
         title: Text('${a['date'].toString().substring(0, 10)} · $sessBn',
             style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
-        subtitle: (by != null && by.isNotEmpty)
-            ? Text('নেওয়াছেন: $by${at != null ? ' · ${at.substring(0, 16)}' : ''}',
-                style: const TextStyle(fontSize: 12, color: Colors.black54))
-            : (a['remark'] != null ? Text(a['remark'], style: TextStyle(fontSize: 12, color: Colors.grey.shade600)) : null),
+        subtitle: Text(
+            [
+              if (by != null && by.isNotEmpty)
+                'নেওয়াছেন: $by${at != null ? ' · ${at.substring(0, 16)}' : ''}',
+              if (remark.isNotEmpty) 'নোট: $remark',
+            ].join('\n'),
+            style: const TextStyle(fontSize: 12, color: Colors.black54)),
         trailing: Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
           decoration: BoxDecoration(
@@ -300,9 +329,10 @@ class _StudentTabsScreenState extends State<StudentTabsScreen> {
       (0, 'রুটিন', Icons.calendar_month_rounded),
       (1, 'হাজিরা', Icons.fact_check_rounded),
       (2, 'ফলাফল', Icons.emoji_events_rounded),
-      (3, 'হোমওয়ার্ক', Icons.edit_note_rounded),
+      (3, 'আজকের পড়া', Icons.menu_book_rounded),
       (4, 'নোটিশ', Icons.campaign_rounded),
       (5, 'অভিযোগ', Icons.report_problem_rounded),
+      (6, 'দৈনিক আপডেট', Icons.auto_stories_rounded),
     ];
 
     return Scaffold(
@@ -443,35 +473,94 @@ if (_tab == 2) {
     }
     if (_tab == 3) {
       if (_homework == null) return const Center(child: CircularProgressIndicator());
-      if (_homework!.isEmpty) return const Center(child: Text('কোনো homework নেই'));
+      if (_homework!.isEmpty) return const Center(child: Text('আজকের পড়ার কোনো তথ্য নেই'));
+      final grouped = <String, List<Map>>{};
+      for (final raw in _homework!) {
+        if (raw is! Map) continue;
+        final h = Map<String, dynamic>.from(raw);
+        final created = h['created_at']?.toString() ?? '';
+        final day = created.length >= 10 ? created.substring(0, 10) : 'তারিখ নেই';
+        final subjectKey = h['subject_id']?.toString() ?? h['subject_name']?.toString() ?? 'general';
+        final teacherKey = h['teacher_id']?.toString() ?? h['teacher_name']?.toString() ?? '';
+        final key = '$day|$subjectKey|$teacherKey';
+        (grouped[key] ??= <Map>[]).add(h);
+      }
+      for (final lessons in grouped.values) {
+        lessons.sort((a, b) => (a['created_at']?.toString() ?? '')
+            .compareTo(b['created_at']?.toString() ?? ''));
+      }
+      final groups = grouped.values.toList();
       return ListView.builder(
         padding: const EdgeInsets.all(12),
-        itemCount: _homework!.length,
+        itemCount: groups.length,
         itemBuilder: (_, i) {
-          final h = _homework![i];
-          return Card(child: ListTile(
-            leading: const Icon(Icons.edit_note, color: Colors.deepPurple),
-            title: Text(h['title']),
-            subtitle: Text([
-              if (h['subject_name'] != null) '${h['subject_name']}',
-              if (h['teacher_name'] != null) 'শিক্ষক: ${h['teacher_name']}',
-              if ((h['description'] ?? '').toString().isNotEmpty && (h['description'] ?? '').toString().length <= 60)
-                h['description'].toString(),
-            ].join('\n')),
-            isThreeLine: true,
-            trailing: Text(h['due_date'] != null
-                ? 'Due ${h['due_date'].toString().substring(0, 10)}'
-                : 'No due date',
-                style: const TextStyle(fontSize: 11, color: Colors.grey)),
-            onTap: h['id'] != null
-                ? () => Navigator.push(context, MaterialPageRoute(
-                    builder: (_) => HomeworkDetailScreen(
-                      studentId: widget.studentId,
-                      homework: Map.from(h),
-                    )))
-                : null,
-          ));
+          final lessons = groups[i];
+          final first = lessons.first;
+          final created = first['created_at']?.toString() ?? '';
+          final date = created.length >= 10 ? created.substring(0, 10) : 'তারিখ নেই';
+          final phone = first['teacher_phone']?.toString().trim() ?? '';
+          return Card(
+            clipBehavior: Clip.antiAlias,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(14, 12, 14, 6),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  const Icon(Icons.menu_book_rounded, color: Colors.deepPurple),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text(first['subject_name']?.toString() ?? 'বিষয়',
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700))),
+                  Text(date, style: const TextStyle(fontSize: 12, color: Colors.blueGrey)),
+                ]),
+                const SizedBox(height: 5),
+                Text('শিক্ষক: ${first['teacher_name'] ?? 'নাম নেই'}${phone.isNotEmpty ? ' · $phone' : ''}',
+                  style: const TextStyle(fontSize: 12, color: Colors.blueGrey)),
+                const Divider(height: 16),
+                for (var j = 0; j < lessons.length; j++) ...[
+                  ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: CircleAvatar(radius: 13, child: Text('${j + 1}', style: const TextStyle(fontSize: 12))),
+                    title: Text(lessons[j]['description']?.toString().isNotEmpty == true
+                        ? lessons[j]['description'].toString() : 'আজকের পড়া',
+                      style: const TextStyle(fontSize: 14)),
+                    subtitle: Text((lessons[j]['created_at']?.toString() ?? '').length >= 16
+                        ? 'যোগের সময় ${lessons[j]['created_at'].toString().substring(11, 16)}'
+                        : 'আজকের পড়া'),
+                    onTap: lessons[j]['id'] == null ? null : () => Navigator.push(context,
+                      MaterialPageRoute(builder: (_) => HomeworkDetailScreen(
+                        studentId: widget.studentId, homework: Map.from(lessons[j])))),
+                  ),
+                ],
+              ]),
+            ),
+          );
         });
+    }
+    if (_tab == 6) {
+      if (_dailyReports == null) return const Center(child: CircularProgressIndicator());
+      if (_dailyReports!.isEmpty) return const Center(child: Text('এখনো কোনো দৈনিক class update নেই'));
+      String label(dynamic value, Map<String, String> labels) => labels['$value'] ?? 'তথ্য নেই';
+      const homeworkLabels = {'done': 'পড়া করেছে', 'not_done': 'পড়া করেনি'};
+      const learningLabels = {'learned': 'পড়া শিখেছে', 'partial': 'আংশিক শিখেছে', 'not_learned': 'পড়া শেখেনি'};
+      const performanceLabels = {'good': 'ভালো', 'average': 'মধ্যম', 'poor': 'খারাপ'};
+      return RefreshIndicator(
+        onRefresh: _loadAll,
+        child: ListView(padding: const EdgeInsets.all(12), children: [
+          for (final raw in _dailyReports!) if (raw is Map) Card(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            child: Padding(padding: const EdgeInsets.all(14), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [const Icon(Icons.event_note_rounded, color: Colors.indigo), const SizedBox(width: 8), Expanded(child: Text('${raw['report_date'] ?? ''}  ·  ${raw['subject_name'] ?? 'Class'}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)))]),
+              const SizedBox(height: 8),
+              Text('শিক্ষক: ${raw['teacher_name'] ?? '—'}'),
+              Text('পড়া: ${label(raw['homework_status'], homeworkLabels)}'),
+              Text('শেখা: ${label(raw['learning_status'], learningLabels)}'),
+              Text('Performance: ${label(raw['performance'], performanceLabels)}'),
+              Text('Uniform: ${raw['uniform_brought'] == true || raw['uniform_brought'] == 1 ? 'এনেছে' : 'আনেনি'}'),
+              if ((raw['note'] ?? '').toString().trim().isNotEmpty) Text('নোট: ${raw['note']}'),
+            ])),
+          ),
+        ]),
+      );
     }
     if (_tab == 5) {
       if (_complaints == null) return const Center(child: CircularProgressIndicator());
@@ -631,27 +720,6 @@ class HomeworkDetailScreen extends StatefulWidget {
 }
 
 class _HomeworkDetailScreenState extends State<HomeworkDetailScreen> {
-  String _status = 'pending';
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    try {
-      final res = await Api.get('/guardian/student/${widget.studentId}/homework');
-      if (res is List) {
-        for (final item in res) {
-          if (item is Map && item['id'] == widget.homework['id']) {
-            if (mounted) setState(() { _status = 'সর্বশেষ ডেটা দেখানো হচ্ছে'; });
-          }
-        }
-      }
-    } catch (_) {}
-  }
-
   String _date(dynamic v) {
     if (v == null) return '-';
     final s = v.toString();
@@ -662,7 +730,7 @@ class _HomeworkDetailScreenState extends State<HomeworkDetailScreen> {
   Widget build(BuildContext context) {
     final h = widget.homework;
     return Scaffold(
-      appBar: AppBar(title: const Text('Homework Detail')),
+      appBar: AppBar(title: const Text('পড়ার বিস্তারিত')),
       body: ListView(padding: const EdgeInsets.all(16), children: [
         Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
@@ -676,8 +744,9 @@ class _HomeworkDetailScreenState extends State<HomeworkDetailScreen> {
             _row(Icons.menu_book, 'বিষয়', h['subject_name'].toString()),
           if (h['teacher_name'] != null)
             _row(Icons.person, 'শিক্ষক', h['teacher_name'].toString()),
-          _row(Icons.event, 'জমা দেওয়ার তারিখ', _date(h['due_date'])),
-          _row(Icons.schedule, 'প্রকাশের সময়', _date(h['created_at'])),
+          _row(Icons.event, 'পড়ানোর তারিখ', _date(h['created_at'])),
+          if ((h['teacher_phone'] ?? '').toString().trim().isNotEmpty)
+            _row(Icons.phone, 'শিক্ষকের ফোন', h['teacher_phone'].toString()),
         ]))),
         const SizedBox(height: 10),
         Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -730,7 +799,6 @@ class _HomeworkDetailScreenState extends State<HomeworkDetailScreen> {
           }),
         ]))),
         const SizedBox(height: 10),
-        Center(child: Text(_status, style: TextStyle(color: Colors.green.shade700, fontSize: 12))),
       ]),
     );
   }

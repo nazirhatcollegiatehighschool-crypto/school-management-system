@@ -1,5 +1,6 @@
 const router = require('express').Router();
 const pool = require('../db');
+const { getClassSignatories } = require('../lib/teacher_signatures');
 const { dhakaToday } = require('../dates');
 const { auth } = require('../middleware/auth');
 const { computeResult } = require('../grading');
@@ -7,6 +8,7 @@ const { queuePush, getGuardianTokens } = require('../fcm');
 const PDFDocument = require('pdfkit');
 const path = require('path');
 const fs = require('fs');
+const { loadSchoolLogo } = require('../lib/school_logo');
 
 // Result computation, tabulation and marksheets are school-wide admin operations.
 // Teachers enter marks through /api/teacher — they must NOT compute/tabulate
@@ -24,10 +26,10 @@ function registerBanglaFont(doc) {
 }
 
 // Helper to draw watermark logo
-function drawWatermark(doc, logoPath, pageWidth, pageHeight) {
-  if (!logoPath || !fs.existsSync(logoPath)) return;
+function drawWatermark(doc, logoImage, pageWidth, pageHeight) {
+  if (!logoImage || (typeof logoImage === 'string' && !fs.existsSync(logoImage))) return;
   try {
-    const img = doc.openImage(logoPath);
+    const img = doc.openImage(logoImage);
     const maxDim = Math.min(pageWidth, pageHeight) * 0.6;
     const scale = Math.min(maxDim / img.width, maxDim / img.height);
     const w = img.width * scale;
@@ -36,7 +38,7 @@ function drawWatermark(doc, logoPath, pageWidth, pageHeight) {
     const y = (pageHeight - h) / 2;
     doc.save()
       .opacity(0.04)
-      .image(logoPath, x, y, { width: w, height: h })
+      .image(logoImage, x, y, { width: w, height: h })
       .restore();
   } catch (_) {}
 }
@@ -48,11 +50,11 @@ function drawFrame(doc, margin) {
   const m = margin;
   doc.save()
     .lineWidth(2)
-    .strokeColor('#0b3d91')
+    .strokeColor('#222222')
     .rect(m, m, pw - 2*m, ph - 2*m)
     .stroke()
     .lineWidth(0.5)
-    .strokeColor('#cbd5e1')
+    .strokeColor('#777777')
     .rect(m + 4, m + 4, pw - 2*m - 8, ph - 2*m - 8)
     .stroke()
     .restore();
@@ -88,6 +90,7 @@ const CANON = {
   annual: { label: 'Annual Examination', promotion_linked: 1 },
   pretest: { label: 'Pre-Test Examination', promotion_linked: 0 },
   test: { label: 'Test Examination', promotion_linked: 1 },
+  special_model_test: { label: 'Special Model Test', promotion_linked: 0 },
 };
 const CANON_KINDS = Object.keys(CANON);
 const isCanon = k => CANON_KINDS.indexOf(k) !== -1;
@@ -100,28 +103,58 @@ function sessionYear(name) {
 
 // Create the 4 canonical event shells for a session when missing. Legacy
 // same-name events are adopted (kind/year stamped) instead of duplicated.
-async function ensureSessionExams(sessionId) {
-  const [[sess]] = await pool.query('SELECT id, name FROM sessions WHERE id=?', [sessionId]);
+async function ensureSessionExams(sessionId, db = pool) {
+  const [[sess]] = await db.query('SELECT id, name FROM sessions WHERE id=?', [sessionId]);
   if (!sess) throw Object.assign(new Error('Session not found'), { status: 404 });
   const year = sessionYear(sess.name);
   const created = [], adopted = [], skipped = [];
+  // Class mapping per exam kind
+  const kindClasses = {
+    special_model_test: ["SSC Batch"],
+    pretest: ["Class 10"],
+    test: ["Class 10"],
+    half_yearly: ["Class 6", "Class 7", "Class 8", "Class 9"],
+    annual: ["Class 6", "Class 7", "Class 8", "Class 9"],
+  };
+
   for (const kind of CANON_KINDS) {
     const name = `${CANON[kind].label} ${year}`;
-    const [same] = await pool.query(
+    const [same] = await db.query(
       'SELECT id, exam_kind FROM exam_events WHERE session_id=? AND exam_kind=? AND year=?', [sessionId, kind, year]);
     if (same.length) { skipped.push({ kind, id: same[0].id, name }); continue; }
-    const [byName] = await pool.query(
+    const [byName] = await db.query(
       'SELECT id FROM exam_events WHERE session_id=? AND name=?', [sessionId, name]);
     if (byName.length) {
-      await pool.query('UPDATE exam_events SET exam_kind=?, year=?, promotion_linked=? WHERE id=?',
+      await db.query('UPDATE exam_events SET exam_kind=?, year=?, promotion_linked=? WHERE id=?',
         [kind, year, CANON[kind].promotion_linked, byName[0].id]);
       adopted.push({ kind, id: byName[0].id, name });
       continue;
     }
+    // Get class_ids for this kind
+    const classNames = kindClasses[kind] || [];
+    let classIdsArr = [];
+    if (classNames.length) {
+      const [classes] = await db.query(
+        `SELECT id FROM classes WHERE name IN (${classNames.map(()=>'?').join(',')})`,
+        classNames
+      );
+      classIdsArr = classes.map(c => Number(c.id));
+    }
     try {
-      const [r] = await pool.query(
-        'INSERT INTO exam_events (name, session_id, exam_kind, year, promotion_linked) VALUES (?,?,?,?,?)',
-        [name, sessionId, kind, year, CANON[kind].promotion_linked]);
+      const [r] = await db.query(
+        `INSERT INTO exam_events
+          (name, session_id, exam_kind, year, promotion_linked, is_published, notify_guardians, entry_open, class_ids)
+         VALUES (?,?,?,?,?,0,0,0,?)`,
+        [name, sessionId, kind, year, CANON[kind].promotion_linked, classIdsArr.length ? JSON.stringify(classIdsArr) : null]);
+      // Also populate exam_event_classes
+      if (classIdsArr.length) {
+        try {
+          const vals = classIdsArr.map(()=>'(?,?)').join(',');
+          const params = [];
+          for (const cid of classIdsArr) { params.push(r.insertId, cid); }
+          await db.query(`INSERT IGNORE INTO exam_event_classes (event_id, class_id) VALUES ${vals}`, params);
+        } catch(e) { console.error('exam_event_classes insert err', e.message); }
+      }
       created.push({ kind, id: r.insertId, name });
     } catch (e) {
       if (e.code === '23505') skipped.push({ kind, name, note: 'already exists for year' });
@@ -129,6 +162,74 @@ async function ensureSessionExams(sessionId) {
     }
   }
   return { session: sess, year, created, adopted, skipped };
+}
+
+// Provision the requested planning horizon once, using the same canonical
+// event builder as manually-created sessions. Existing years are left intact.
+let canonicalIndexReady;
+async function ensureCanonicalEventIndex(db = pool) {
+  if (/^mysql:\/\//i.test(process.env.DATABASE_URL || '')) return;
+  if (canonicalIndexReady) return canonicalIndexReady;
+  canonicalIndexReady = (async () => {
+    const [[index]] = await db.query(
+      `SELECT indexdef FROM pg_indexes WHERE schemaname='public' AND indexname='uq_event_kind_year'`);
+    if (index && String(index.indexdef).includes('special_model_test')) return;
+    if (index) await db.query('DROP INDEX IF EXISTS public.uq_event_kind_year');
+    await db.query(`CREATE UNIQUE INDEX uq_event_kind_year
+      ON public.exam_events (exam_kind, year)
+      WHERE exam_kind IN ('half_yearly','annual','pretest','test','special_model_test')
+        AND year IS NOT NULL`);
+  })().catch(err => { canonicalIndexReady = null; throw err; });
+  return canonicalIndexReady;
+}
+
+async function ensureSessionHorizon(db = pool, firstYear = 2027, lastYear = 2050) {
+  await ensureCanonicalEventIndex(db);
+  const created = [];
+  for (let year = firstYear; year <= lastYear; year++) {
+    let [[session]] = await db.query('SELECT id, name FROM sessions WHERE name=?', [String(year)]);
+    if (!session) {
+      await db.query(
+        'INSERT INTO sessions (name, is_active) VALUES (?,0) ON CONFLICT (name) DO NOTHING',
+        [String(year)]
+      );
+      [[session]] = await db.query('SELECT id, name FROM sessions WHERE name=?', [String(year)]);
+      if (!session) throw new Error(`Could not ensure academic session ${year}`);
+      created.push(year);
+    }
+    const [existingKinds] = await db.query(
+      `SELECT DISTINCT exam_kind FROM exam_events
+       WHERE session_id=? AND exam_kind IN ('half_yearly','annual','pretest','test','special_model_test')`,
+      [session.id]
+    );
+    const present = new Set(existingKinds.map(row => row.exam_kind));
+    if (!CANON_KINDS.every(kind => present.has(kind))) await ensureSessionExams(session.id, db);
+  }
+  await syncCanonicalEventClasses(db);
+  return { first_year: firstYear, last_year: lastYear, created };
+}
+
+// Keep future session class filters in step when an admin adds, renames or
+// removes a section. Event shells store class ids so later auto-create only
+// creates subject exams for the matching grade band.
+async function syncCanonicalEventClasses(db = pool) {
+  const [classes] = await db.query('SELECT id, name FROM classes');
+  const [events] = await db.query(
+    `SELECT id, exam_kind FROM exam_events
+     WHERE exam_kind IN ('half_yearly','annual','pretest','test','special_model_test')`
+  );
+  const allowed = {
+    half_yearly: c => /class\s*[6-9]\b/i.test(String(c.name || '')),
+    annual: c => /class\s*[6-9]\b/i.test(String(c.name || '')),
+    pretest: c => /class\s*10\b/i.test(String(c.name || '')),
+    test: c => /class\s*10\b/i.test(String(c.name || '')),
+    special_model_test: c => /ssc\s*batch/i.test(String(c.name || '')),
+  };
+  for (const event of events) {
+    const classIds = classes.filter(allowed[event.exam_kind] || (() => false)).map(c => Number(c.id));
+    await db.query('UPDATE exam_events SET class_ids=? WHERE id=?', [JSON.stringify(classIds), event.id]);
+  }
+  return { events: events.length };
 }
 
 async function findOrCreateSessionByYear(year) {
@@ -147,7 +248,7 @@ router.get('/events', async (req, res) => {
       params.push(Number(req.query.published));
     }
     const [rows] = await pool.query(
-      `SELECT e.*, s.name AS session_name,
+      `SELECT e.*, s.name AS session_name, s.is_active AS session_is_active,
         (SELECT COUNT(*) FROM exams x WHERE x.event_id = e.id) AS exam_count,
         (SELECT COUNT(*) FROM exams x WHERE x.event_id = e.id AND x.status='published') AS published_count,
         (SELECT COUNT(DISTINCT m.student_id) FROM marks m JOIN exams x ON x.id=m.exam_id WHERE x.event_id=e.id) AS students_with_marks,
@@ -170,6 +271,15 @@ router.post('/events', async (req, res) => {
   const yr = year != null && year !== '' ? Number(year) : null;
   if (isCanon(kind) && !yr) return res.status(400).json({ error: 'year required for ' + kind });
   try {
+    if (isCanon(kind)) {
+      const [[session]] = await pool.query('SELECT id, name FROM sessions WHERE id=?', [session_id || 1]);
+      const sessionYearValue = sessionYear(session?.name);
+      if (!session || yr !== sessionYearValue) {
+        return res.status(400).json({
+          error: `পরীক্ষার বছর শিক্ষাবর্ষের সঙ্গে মিলতে হবে (${session?.name || 'সেশন নেই'} → ${sessionYearValue || '—'})।`,
+        });
+      }
+    }
     if (isCanon(kind)) {
       const [dup] = await pool.query(
         'SELECT id, name FROM exam_events WHERE exam_kind=? AND year=?', [kind, yr]);
@@ -208,11 +318,40 @@ router.post('/events', async (req, res) => {
 // promotions + per-student result notifications, then the event itself.
 // This frees the (kind, year) slot so the exam can be created again.
 router.delete('/events/:id', async (req, res) => {
+  const reason = String((req.body && req.body.reason) || '').trim();
+  if (!reason) return res.status(400).json({ error: 'পরীক্ষা delete করার কারণ লিখতে হবে।' });
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
-    const [exams] = await conn.query('SELECT id FROM exams WHERE event_id=?', [req.params.id]);
+    const [[event]] = await conn.query('SELECT * FROM exam_events WHERE id=? FOR UPDATE', [req.params.id]);
+    if (!event) { await conn.rollback(); return res.status(404).json({ error: 'Event not found' }); }
+    const [exams] = await conn.query('SELECT * FROM exams WHERE event_id=?', [req.params.id]);
     const examIds = exams.map(e => e.id);
+    const [markRows] = examIds.length
+      ? await conn.query('SELECT * FROM marks WHERE exam_id IN (?)', [examIds])
+      : [[]];
+    const [resultRows] = await conn.query('SELECT * FROM results WHERE exam_id=?', [req.params.id]);
+    const [promotionRows] = await conn.query('SELECT * FROM promotions WHERE event_id=?', [req.params.id]);
+    const [notificationRows] = await conn.query(
+      `SELECT * FROM notifications WHERE related_id=? OR related_id IN (?)`,
+      [req.params.id, examIds.length ? examIds : [-1]]
+    );
+    const [[admin]] = await conn.query('SELECT name FROM users WHERE id=?', [req.user.id]);
+    const audit = {
+      event,
+      exams,
+      marks: markRows,
+      results: resultRows,
+      promotions: promotionRows,
+      notifications: notificationRows,
+      reason,
+      deleted_by: { id: req.user.id, name: admin?.name || req.user.name || null },
+      deleted_at: new Date().toISOString(),
+    };
+    await conn.query(
+      'INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)',
+      [req.user.id, 'event_delete', JSON.stringify(audit)]
+    );
     let marks = 0, shares = 0, results = 0, promotions = 0;
     if (examIds.length) {
       const [m] = await conn.query('DELETE FROM marks WHERE exam_id IN (?)', [examIds]);
@@ -231,8 +370,6 @@ router.delete('/events/:id', async (req, res) => {
     const [ev] = await conn.query('DELETE FROM exam_events WHERE id=?', [req.params.id]);
     if (!ev.affectedRows) { await conn.rollback(); return res.status(404).json({ error: 'Event not found' }); }
     await conn.commit();
-    await pool.query('INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)',
-      [req.user.id, 'event_delete', `Deleted event ${req.params.id} (+${examIds.length} exams, ${marks} marks)`]).catch(() => {});
     res.json({ ok: true, deleted_event: Number(req.params.id), exams: examIds.length, marks, results, promotions });
   } catch (err) { try { await conn.rollback(); } catch (e) {} console.error(err); res.status(500).json({ error: 'Server error' }); }
   finally { conn.release(); }
@@ -318,18 +455,26 @@ router.post('/events/:id/entry-open', async (req, res) => {
 //   enrolled student with at least one mark row. Otherwise 422 + missing list.
 async function eventPublishGate(eventId) {
   const missing = [];
+  const [[event]] = await pool.query('SELECT exam_kind, session_id FROM exam_events WHERE id=?', [eventId]);
+  const model = event && event.exam_kind === 'special_model_test';
+  const studentScope = model ? ' AND s.session_id=?' : '';
+  const markStudentJoin = model ? ' JOIN students s ON s.id=m.student_id AND s.session_id=?' : '';
+  const params = [];
   const [classes] = await pool.query(
     `SELECT c.id, c.name, c.section,
-      (SELECT COUNT(*) FROM students s WHERE s.class_id=c.id) AS students,
-      (SELECT COUNT(DISTINCT m.student_id) FROM marks m JOIN exams x ON x.id=m.exam_id
+      (SELECT COUNT(*) FROM students s WHERE s.class_id=c.id${studentScope}) AS students,
+      (SELECT COUNT(DISTINCT m.student_id) FROM marks m${markStudentJoin} JOIN exams x ON x.id=m.exam_id
         WHERE x.event_id=? AND x.class_id=c.id) AS students_done,
       (SELECT COUNT(*) FROM subjects sub WHERE sub.class_id=c.id) AS subjects,
       (SELECT COUNT(DISTINCT x.subject_id) FROM exams x JOIN marks m ON m.exam_id=x.id
         WHERE x.event_id=? AND x.class_id=c.id) AS subjects_done,
       (SELECT COUNT(*) FROM exams x WHERE x.event_id=? AND x.class_id=c.id
         AND x.entry_status <> 'approved') AS not_approved
-     FROM classes c WHERE c.id IN (SELECT DISTINCT class_id FROM exams WHERE event_id=?)`,
-    [eventId, eventId, eventId, eventId]);
+     FROM classes c WHERE c.id IN (SELECT DISTINCT class_id FROM exams WHERE event_id=?)
+       AND (NOT ? OR EXISTS (SELECT 1 FROM students eligible WHERE eligible.class_id=c.id AND eligible.session_id=?))`,
+    model
+      ? [event.session_id, event.session_id, eventId, eventId, eventId, eventId, true, event.session_id]
+      : [eventId, eventId, eventId, eventId, false, 0]);
   for (const c of classes) {
     const gaps = [];
     if (Number(c.subjects_done || 0) < Number(c.subjects || 0)) {
@@ -455,10 +600,16 @@ router.post('/events/:id/unpublish', async (req, res) => {
 // review & publish (auto-publish only happens inside the publish flow).
 router.get('/events/:id/coverage', async (req, res) => {
   try {
+    const [[scope]] = await pool.query('SELECT exam_kind, session_id FROM exam_events WHERE id=?', [req.params.id]);
+    const model = scope && scope.exam_kind === 'special_model_test';
+    const studentScope = model ? ' AND s.session_id=?' : '';
+    const studentScopeParams = model ? [scope.session_id] : [];
     const [classes] = await pool.query(
       `SELECT c.id AS class_id, c.name AS class_name, c.section, c.group_name,
-        (SELECT COUNT(*) FROM students s WHERE s.class_id=c.id) AS student_count,
-        (SELECT COUNT(DISTINCT m.student_id) FROM marks m JOIN exams x ON x.id=m.exam_id WHERE x.event_id=? AND x.class_id=c.id) AS students_with_marks,
+        (SELECT COUNT(*) FROM students s WHERE s.class_id=c.id${studentScope}) AS student_count,
+        (SELECT COUNT(DISTINCT m.student_id) FROM marks m JOIN exams x ON x.id=m.exam_id
+          JOIN students s ON s.id=m.student_id${model ? ' AND s.session_id=?' : ''}
+          WHERE x.event_id=? AND x.class_id=c.id) AS students_with_marks,
         (SELECT COUNT(*) FROM marks m JOIN exams x ON x.id=m.exam_id WHERE x.event_id=? AND x.class_id=c.id) AS marks_count,
         (SELECT COUNT(*) FROM exams x WHERE x.event_id=? AND x.class_id=c.id) AS subject_count,
         (SELECT COUNT(DISTINCT x.subject_id) FROM exams x JOIN marks m ON m.exam_id=x.id WHERE x.event_id=? AND x.class_id=c.id) AS subjects_with_marks,
@@ -467,16 +618,23 @@ router.get('/events/:id/coverage', async (req, res) => {
            AND NOT EXISTS (SELECT 1 FROM exams x JOIN marks m ON m.exam_id=x.id
                            WHERE x.event_id=? AND x.class_id=c.id AND x.subject_id=sub.id)) AS pending_subjects
        FROM classes c
+       WHERE EXISTS (SELECT 1 FROM exams ex WHERE ex.event_id=? AND ex.class_id=c.id)
+         AND (NOT ? OR EXISTS (SELECT 1 FROM students eligible WHERE eligible.class_id=c.id AND eligible.session_id=?))
        ORDER BY c.name, c.section, c.group_name`,
-      [req.params.id, req.params.id, req.params.id, req.params.id, req.params.id]
+      [
+        ...studentScopeParams,
+        ...(model ? [scope.session_id] : []), req.params.id,
+        req.params.id, req.params.id, req.params.id, req.params.id,
+        req.params.id, model, model ? scope.session_id : 0,
+      ]
     );
     const [subjects] = await pool.query(
       `SELECT x.class_id, x.id AS exam_id, sub.name AS subject_name, x.status,
-        (SELECT COUNT(*) FROM marks m WHERE m.exam_id=x.id) AS entered_count,
-        (SELECT COUNT(*) FROM students s WHERE s.class_id=x.class_id) AS student_count
+        (SELECT COUNT(*) FROM marks m JOIN students s ON s.id=m.student_id${model ? ' AND s.session_id=?' : ''} WHERE m.exam_id=x.id) AS entered_count,
+        (SELECT COUNT(*) FROM students s WHERE s.class_id=x.class_id${studentScope}) AS student_count
        FROM exams x JOIN subjects sub ON sub.id=x.subject_id
        WHERE x.event_id=? ORDER BY x.class_id, sub.name`,
-      [req.params.id]
+      [...(model ? [scope.session_id] : []), ...studentScopeParams, req.params.id]
     );
     classes.forEach(c => {
       const subjTotal = Math.max(Number(c.assigned_subjects || 0), Number(c.subject_count || 0));
@@ -521,9 +679,12 @@ router.post('/results/compute', async (req, res) => {
 // grades per student, cached into `results`. Used by manual compute,
 // publish flow (auto for every class in the event) and permission changes.
 async function computeEventResults(event_id, class_id) {
+  const [[eventScope]] = await pool.query('SELECT exam_kind, session_id FROM exam_events WHERE id=?', [event_id]);
+  const modelSession = eventScope && eventScope.exam_kind === 'special_model_test';
   const [students] = await pool.query(
     `SELECT s.id, s.section, c.group_name, c.section AS class_section
-       FROM students s JOIN classes c ON c.id = s.class_id WHERE s.class_id=?`, [class_id]);
+       FROM students s JOIN classes c ON c.id = s.class_id WHERE s.class_id=?${modelSession ? ' AND s.session_id=?' : ''}`,
+    modelSession ? [class_id, eventScope.session_id] : [class_id]);
   let computed = 0, withMarks = 0;
   const scored = [];
   for (const s of students) {
@@ -569,13 +730,15 @@ router.get('/tabulation', async (req, res) => {
   const { event_id, class_id } = req.query;
   if (!event_id || !class_id) return res.status(400).json({ error: 'event_id and class_id required' });
   try {
+    const [[scope]] = await pool.query('SELECT exam_kind, session_id FROM exam_events WHERE id=?', [event_id]);
+    const modelSession = scope && scope.exam_kind === 'special_model_test';
     const [students] = await pool.query(
       `SELECT s.id, s.name, s.roll, s.student_code, r.final_gpa, r.total_gpa_without_4th,
               r.gpa_4th_bonus, r.result_status
        FROM students s
        LEFT JOIN results r ON r.student_id = s.id AND r.exam_id = ?
-       WHERE s.class_id = ? ORDER BY s.roll`,
-      [event_id, class_id]
+       WHERE s.class_id = ?${modelSession ? ' AND s.session_id=?' : ''} ORDER BY s.roll`,
+      modelSession ? [event_id, class_id, scope.session_id] : [event_id, class_id]
     );
     const famSet = new Set();
     const rows = [];
@@ -650,7 +813,7 @@ router.get('/class-pdf', async (req, res) => {
       let y = 50;
       const schoolName = settings.school_name || settings.school || settings.school_name_en || 'School';
       const schoolAddr = settings.school_address || settings.address || '';
-      doc.font('Helvetica-Bold').fontSize(15).fillColor('#0b3d91').text(String(schoolName), 40, y, { align: 'center', width: CW });
+      doc.font('Helvetica-Bold').fontSize(15).fillColor('#222222').text(String(schoolName), 40, y, { align: 'center', width: CW });
       y += 20;
       if (schoolAddr) {
         doc.font('Helvetica').fontSize(9).fillColor('#555555').text(String(schoolAddr), 40, y, { align: 'center', width: CW });
@@ -674,7 +837,7 @@ router.get('/class-pdf', async (req, res) => {
         doc.font('Helvetica').fontSize(10).fillColor('#888').text('No result data', 40, y);
         continue;
       }
-      doc.font('Helvetica-Bold').fontSize(9.5).fillColor('#0b5394').text(
+      doc.font('Helvetica-Bold').fontSize(9.5).fillColor('#444444').text(
         `GPA (without 4th): ${result.total_gpa_without_4th.toFixed(2)}    4th bonus: ${result.gpa_4th_bonus.toFixed(2)}    Final GPA: ${result.final_gpa.toFixed(2)}`,
         40, y, { width: CW });
       y += 16;
@@ -684,7 +847,7 @@ router.get('/class-pdf', async (req, res) => {
       doc.fillColor('#111111');
       const cols = [{ w: 235, t: 'Subject' }, { w: 70, t: 'Total' }, { w: 100, t: 'Grade' }, { w: 80, t: 'GPA' }];
       const rowH = 18, tableX = 40;
-      doc.fillColor('#0b5394').rect(tableX, y, CW, rowH).fill();
+      doc.fillColor('#444444').rect(tableX, y, CW, rowH).fill();
       doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(9);
       let cx = tableX;
       cols.forEach(c => { doc.text(c.t, cx + 5, y + 5, { width: c.w - 10, align: cx === tableX ? 'left' : 'center' }); cx += c.w; });
@@ -692,7 +855,7 @@ router.get('/class-pdf', async (req, res) => {
       doc.fillColor('#111111');
       result.families.forEach((f, i) => {
         if (y > doc.page.height - 70) { doc.addPage(); y = 40; }
-        if (i % 2 === 0) { doc.fillColor('#eef3f9').rect(tableX, y, CW, rowH).fill(); }
+        if (i % 2 === 0) { doc.fillColor('#f1f1f1').rect(tableX, y, CW, rowH).fill(); }
         doc.fillColor('#111111').font('Helvetica').fontSize(9);
         const display = (f.is_optional ? '(4th) ' : '') + f.subject;
         cx = tableX;
@@ -702,7 +865,7 @@ router.get('/class-pdf', async (req, res) => {
         doc.text(f.absent ? '—' : f.grade_point.toFixed(1), cx + 5, y + 5, { width: cols[3].w - 10, align: 'center' });
         y += rowH;
       });
-      doc.strokeColor('#0b5394').lineWidth(1).rect(tableX, y - rowH * result.families.length, CW, rowH * result.families.length).stroke();
+      doc.strokeColor('#444444').lineWidth(1).rect(tableX, y - rowH * result.families.length, CW, rowH * result.families.length).stroke();
     }
     doc.end();
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
@@ -732,6 +895,7 @@ router.get('/marksheet/:studentId/:eventId', async (req, res) => {
     const settings = {};
     settingsRows.forEach(s => { settings[s.setting_key] = s.setting_value; });
     res.json({ student, event, result, remarks: saved ? saved.teacher_remarks : null, settings,
+      signatures: await getClassSignatories(student.class_id),
       serial_no: saved ? 'MS-' + req.params.eventId + '-' + String(saved.id).padStart(4, '0') : '—',
       class_highest_gpa: hi && hi.gpa != null ? Number(hi.gpa) : null,
       attendance: att });
@@ -761,6 +925,7 @@ router.get('/marksheet/:studentId/:eventId', async (req, res) => {
         const [settingsRows] = await pool.query('SELECT setting_key, setting_value FROM app_settings');
         const settings = {};
         settingsRows.forEach(s => { settings[s.setting_key] = s.setting_value; });
+        const signatures = await getClassSignatories(student.class_id);
 
         const [attRows] = await pool.query(
           'SELECT status, COUNT(*) AS cnt FROM attendance WHERE student_id=? GROUP BY status', [student.id]
@@ -778,7 +943,7 @@ router.get('/marksheet/:studentId/:eventId', async (req, res) => {
 
         // Draw frame and watermark on first page
         drawFrame(doc, MARGIN);
-        const logoPath = settings.school_logo_path ? path.join(__dirname, '..', 'uploads', 'logos', path.basename(settings.school_logo_path)) : null;
+        const logoPath = await loadSchoolLogo(settings.school_logo_path);
         drawWatermark(doc, logoPath, doc.page.width, doc.page.height);
         drawRosette(doc, doc.page.width / 2, doc.page.height / 2);
 
@@ -798,19 +963,20 @@ router.get('/marksheet/:studentId/:eventId', async (req, res) => {
         const schoolNameBn = settings.school_name_bn || 'নাজিরহাট কলেজিয়েট উচ্চ বিদ্যালয়';
         const schoolAddr = settings.school_address || settings.address || '';
         
-        doc.font(FONT).fontSize(14).fillColor('#0b3d91').text(schoolNameEn, MARGIN, y, { align: 'center', width: CW });
+        doc.font(FONT).fontSize(14).fillColor('#111111').text(schoolNameEn, MARGIN, y, { align: 'center', width: CW });
         y += 18;
-        doc.font(FONT).fontSize(13).fillColor('#0b3d91').text(schoolNameBn, MARGIN, y, { align: 'center', width: CW });
+        doc.font(FONT).fontSize(13).fillColor('#111111').text(schoolNameBn, MARGIN, y, { align: 'center', width: CW });
         y += 16;
         if (schoolAddr) {
           doc.font(FONT).fontSize(9).fillColor('#555555').text(schoolAddr, MARGIN, y, { align: 'center', width: CW });
           y += 12;
         }
+        if (logoPath) { try { doc.image(logoPath, doc.page.width / 2 - 23, y, { fit: [46, 46] }); y += 48; } catch (_) {} }
         
         doc.font(FONT).fontSize(11).fillColor('#111111').text('Academic Transcript — ' + String(event.name), MARGIN, y, { align: 'center', width: CW });
         y += 22;
 
-        doc.font(FONT).fontSize(10).fillColor('#0b5394').text('Student Information', MARGIN, y);
+        doc.font(FONT).fontSize(10).fillColor('#444444').text('Student Information', MARGIN, y);
         y += 14;
         
         // Student info in a grid (matching reference)
@@ -851,9 +1017,9 @@ router.get('/marksheet/:studentId/:eventId', async (req, res) => {
         
         const gsW = 180;
         const gsX = MARGIN + CW - gsW;
-        doc.font(FONT).fontSize(8).fillColor('#0b5394').text('Grading Scale', gsX, y, { width: gsW, align: 'center' });
+        doc.font(FONT).fontSize(8).fillColor('#444444').text('Grading Scale', gsX, y, { width: gsW, align: 'center' });
         let gy = y + 12;
-        doc.font(FONT).fontSize(7).fillColor('#0b5394');
+        doc.font(FONT).fontSize(7).fillColor('#444444');
         doc.rect(gsX, gy, 50, 14).fill();
         doc.rect(gsX + 50, gy, 65, 14).fill();
         doc.rect(gsX + 115, gy, 65, 14).fill();
@@ -864,14 +1030,14 @@ router.get('/marksheet/:studentId/:eventId', async (req, res) => {
         gy += 14;
         doc.fillColor('#111111').font(FONT).fontSize(7);
         gradeScale.forEach((g, i) => {
-          if (i % 2 === 0) doc.fillColor('#eef3f9').rect(gsX, gy, gsW, 14).fill();
+          if (i % 2 === 0) doc.fillColor('#f1f1f1').rect(gsX, gy, gsW, 14).fill();
           doc.font(FONT).fontSize(7).fillColor('#111111');
           doc.text(g.grade, gsX + 2, gy + 2, { width: 46, align: 'center' });
           doc.text(g.range, gsX + 52, gy + 2, { width: 61, align: 'center' });
           doc.text(g.gp, gsX + 117, gy + 2, { width: 61, align: 'center' });
           gy += 14;
         });
-        doc.strokeColor('#0b5394').lineWidth(0.5).rect(gsX, y, gsW, gy - y).stroke();
+        doc.strokeColor('#444444').lineWidth(0.5).rect(gsX, y, gsW, gy - y).stroke();
         
         y += 8;
 
@@ -887,7 +1053,7 @@ router.get('/marksheet/:studentId/:eventId', async (req, res) => {
         const mTableX = MARGIN;
 
         // Header
-        doc.fillColor('#0b5394').rect(mTableX, y, CW, mRowH).fill();
+        doc.fillColor('#444444').rect(mTableX, y, CW, mRowH).fill();
         doc.fillColor('#fff').font(FONT).fontSize(8).font('Helvetica-Bold');
         let mcx = mTableX;
         mCols.forEach(c => {
@@ -902,7 +1068,7 @@ router.get('/marksheet/:studentId/:eventId', async (req, res) => {
         result.families.forEach((f, i) => {
           if (!f.is_optional) {
             pageGap();
-            if (i % 2 === 0) doc.fillColor('#eef3f9').rect(mTableX, y, CW, mRowH).fill();
+            if (i % 2 === 0) doc.fillColor('#f1f1f1').rect(mTableX, y, CW, mRowH).fill();
             mcx = mTableX;
             const marksText = f.absent ? 'Absent' : `${f.total}/${f.full}`;
             const rowData = [sl++, f.subject, marksText, f.absent ? '—' : f.letter_grade, f.absent ? '—' : f.grade_point.toFixed(1)];
@@ -919,9 +1085,9 @@ router.get('/marksheet/:studentId/:eventId', async (req, res) => {
         if (fourthSubs.length) {
           pageGap();
           y += 6;
-          doc.font(FONT).fontSize(8).fillColor('#0b5394').text('Fourth Subject (Optional)', MARGIN, y);
+          doc.font(FONT).fontSize(8).fillColor('#444444').text('Fourth Subject (Optional)', MARGIN, y);
           y += 12;
-          doc.fillColor('#0b5394').rect(mTableX, y, CW, mRowH).fill();
+          doc.fillColor('#444444').rect(mTableX, y, CW, mRowH).fill();
           doc.fillColor('#fff').font(FONT).fontSize(8).font('Helvetica-Bold');
           mcx = mTableX;
           mCols.forEach(c => {
@@ -932,7 +1098,7 @@ router.get('/marksheet/:studentId/:eventId', async (req, res) => {
           doc.fillColor('#111111').font(FONT).fontSize(8);
           fourthSubs.forEach((f, i) => {
             pageGap();
-            if (i % 2 === 0) doc.fillColor('#eef3f9').rect(mTableX, y, CW, mRowH).fill();
+            if (i % 2 === 0) doc.fillColor('#f1f1f1').rect(mTableX, y, CW, mRowH).fill();
             mcx = mTableX;
             const marksText = f.absent ? 'Absent' : `${f.total}/${f.full}`;
             const rowData = [sl++, f.subject, marksText, f.absent ? '—' : f.letter_grade, f.absent ? '—' : f.grade_point.toFixed(1)];
@@ -944,11 +1110,11 @@ router.get('/marksheet/:studentId/:eventId', async (req, res) => {
           });
         }
 
-        doc.strokeColor('#0b5394').lineWidth(1).rect(mTableX, y - mRowH * (sl - 1), CW, mRowH * (sl - 1)).stroke();
+        doc.strokeColor('#444444').lineWidth(1).rect(mTableX, y - mRowH * (sl - 1), CW, mRowH * (sl - 1)).stroke();
         y += 12;
 
         // ======================== GPA SUMMARY ========================
-        doc.font(FONT).fontSize(9).fillColor('#0b5394').text(
+        doc.font(FONT).fontSize(9).fillColor('#444444').text(
           `GPA (without 4th subject): ${result.total_gpa_without_4th.toFixed(2)}    4th-subject bonus: ${result.gpa_4th_bonus.toFixed(2)}    Final GPA: ${result.final_gpa.toFixed(2)}`,
           MARGIN, y, { width: CW });
         y += 16;
@@ -957,28 +1123,18 @@ router.get('/marksheet/:studentId/:eventId', async (req, res) => {
           .text('Result: ' + result.result_status, MARGIN, y);
         y += 24;
 
-        // ======================== SIGNATURES ========================
-        const sigY = doc.page.height - 100;
-        const sigW = 180;
-        const gap = (CW - 2 * sigW) / 2;
-        
-        // Class Teacher signature
-        const ctSigPath = settings.class_teacher_signature ? path.join(__dirname, '..', 'uploads', path.basename(settings.class_teacher_signature)) : null;
-        if (ctSigPath && fs.existsSync(ctSigPath)) {
-          doc.image(ctSigPath, MARGIN + gap / 2, sigY, { width: sigW });
-        } else {
-          doc.moveTo(MARGIN + gap / 2, sigY + 40).lineTo(MARGIN + gap / 2 + sigW, sigY + 40).stroke();
-        }
-        doc.font(FONT).fontSize(8).fillColor('#111111').text('Class Teacher', MARGIN + gap / 2, sigY + 44, { width: sigW, align: 'center' });
-
-        // Headmaster signature
-        const hmSigPath = settings.headmaster_signature ? path.join(__dirname, '..', 'uploads', path.basename(settings.headmaster_signature)) : null;
-        if (hmSigPath && fs.existsSync(hmSigPath)) {
-          doc.image(hmSigPath, MARGIN + gap / 2 + sigW + gap, sigY, { width: sigW });
-        } else {
-          doc.moveTo(MARGIN + gap / 2 + sigW + gap, sigY + 40).lineTo(MARGIN + CW - gap / 2, sigY + 40).stroke();
-        }
-        doc.font(FONT).fontSize(8).fillColor('#111111').text('Headmaster / Principal', MARGIN + gap / 2 + sigW + gap, sigY + 44, { width: sigW, align: 'center' });
+        // Signature stamp, signature line, full name, then official designation.
+        const sigY = doc.page.height - 130;
+        const sigW = 190;
+        const sx = [MARGIN + 8, MARGIN + CW - sigW - 8];
+        [signatures.class_teacher, signatures.head_teacher].forEach((sig, index) => {
+          if (sig && sig.data_base64) {
+            try { doc.image(Buffer.from(sig.data_base64, 'base64'), sx[index] + 35, sigY, { fit: [120, 28], align: 'center' }); } catch (_) {}
+          }
+          doc.moveTo(sx[index], sigY + 31).lineTo(sx[index] + sigW, sigY + 31).strokeColor('#111').lineWidth(0.6).stroke();
+          if (sig?.name) doc.font('Times-Bold').fontSize(8.5).fillColor('#111').text(String(sig.name), sx[index], sigY + 34, { width: sigW, align: 'center', lineBreak: false });
+          doc.font(FONT).fontSize(8).fillColor('#333').text(String(sig?.designation || (index === 0 ? 'শ্রেণি শিক্ষক' : 'প্রধান শিক্ষক')), sx[index], sigY + 46, { width: sigW, align: 'center', lineBreak: false });
+        });
 
         doc.end();
       } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
@@ -1005,5 +1161,7 @@ router.put('/results/remarks', async (req, res) => {
 
 module.exports = router;
 module.exports.ensureSessionExams = ensureSessionExams;
+module.exports.ensureSessionHorizon = ensureSessionHorizon;
+module.exports.syncCanonicalEventClasses = syncCanonicalEventClasses;
 module.exports.findOrCreateSessionByYear = findOrCreateSessionByYear;
 module.exports.CANON = CANON;

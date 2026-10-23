@@ -162,10 +162,12 @@ function dayFinal(m, p, p5Known = true) {
   if (m === 'early_departure_no_leave') return 'present';
   if (p === 'leave' || p === 'early_departure_with_leave') return 'leave';
   if (p === 'early_departure_no_leave') return 'present';
-  if (m === null || p === null) return null;
-  const mp = m === 'present' || m === 'late';
-  const pp = p === 'present' || p === 'late' || p === 'early_departure_no_leave';
-  return (mp && pp) ? 'present' : 'absent';
+  if (m === null) return p === null ? null : 'present';
+  // P5 is now an early-departure register. No P5 row for a student who was
+  // present/late in the morning means they stayed at school → present.
+  if (m === 'present' || m === 'late') return 'present';
+  if (m === 'absent') return 'absent';
+  return m;
 }
 
 /** Recompute + store the monthly summary for one student. */

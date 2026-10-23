@@ -70,22 +70,12 @@ async function openState(classId, date, session, now = new Date()) {
   if (weekend && !override) return { open: false, reason: 'weekend', slot, weekend: true };
   if (holiday && !override) return { open: false, reason: 'holiday', slot, holiday: true, occasion: day.occasion };
   if (override) return { open: true, reason: 'opened', slot };
-  // Once the session window opens, it STAYS open all day (no auto-close).
-  // The 30-min window is only for notifications/to-do, not for blocking entry.
-  const windowOpened = H.inWindow(slot, now) || (slot.start_time && toDhakaMinutes(now) >= hmToMin(hhmm(slot.start_time)));
-  if (!windowOpened) return { open: false, reason: 'before_window', slot };
+  // No time limit before submission: on a valid school day the session stays
+  // open from the start of the day until the teacher submits (which locks it).
+  // Routine windows are only used for reminders/to-do, never to block entry.
   return { open: true, reason: 'window', slot };
 }
 
-function toDhakaMinutes(d = new Date()) {
-  const dhaka = new Date(d.getTime() + (6 * 60 + d.getTimezoneOffset()) * 60000);
-  return dhaka.getHours() * 60 + dhaka.getMinutes();
-}
-function hmToMin(hm) {
-  const [h, m] = String(hm).split(':').map(Number);
-  return h * 60 + m;
-}
-function hhmm(s) { return String(s || '').slice(0, 5); }
 
 async function canTake(classId, date, session, user) {
   if (user.role === 'admin') return { ok: true, how: 'admin' };
@@ -262,23 +252,19 @@ router.get('/class/:id', auth(['teacher', 'admin']), async (req, res) => {
       [date, classId]);
     const attBy = new Map(att.map(a => [a.student_id, a]));
     const mBy = new Map(morning.map(a => [a.student_id, { status: a.status, remark: a.remark }]));
-    const hasMorning = morning.length > 0;
     const roster = students.map(s => {
       const a = attBy.get(s.student_id);
       const mData = mBy.get(s.student_id) || { status: null, remark: null };
       const ms = mData.status;
-      // P5 eligibility: morning was present/late → eligible for P5
-      // If morning was leave/early_departure, student is excused for the day
-      const excused = ms === 'leave' || ms === 'early_departure_with_leave' || ms === 'early_departure_no_leave';
-      const eligible = !hasMorning || ms === 'present' || ms === 'late' || excused;
+      // P5 roster = exactly the students marked PRESENT in the 1st period.
+      // No morning attendance (or absent/late/leave) means not shown in P5.
+      const eligible = ms === 'present';
       return {
         student_id: s.student_id, name: s.name, roll: s.roll,
         status: a ? a.status : null, remark: a ? a.remark : null,
         recorded_by_name: a ? a.recorded_by_name : null, recorded_at: a ? a.recorded_at : null,
         morning_status: ms, morning_remark: mData.remark,
-        p5_eligible: eligible, excused,
-        // Pre-fill: if morning was present/late, suggest present for P5
-        suggested_p5_status: (ms === 'present' || ms === 'late') ? 'present' : null,
+        p5_eligible: eligible,
       };
     });
     const state = await openState(classId, date, session);
@@ -310,7 +296,10 @@ router.post('/class/:id', auth(['teacher', 'admin']), async (req, res) => {
     const can = await canTake(classId, date, sess, req.user);
     if (!can.ok) return res.status(403).json({ error: can.reason });
     const state = await openState(classId, date, sess);
-    if (!state.open && req.user.role !== 'admin') {
+    // A submitted session is immutable through this endpoint for teachers and
+    // admins alike. Admin history is read-only; any exceptional correction
+    // must use the audited reopen workflow first.
+    if (!state.open) {
       const msg = state.reason === 'locked' ? 'হাজিরা জমা হয়ে গেছে — reopen-এর জন্য admin-কে request দিন।'
         : state.reason === 'weekend' ? 'শনি/শুক্রবার school বন্ধ। Present call খুলে নিলে হাজিরা নেওয়া যাবে।'
         : state.reason === 'holiday' ? `আজ ছুটি${state.occasion ? ' (' + state.occasion + ')' : ''}।`
@@ -323,8 +312,36 @@ router.post('/class/:id', auth(['teacher', 'admin']), async (req, res) => {
       if (!STATUSES.includes(r.status)) continue;
       byId.set(Number(r.student_id), r);
     }
-    const unique = [...byId.values()];
-    if (!unique.length) return res.status(400).json({ error: 'no valid records' });
+    let unique = [...byId.values()];
+    if (!unique.length && sess !== 'p5') {
+      return res.status(400).json({ error: 'no valid records' });
+    }
+    // 5th period is an EARLY-DEPARTURE register: only students who were
+    // marked Present in the 1st period can be recorded, and only the two
+    // departure statuses are accepted. Everyone else stayed at school.
+    if (sess === 'p5' && unique.length) {
+      unique = unique.filter(r => ['early_departure_with_leave', 'early_departure_no_leave'].includes(r.status));
+      if (unique.length) {
+        const [morn] = await pool.query(
+          `SELECT student_id, status FROM attendance
+           WHERE date=? AND session='morning' AND student_id IN (?)`,
+          [date, unique.map(r => Number(r.student_id))]);
+        const mMap = new Map(morn.map(m => [m.student_id, m.status]));
+        unique = unique.filter(r => mMap.get(Number(r.student_id)) === 'present');
+        if (!unique.length) {
+          return res.status(400).json({ error: '৫ম পিরিয়ডে শুধু ১ম পিরিয়ডে উপস্থিত শিক্ষার্থীদের প্রস্থান রেকর্ড করা যাবে।' });
+        }
+      }
+    }
+    // P5 with nothing marked = nobody left early. Still lock the session.
+    if (!unique.length && sess === 'p5') {
+      await pool.query(
+        `INSERT INTO attendance_lock (class_id,date,session,locked,updated_by) VALUES (?,?,?,1,?)
+         ON CONFLICT (class_id,date,session) DO UPDATE SET locked=1, updated_by=EXCLUDED.updated_by, updated_at=now()`,
+        [classId, date, sess, req.user.id]);
+      await audit(classId, date, sess, 'save', '0 departures (locked)', req.user.id);
+      return res.json({ ok: true, class_id: classId, date, session: sess, count: 0, finals: {} });
+    }
     const ids = unique.map(r => Number(r.student_id));
     const [st] = await pool.query('SELECT id, name, status FROM students WHERE id IN (?)', [ids]);
     for (const s of st) {
@@ -337,7 +354,8 @@ router.post('/class/:id', auth(['teacher', 'admin']), async (req, res) => {
       // UNIQUE index — so suffix the row index to keep each row's key unique
       // while still letting a replay be detected by prefix.
       const rowKey = idem_key ? `${idem_key}#${i}` : null;
-      params.push(r.student_id, date, sess, r.status, r.remark || null, req.user.id, 0, null, rowKey);
+      const remark = r.remark != null ? String(r.remark).slice(0, 500) : null;
+      params.push(r.student_id, date, sess, r.status, remark, req.user.id, 0, null, rowKey);
     });
     await pool.query(
       `INSERT INTO attendance (student_id,date,session,status,remark,recorded_by,is_escape,override_reason,idem_key)

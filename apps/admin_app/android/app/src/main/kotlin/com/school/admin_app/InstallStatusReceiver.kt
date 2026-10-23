@@ -24,7 +24,7 @@ class InstallStatusReceiver : BroadcastReceiver() {
     companion object {
         const val TAG = "SchoolInstallStatus"
         const val CHANNEL_ID = "school_update_status"
-        const val ACTION_STATUS = "com.school.teacher_app.INSTALL_STATUS"
+        const val ACTION_STATUS = "com.school.admin_app.INSTALL_STATUS"
 
         fun statusMessage(status: Int, msg: String?): String {
             return when (status) {

@@ -1,6 +1,8 @@
 import 'dart:typed_data';
+
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
+
 import 'app_pdf.dart';
 
 /// PDFs rendered **on the phone** from JSON the teacher app already has.
@@ -28,6 +30,7 @@ class TeacherPdfs {
     final pw.Font bn = await AppPdf.banglaFont();
     final exam = _asMap(data['exam']);
     final settings = _asMap(data['settings']);
+    final signatures = _asMap(data['signatures']);
     final students = _asList(data['students']);
     final marks = _asList(data['marks']);
 
@@ -61,43 +64,61 @@ class TeacherPdfs {
     ];
 
     final doc = pw.Document();
-    doc.addPage(pw.MultiPage(
-      pageFormat: PdfPageFormat.a4,
-      margin: const pw.EdgeInsets.all(28),
-      build: (_) => [
-        AppPdf.header(
-          bn,
-          _school(settings),
-          _addr(settings),
-          title: 'মার্কশিট / Marks Sheet',
-          subtitle: '${_s(exam['subject_name'])}  •  ${_s(exam['class_name'] ?? '')}'
-              '${_s(exam['section']).isNotEmpty ? ' (${_s(exam['section'])})' : ''}'
-              '${_s(exam['group_name']).isNotEmpty ? ' (${_s(exam['group_name'])})' : ''}'
-              '${_s(exam['name']).isNotEmpty ? '  •  ${_s(exam['name'])}' : ''}'
-              '${full.isEmpty ? '' : '  •  পূর্ণমান $full'}',
-        ),
-        pw.SizedBox(height: 10),
-        pw.TableHelper.fromTextArray(
-          data: rows,
-          border: pw.TableBorder.all(),
-          headerStyle: AppPdf.bn(bn, size: 8.5, weight: pw.FontWeight.bold, color: PdfColors.white),
-          headerDecoration: const pw.BoxDecoration(color: PdfColors.blueGrey700),
-          cellStyle: AppPdf.bn(bn, size: 8.5),
-          cellAlignment: pw.Alignment.center,
-          cellPadding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 3),
-          cellAlignments: {1: pw.Alignment.centerLeft},
-        ),
-        pw.SizedBox(height: 14),
-        pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
-          pw.Text('___________________', style: AppPdf.bn(bn, size: 9)),
-          pw.Text('___________________', style: AppPdf.bn(bn, size: 9)),
-        ]),
-        pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
-          pw.Text('বিষয় শিক্ষকের স্বাক্ষর', style: AppPdf.bn(bn, size: 8)),
-          pw.Text('প্রধান শিক্ষকের স্বাক্ষর', style: AppPdf.bn(bn, size: 8)),
-        ]),
-      ],
-    ));
+    doc.addPage(
+      pw.MultiPage(
+        pageTheme: AppPdf.paperTheme(margin: 28),
+        build: (_) => [
+          AppPdf.header(
+            bn,
+            _school(settings),
+            _addr(settings),
+            title: 'ACADEMIC MARKSHEET / মার্কশিট',
+            subtitle:
+                '${_s(exam['subject_name'])}  •  ${_s(exam['class_name'] ?? '')}'
+                '${_s(exam['section']).isNotEmpty ? ' (${_s(exam['section'])})' : ''}'
+                '${_s(exam['group_name']).isNotEmpty ? ' (${_s(exam['group_name'])})' : ''}'
+                '${_s(exam['name']).isNotEmpty ? '  •  ${_s(exam['name'])}' : ''}'
+                '${full.isEmpty ? '' : '  •  পূর্ণমান $full'}',
+          ),
+          pw.SizedBox(height: 10),
+          pw.TableHelper.fromTextArray(
+            data: rows,
+            border: pw.TableBorder.all(),
+            headerStyle: AppPdf.bn(
+              bn,
+              size: 8.5,
+              weight: pw.FontWeight.bold,
+              color: PdfColors.white,
+            ),
+            headerDecoration: const pw.BoxDecoration(color: PdfColors.grey700),
+            cellStyle: AppPdf.bn(bn, size: 8.5),
+            cellAlignment: pw.Alignment.center,
+            cellPadding: const pw.EdgeInsets.symmetric(
+              horizontal: 4,
+              vertical: 3,
+            ),
+            cellAlignments: {1: pw.Alignment.centerLeft},
+          ),
+          pw.SizedBox(height: 14),
+          pw.Row(
+            crossAxisAlignment: pw.CrossAxisAlignment.end,
+            children: [
+              AppPdf.signatoryBlock(
+                bn,
+                signatures['class_teacher'] as Map?,
+                'শ্রেণি শিক্ষক',
+              ),
+              pw.SizedBox(width: 18),
+              AppPdf.signatoryBlock(
+                bn,
+                signatures['head_teacher'] as Map?,
+                'প্রধান শিক্ষক',
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
     return doc.save();
   }
 
@@ -123,101 +144,147 @@ class TeacherPdfs {
     final event = _asMap(data['event']);
     final result = _asMap(data['result']);
     final settings = _asMap(data['settings']);
+    final signatures = _asMap(data['signatures']);
     final families = _asList(result['families']);
     final attendance = _asList(data['attendance']);
 
     int attOf(String status) {
       for (final a in attendance) {
         final m = _asMap(a);
-        if (_s(m['status']) == status) return int.tryParse(_s(m['c'] ?? m['cnt'])) ?? 0;
+        if (_s(m['status']) == status)
+          return int.tryParse(_s(m['c'] ?? m['cnt'])) ?? 0;
       }
       return 0;
     }
 
     final doc = pw.Document();
-    doc.addPage(pw.Page(
-      pageFormat: PdfPageFormat.a4,
-      margin: const pw.EdgeInsets.all(36),
-      build: (_) => pw.Column(
-        crossAxisAlignment: pw.CrossAxisAlignment.start,
-        children: [
-          AppPdf.header(
-            bn,
-            _school(settings),
-            _addr(settings),
-            title: 'মার্কশিট / Marks Sheet',
-            subtitle: _s(event['name']),
-          ),
-          pw.SizedBox(height: 8),
-          pw.Row(children: [
-            pw.Expanded(child: _kv(bn, 'নাম / Name', _s(student['name']))),
-            pw.Expanded(child: _kv(bn, 'রোল / Roll', _s(student['roll']))),
-          ]),
-          pw.Row(children: [
-            pw.Expanded(child: _kv(bn, 'শ্রেণি / Class',
-                '${_s(student['class_name'])} (${_s(student['section'])})')),
-            pw.Expanded(child: _kv(bn, 'আইডি / ID', _s(student['student_code']))),
-          ]),
-          pw.SizedBox(height: 10),
-          pw.TableHelper.fromTextArray(
-            headers: ['বিষয়', 'নম্বর', 'সর্বোচ্চ', 'গ্রেড', 'GPA'],
-            data: [
-              for (final f in families)
-                [
-                  _s(_asMap(f)['subject']),
-                  '${_s(_asMap(f)['total'] ?? 0)}/${_s(_asMap(f)['full'] ?? 0)}',
-                  _s(_asMap(f)['highest'] ?? '—'),
-                  _s(_asMap(f)['letter_grade']),
-                  _s(_asMap(f)['grade_point']),
-                ],
-            ],
-            border: pw.TableBorder.all(),
-            cellAlignment: pw.Alignment.centerLeft,
-            headerStyle: AppPdf.bn(bn, size: 9, weight: pw.FontWeight.bold, color: PdfColors.white),
-            headerDecoration: const pw.BoxDecoration(color: PdfColors.blueGrey700),
-            cellStyle: AppPdf.bn(bn, size: 9),
-            cellPadding: const pw.EdgeInsets.all(5),
-          ),
-          pw.SizedBox(height: 10),
-          pw.Row(children: [
-            pw.Expanded(child: _kv(bn, 'ফলাফল', _s(result['result_status']))),
-            pw.Expanded(child: _kv(bn, 'GPA', _s(result['final_gpa']))),
-            pw.Expanded(child: _kv(bn, 'মোট নম্বর',
-                '${_s(result['total_marks'] ?? 0)}/${_s(result['total_full'] ?? 0)}')),
-          ]),
-          pw.SizedBox(height: 6),
-          pw.Row(children: [
-            pw.Expanded(
-                child: _kv(bn, 'উপস্থিতি',
-                    'P ${attOf('present')}  A ${attOf('absent')}  L ${attOf('late')}  Lv ${attOf('leave')}')),
-            pw.Expanded(child: _kv(bn, 'সিরিয়াল', _s(data['serial_no']))),
-          ]),
-          if (_s(data['remarks']).isNotEmpty) ...[
+    doc.addPage(
+      pw.Page(
+        pageTheme: AppPdf.paperTheme(),
+        build: (_) => pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            AppPdf.header(
+              bn,
+              _school(settings),
+              _addr(settings),
+              title: 'ACADEMIC MARKSHEET / মার্কশিট',
+              subtitle: _s(event['name']),
+            ),
             pw.SizedBox(height: 8),
-            pw.Container(
-              width: double.infinity,
-              padding: const pw.EdgeInsets.all(8),
-              decoration: pw.BoxDecoration(
-                color: PdfColors.grey100,
-                border: pw.Border.all(color: PdfColors.grey400),
-                borderRadius: pw.BorderRadius.circular(4),
+            pw.Row(
+              children: [
+                pw.Expanded(child: _kv(bn, 'নাম / Name', _s(student['name']))),
+                pw.Expanded(child: _kv(bn, 'রোল / Roll', _s(student['roll']))),
+              ],
+            ),
+            pw.Row(
+              children: [
+                pw.Expanded(
+                  child: _kv(
+                    bn,
+                    'শ্রেণি / Class',
+                    '${_s(student['class_name'])} (${_s(student['section'])})',
+                  ),
+                ),
+                pw.Expanded(
+                  child: _kv(bn, 'আইডি / ID', _s(student['student_code'])),
+                ),
+              ],
+            ),
+            pw.SizedBox(height: 10),
+            pw.TableHelper.fromTextArray(
+              headers: ['বিষয়', 'নম্বর', 'সর্বোচ্চ', 'গ্রেড', 'GPA'],
+              data: [
+                for (final f in families)
+                  [
+                    _s(_asMap(f)['subject']),
+                    '${_s(_asMap(f)['total'] ?? 0)}/${_s(_asMap(f)['full'] ?? 0)}',
+                    _s(_asMap(f)['highest'] ?? '—'),
+                    _s(_asMap(f)['letter_grade']),
+                    _s(_asMap(f)['grade_point']),
+                  ],
+              ],
+              border: pw.TableBorder.all(),
+              cellAlignment: pw.Alignment.centerLeft,
+              headerStyle: AppPdf.bn(
+                bn,
+                size: 9,
+                weight: pw.FontWeight.bold,
+                color: PdfColors.white,
               ),
-              child: pw.Text('শিক্ষকের মন্তব্য: ${_s(data['remarks'])}',
-                  style: AppPdf.bn(bn, size: 9.5)),
+              headerDecoration: const pw.BoxDecoration(
+                color: PdfColors.grey700,
+              ),
+              cellStyle: AppPdf.bn(bn, size: 9),
+              cellPadding: const pw.EdgeInsets.all(5),
+            ),
+            pw.SizedBox(height: 10),
+            pw.Row(
+              children: [
+                pw.Expanded(
+                  child: _kv(bn, 'ফলাফল', _s(result['result_status'])),
+                ),
+                pw.Expanded(child: _kv(bn, 'GPA', _s(result['final_gpa']))),
+                pw.Expanded(
+                  child: _kv(
+                    bn,
+                    'মোট নম্বর',
+                    '${_s(result['total_marks'] ?? 0)}/${_s(result['total_full'] ?? 0)}',
+                  ),
+                ),
+              ],
+            ),
+            pw.SizedBox(height: 6),
+            pw.Row(
+              children: [
+                pw.Expanded(
+                  child: _kv(
+                    bn,
+                    'উপস্থিতি',
+                    'P ${attOf('present')}  A ${attOf('absent')}  L ${attOf('late')}  Lv ${attOf('leave')}',
+                  ),
+                ),
+                pw.Expanded(child: _kv(bn, 'সিরিয়াল', _s(data['serial_no']))),
+              ],
+            ),
+            if (_s(data['remarks']).isNotEmpty) ...[
+              pw.SizedBox(height: 8),
+              pw.Container(
+                width: double.infinity,
+                padding: const pw.EdgeInsets.all(8),
+                decoration: pw.BoxDecoration(
+                  color: PdfColors.grey100,
+                  border: pw.Border.all(color: PdfColors.grey400),
+                  borderRadius: pw.BorderRadius.circular(4),
+                ),
+                child: pw.Text(
+                  'শিক্ষকের মন্তব্য: ${_s(data['remarks'])}',
+                  style: AppPdf.bn(bn, size: 9.5),
+                ),
+              ),
+            ],
+            pw.Spacer(),
+            pw.Row(
+              crossAxisAlignment: pw.CrossAxisAlignment.end,
+              children: [
+                AppPdf.signatoryBlock(
+                  bn,
+                  signatures['class_teacher'] as Map?,
+                  'শ্রেণি শিক্ষক',
+                ),
+                pw.SizedBox(width: 18),
+                AppPdf.signatoryBlock(
+                  bn,
+                  signatures['head_teacher'] as Map?,
+                  'প্রধান শিক্ষক',
+                ),
+              ],
             ),
           ],
-          pw.Spacer(),
-          pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
-            pw.Text('___________________', style: AppPdf.bn(bn, size: 9)),
-            pw.Text('___________________', style: AppPdf.bn(bn, size: 9)),
-          ]),
-          pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
-            pw.Text('শিক্ষকের স্বাক্ষর', style: AppPdf.bn(bn, size: 8)),
-            pw.Text('প্রধান শিক্ষকের স্বাক্ষর', style: AppPdf.bn(bn, size: 8)),
-          ]),
-        ],
+        ),
       ),
-    ));
+    );
     return doc.save();
   }
 
@@ -231,59 +298,82 @@ class TeacherPdfs {
     final rooms = _asList(data['rooms']);
 
     final doc = pw.Document();
-    doc.addPage(pw.MultiPage(
-      pageFormat: PdfPageFormat.a4,
-      margin: const pw.EdgeInsets.all(36),
-      build: (ctx) {
-        final widgets = <pw.Widget>[
-          AppPdf.header(
-            bn,
-            _school(settings),
-            _addr(settings),
-            title: 'Seat Plan — ${_s(event['name'])}',
-            subtitle: '${_s(cls['name'])}'
-                '${_s(cls['group_name']).isNotEmpty ? ' (${_s(cls['group_name'])})' : ' (${_s(cls['section'])})'}'
-                '  •  মোট ${_s(data['total'])} জন',
-          ),
-          pw.SizedBox(height: 10),
-        ];
-
-        for (final r in rooms) {
-          final rm = _asMap(r);
-          final seats = _asList(rm['seats']);
-          int count = 0;
-          for (final s in seats) {
-            final pair = _asList(s);
-            count += pair.length;
-          }
-          widgets.add(pw.SizedBox(height: 6));
-          widgets.add(pw.Text('${_s(rm['room'])} ($count students)',
-              style: AppPdf.bn(bn, size: 11, weight: pw.FontWeight.bold, color: PdfColors.blue800)));
-          widgets.add(pw.SizedBox(height: 4));
-
-          final rows = <List<String>>[
-            ['Desk', 'Left Seat', 'Right Seat'],
-            for (var i = 0; i < seats.length; i++)
-              [
-                '${i + 1}',
-                _seatLabel(_asList(seats[i]), 0),
-                _seatLabel(_asList(seats[i]), 1),
-              ],
+    doc.addPage(
+      pw.MultiPage(
+        pageTheme: AppPdf.paperTheme(),
+        build: (ctx) {
+          final widgets = <pw.Widget>[
+            AppPdf.header(
+              bn,
+              _school(settings),
+              _addr(settings),
+              title: 'Seat Plan - ${_s(event['name'])}',
+              subtitle:
+                  '${_s(cls['name'])}'
+                  '${_s(cls['group_name']).isNotEmpty ? ' (${_s(cls['group_name'])})' : ' (${_s(cls['section'])})'}'
+                  '  •  মোট ${_s(data['total'])} জন',
+            ),
+            pw.SizedBox(height: 10),
           ];
-          widgets.add(pw.TableHelper.fromTextArray(
-            data: rows,
-            border: pw.TableBorder.all(),
-            headerStyle: AppPdf.bn(bn, size: 8.5, weight: pw.FontWeight.bold, color: PdfColors.white),
-            headerDecoration: const pw.BoxDecoration(color: PdfColors.blue800),
-            cellStyle: AppPdf.bn(bn, size: 8.5),
-            cellAlignment: pw.Alignment.centerLeft,
-            cellPadding: const pw.EdgeInsets.symmetric(horizontal: 5, vertical: 3),
-            cellAlignments: {0: pw.Alignment.center},
-          ));
-        }
-        return widgets;
-      },
-    ));
+
+          for (final r in rooms) {
+            final rm = _asMap(r);
+            final seats = _asList(rm['seats']);
+            int count = 0;
+            for (final s in seats) {
+              final pair = _asList(s);
+              count += pair.length;
+            }
+            widgets.add(pw.SizedBox(height: 6));
+            widgets.add(
+              pw.Text(
+                '${_s(rm['room'])} ($count students)',
+                style: AppPdf.bn(
+                  bn,
+                  size: 11,
+                  weight: pw.FontWeight.bold,
+                  color: PdfColors.grey900,
+                ),
+              ),
+            );
+            widgets.add(pw.SizedBox(height: 4));
+
+            final rows = <List<String>>[
+              ['Desk', 'Left Seat', 'Right Seat'],
+              for (var i = 0; i < seats.length; i++)
+                [
+                  '${i + 1}',
+                  _seatLabel(_asList(seats[i]), 0),
+                  _seatLabel(_asList(seats[i]), 1),
+                ],
+            ];
+            widgets.add(
+              pw.TableHelper.fromTextArray(
+                data: rows,
+                border: pw.TableBorder.all(),
+                headerStyle: AppPdf.bn(
+                  bn,
+                  size: 8.5,
+                  weight: pw.FontWeight.bold,
+                  color: PdfColors.white,
+                ),
+                headerDecoration: const pw.BoxDecoration(
+                  color: PdfColors.grey700,
+                ),
+                cellStyle: AppPdf.bn(bn, size: 8.5),
+                cellAlignment: pw.Alignment.centerLeft,
+                cellPadding: const pw.EdgeInsets.symmetric(
+                  horizontal: 5,
+                  vertical: 3,
+                ),
+                cellAlignments: {0: pw.Alignment.center},
+              ),
+            );
+          }
+          return widgets;
+        },
+      ),
+    );
     return doc.save();
   }
 
@@ -303,8 +393,10 @@ class TeacherPdfs {
     final settings = _asMap(data['settings']);
     final students = _asList(data['students']);
     final subjects = _asList(data['subjects']);
+    final signatures = _asMap(data['signatures']);
 
-    final clsLabel = '${_s(cls['name'])}'
+    final clsLabel =
+        '${_s(cls['name'])}'
         '${_s(cls['group_name']).isNotEmpty ? ' (${_s(cls['group_name'])})' : ' (${_s(cls['section'])})'}';
 
     pw.Widget card(Map s) {
@@ -312,40 +404,87 @@ class TeacherPdfs {
         height: 300,
         padding: const pw.EdgeInsets.all(12),
         decoration: pw.BoxDecoration(
-          border: pw.Border.all(color: PdfColors.blue800, width: 1.2),
-          borderRadius: pw.BorderRadius.circular(6),
+          border: pw.Border.all(color: PdfColors.grey800, width: 1.0),
+          borderRadius: pw.BorderRadius.circular(2),
         ),
-        child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-          pw.Center(
-              child: pw.Text(_school(settings),
-                  style: AppPdf.bn(bn, size: 12, weight: pw.FontWeight.bold, color: PdfColors.blue900))),
-          if (_addr(settings).isNotEmpty)
-            pw.Center(child: pw.Text(_addr(settings), style: AppPdf.bn(bn, size: 7.5, color: PdfColors.grey600))),
-          pw.SizedBox(height: 4),
-          pw.Center(
-              child: pw.Text('ADMIT CARD — ${_s(event['name'])}',
-                  style: AppPdf.bn(bn, size: 10, weight: pw.FontWeight.bold))),
-          pw.SizedBox(height: 8),
-          _kv(bn, 'Name', _s(s['name'])),
-          _kv(bn, 'Student ID', _s(s['student_code'])),
-          _kv(bn, 'Class', clsLabel),
-          _kv(bn, 'Roll', _s(s['roll'])),
-          _kv(bn, 'DOB', _s(s['dob']).isEmpty ? '-' : _s(s['dob']).substring(0, _s(s['dob']).length.clamp(0, 10))),
-          if (subjects.isNotEmpty) ...[
-            pw.SizedBox(height: 6),
-            pw.Text('Subjects:', style: AppPdf.bn(bn, size: 8.5, weight: pw.FontWeight.bold, color: PdfColors.blue800)),
-            for (final sb in subjects.take(8))
-              pw.Bullet(
-                  text: '${_s(_asMap(sb)['subject_name'])}'
+        child: pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Center(
+              child: pw.Text(
+                _school(settings),
+                style: pw.TextStyle(
+                  font: pw.Font.timesBold(),
+                  fontSize: 12,
+                  color: PdfColors.black,
+                ),
+              ),
+            ),
+            if (_addr(settings).isNotEmpty)
+              pw.Center(
+                child: pw.Text(
+                  _addr(settings),
+                  style: AppPdf.bn(bn, size: 7.5, color: PdfColors.grey600),
+                ),
+              ),
+            pw.Center(child: AppPdf.logoMark(width: 42)),
+            pw.SizedBox(height: 4),
+            pw.Center(
+              child: pw.Text(
+                'ADMIT CARD - ${_s(event['name'])}',
+                style: AppPdf.bn(bn, size: 10, weight: pw.FontWeight.bold),
+              ),
+            ),
+            pw.SizedBox(height: 8),
+            _kv(bn, 'Name', _s(s['name'])),
+            _kv(bn, 'Student ID', _s(s['student_code'])),
+            _kv(bn, 'Class', clsLabel),
+            _kv(bn, 'Roll', _s(s['roll'])),
+            _kv(
+              bn,
+              'DOB',
+              _s(s['dob']).isEmpty
+                  ? '-'
+                  : _s(s['dob']).substring(0, _s(s['dob']).length.clamp(0, 10)),
+            ),
+            if (subjects.isNotEmpty) ...[
+              pw.SizedBox(height: 6),
+              pw.Text(
+                'Subjects:',
+                style: AppPdf.bn(
+                  bn,
+                  size: 8.5,
+                  weight: pw.FontWeight.bold,
+                  color: PdfColors.grey900,
+                ),
+              ),
+              for (final sb in subjects.take(8))
+                pw.Bullet(
+                  text:
+                      '${_s(_asMap(sb)['subject_name'])}'
                       '${_s(_asMap(sb)['exam_date']).isEmpty ? '' : '  (${_s(_asMap(sb)['exam_date']).substring(0, _s(_asMap(sb)['exam_date']).length.clamp(0, 10))})'}',
-                  style: AppPdf.bn(bn, size: 7.5)),
+                  style: AppPdf.bn(bn, size: 7.5),
+                ),
+            ],
+            pw.Spacer(),
+            pw.Row(
+              crossAxisAlignment: pw.CrossAxisAlignment.end,
+              children: [
+                AppPdf.signatoryBlock(
+                  bn,
+                  signatures['class_teacher'] as Map?,
+                  'শ্রেণি শিক্ষক',
+                ),
+                pw.SizedBox(width: 12),
+                AppPdf.signatoryBlock(
+                  bn,
+                  signatures['head_teacher'] as Map?,
+                  'প্রধান শিক্ষক',
+                ),
+              ],
+            ),
           ],
-          pw.Spacer(),
-          pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
-            pw.Text("Guardian's Signature", style: AppPdf.bn(bn, size: 7.5)),
-            pw.Text('Headmaster', style: AppPdf.bn(bn, size: 7.5)),
-          ]),
-        ]),
+        ),
       );
     }
 
@@ -353,25 +492,33 @@ class TeacherPdfs {
     for (var i = 0; i < students.length; i += 2) {
       final a = _asMap(students[i]);
       final b = i + 1 < students.length ? _asMap(students[i + 1]) : null;
-      doc.addPage(pw.Page(
-        pageFormat: PdfPageFormat.a4,
-        margin: const pw.EdgeInsets.all(28),
-        build: (_) => pw.Column(children: [
-          card(a),
-          pw.SizedBox(height: 12),
-          if (b != null) card(b) else pw.Spacer(),
-        ]),
-      ));
+      doc.addPage(
+        pw.Page(
+          pageTheme: AppPdf.paperTheme(margin: 28),
+          build: (_) => pw.Column(
+            children: [
+              card(a),
+              pw.SizedBox(height: 12),
+              if (b != null) card(b) else pw.Spacer(),
+            ],
+          ),
+        ),
+      );
     }
     return doc.save();
   }
 
   static pw.Widget _kv(pw.Font bn, String k, String v) {
     return pw.RichText(
-      text: pw.TextSpan(children: [
-        pw.TextSpan(text: '$k: ', style: AppPdf.bn(bn, size: 9, weight: pw.FontWeight.bold)),
-        pw.TextSpan(text: v, style: AppPdf.bn(bn, size: 9)),
-      ]),
+      text: pw.TextSpan(
+        children: [
+          pw.TextSpan(
+            text: '$k: ',
+            style: AppPdf.bn(bn, size: 9, weight: pw.FontWeight.bold),
+          ),
+          pw.TextSpan(text: v, style: AppPdf.bn(bn, size: 9)),
+        ],
+      ),
     );
   }
 }

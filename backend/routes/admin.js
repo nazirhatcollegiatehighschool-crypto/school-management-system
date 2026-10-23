@@ -9,9 +9,11 @@ const { computeResult } = require('../grading');
 const { queuePush, getAllGuardianTokens, getGuardianTokens } = require('../fcm');
 const { validateStudent, validateMarksValue } = require('../validate');
 const { ymd } = require('../dates');
-const { ensureSessionExams } = require('./results');
+const { ensureSessionExams, ensureSessionHorizon, syncCanonicalEventClasses } = require('./results');
 const { getUnifiedExamDashboard } = require('../lib/exam_dashboard');
 const { getEntryProgress, importMarks, getMarksheetTemplate, saveMarksheetTemplate, getExamCalendar, updateExamDates, getAnalytics, autoCreateSubjectExams, validateConflicts } = require('../lib/exam_progress');
+const { uploadSchoolLogo } = require('../lib/school_logo');
+const { getClassSignatories } = require('../lib/teacher_signatures');
 
 const uploadsDir = process.env.VERCEL_UPLOAD_DIR
   ? path.join(process.env.VERCEL_UPLOAD_DIR, 'photos')
@@ -96,6 +98,19 @@ router.get('/activity', async (req, res) => {
       `SELECT a.*, u.name AS user_name FROM activity_log a
        LEFT JOIN users u ON a.user_id = u.id ORDER BY a.id DESC LIMIT 50`
     );
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+router.get('/delete-logs', async (req, res) => {
+  const beforeId = Number(req.query.before || 0);
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit || 100)));
+  try {
+    const [rows] = await pool.query(
+      `SELECT a.id, a.action, a.detail, a.created_at, a.user_id, u.name AS admin_name
+       FROM activity_log a LEFT JOIN users u ON u.id=a.user_id
+       WHERE a.action IN ('student_delete','event_delete','exam_delete') AND (?=0 OR a.id<?)
+       ORDER BY a.id DESC LIMIT ?`, [beforeId, beforeId, limit]);
     res.json(rows);
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
@@ -212,7 +227,7 @@ router.get('/students', async (req, res) => {
 });
 
 router.post('/students', async (req, res) => {
-  const { name, dob, roll, class_id, religion, guardian_id, guardian_name, guardian_phone, guardian_email, address, father_name, mother_name, birth_cert_no, gender, blood_group, optional_subject, phone, email } = req.body || {};
+  const { name, dob, roll, class_id, religion, guardian_id, guardian_name, guardian_phone, guardian_email, address, father_name, mother_name, birth_cert_no, gender, blood_group, optional_subject, phone, email, receives_scholarship } = req.body || {};
   let { student_code } = req.body || {};
   if (!name || !roll || !class_id) {
     return res.status(400).json({ error: 'name, roll, class_id required' });
@@ -224,9 +239,9 @@ router.post('/students', async (req, res) => {
       student_code = await genStudentCode();
     }
     const [result] = await pool.query(
-      `INSERT INTO students (student_code, name, dob, roll, class_id, religion, guardian_id, guardian_name, guardian_phone, guardian_email, address, father_name, mother_name, birth_cert_no, gender, blood_group, optional_subject, phone, email)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [String(student_code).trim(), name, dob || null, roll, class_id, religion || null, guardian_id || null, guardian_name || null, guardian_phone || null, guardian_email || null, address || null, father_name || null, mother_name || null, birth_cert_no || null, gender || null, blood_group || null, optional_subject || null, phone || null, email || null]
+      `INSERT INTO students (student_code, name, dob, roll, class_id, religion, guardian_id, guardian_name, guardian_phone, guardian_email, address, father_name, mother_name, birth_cert_no, gender, blood_group, optional_subject, phone, email, receives_scholarship)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [String(student_code).trim(), name, dob || null, roll, class_id, religion || null, guardian_id || null, guardian_name || null, guardian_phone || null, guardian_email || null, address || null, father_name || null, mother_name || null, birth_cert_no || null, gender || null, blood_group || null, optional_subject || null, phone || null, email || null, receives_scholarship ? 1 : 0]
     );
     await autoAssignReligionSubjects(result.insertId, class_id, religion, req.user.id);
     await log(req.user.id, 'student_add', 'Added student ' + name + ' (' + student_code + (religion ? ', ' + religion : '') + ')');
@@ -238,7 +253,7 @@ router.post('/students', async (req, res) => {
 });
 
 router.put('/students/:id', async (req, res) => {
-  const { student_code, name, dob, roll, class_id, religion, guardian_id, guardian_name, guardian_phone, guardian_email, address, father_name, mother_name, birth_cert_no, gender, blood_group, optional_subject, phone, email, status } = req.body || {};
+  const { student_code, name, dob, roll, class_id, religion, guardian_id, guardian_name, guardian_phone, guardian_email, address, father_name, mother_name, birth_cert_no, gender, blood_group, optional_subject, phone, email, status, receives_scholarship } = req.body || {};
   try {
     const [[cur]] = await pool.query('SELECT student_code, class_id FROM students WHERE id=?', [req.params.id]);
     if (!cur) return res.status(404).json({ error: 'Student not found' });
@@ -248,10 +263,10 @@ router.put('/students/:id', async (req, res) => {
       return res.status(400).json({ error: "status must be 'active' or 'inactive'" });
     }
     await pool.query(
-      `UPDATE students SET student_code=?, name=?, dob=?, roll=?, class_id=?, religion=?, guardian_id=?, guardian_name=?, guardian_phone=?, guardian_email=?, address=?, father_name=?, mother_name=?, birth_cert_no=?, gender=?, blood_group=?, optional_subject=?, phone=?, email=?${st !== undefined ? ', status=?' : ''} WHERE id=?`,
+      `UPDATE students SET student_code=?, name=?, dob=?, roll=?, class_id=?, religion=?, guardian_id=?, guardian_name=?, guardian_phone=?, guardian_email=?, address=?, father_name=?, mother_name=?, birth_cert_no=?, gender=?, blood_group=?, optional_subject=?, phone=?, email=?, receives_scholarship=?${st !== undefined ? ', status=?' : ''} WHERE id=?`,
       st !== undefined
-        ? [code, name, dob || null, roll, class_id, religion || null, guardian_id || null, guardian_name || null, guardian_phone || null, guardian_email || null, address || null, father_name || null, mother_name || null, birth_cert_no || null, gender || null, blood_group || null, optional_subject || null, phone || null, email || null, st, req.params.id]
-        : [code, name, dob || null, roll, class_id, religion || null, guardian_id || null, guardian_name || null, guardian_phone || null, guardian_email || null, address || null, father_name || null, mother_name || null, birth_cert_no || null, gender || null, blood_group || null, optional_subject || null, phone || null, email || null, req.params.id]
+        ? [code, name, dob || null, roll, class_id, religion || null, guardian_id || null, guardian_name || null, guardian_phone || null, guardian_email || null, address || null, father_name || null, mother_name || null, birth_cert_no || null, gender || null, blood_group || null, optional_subject || null, phone || null, email || null, receives_scholarship ? 1 : 0, st, req.params.id]
+        : [code, name, dob || null, roll, class_id, religion || null, guardian_id || null, guardian_name || null, guardian_phone || null, guardian_email || null, address || null, father_name || null, mother_name || null, birth_cert_no || null, gender || null, blood_group || null, optional_subject || null, phone || null, email || null, receives_scholarship ? 1 : 0, req.params.id]
     );
     await autoAssignReligionSubjects(req.params.id, class_id, religion, req.user.id);
     await log(req.user.id, 'student_update', 'Updated student id ' + req.params.id);
@@ -260,11 +275,58 @@ router.put('/students/:id', async (req, res) => {
 });
 
 router.delete('/students/:id', async (req, res) => {
+  const reason = String((req.body && req.body.reason) || '').trim();
+  if (!reason) return res.status(400).json({ error: 'শিক্ষার্থী delete করার কারণ লিখতে হবে।' });
+  let conn;
   try {
-    await pool.query('DELETE FROM students WHERE id=?', [req.params.id]);
-    await log(req.user.id, 'student_delete', 'Deleted student id ' + req.params.id);
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+    const [[student]] = await conn.query(
+      `SELECT s.*, c.name AS class_name, c.section AS class_section, c.group_name
+       FROM students s LEFT JOIN classes c ON c.id=s.class_id WHERE s.id=? FOR UPDATE`,
+      [req.params.id]
+    );
+    if (!student) {
+      await conn.rollback();
+      return res.status(404).json({ error: 'Student not found' });
+    }
+    const [attendanceHistory] = await conn.query(
+      'SELECT * FROM attendance WHERE student_id=? ORDER BY date, session', [req.params.id]);
+    const [markHistory] = await conn.query(
+      `SELECT m.*, e.name AS exam_name, e.event_id, sub.name AS subject_name
+       FROM marks m LEFT JOIN exams e ON e.id=m.exam_id
+       LEFT JOIN subjects sub ON sub.id=e.subject_id
+       WHERE m.student_id=? ORDER BY m.id`, [req.params.id]);
+    const [dailyReports] = await conn.query(
+      'SELECT * FROM student_daily_reports WHERE student_id=? ORDER BY report_date, id', [req.params.id]);
+    const [promotions] = await conn.query(
+      'SELECT * FROM promotions WHERE student_id=? ORDER BY created_at, id', [req.params.id]);
+    const [studentNotifications] = await conn.query(
+      'SELECT * FROM notifications WHERE student_id=? ORDER BY id', [req.params.id]);
+    const [[admin]] = await conn.query('SELECT name FROM users WHERE id=?', [req.user.id]);
+    const audit = {
+      student,
+      attendance: attendanceHistory,
+      marks: markHistory,
+      daily_reports: dailyReports,
+      promotions,
+      notifications: studentNotifications,
+      reason,
+      deleted_by: { id: req.user.id, name: admin?.name || req.user.name || null },
+      deleted_at: new Date().toISOString(),
+    };
+    await conn.query(
+      'INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)',
+      [req.user.id, 'student_delete', JSON.stringify(audit)]
+    );
+    await conn.query('DELETE FROM students WHERE id=?', [req.params.id]);
+    await conn.commit();
     res.json({ ok: true });
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+  } catch (err) {
+    if (conn) { try { await conn.rollback(); } catch (_) {} }
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  } finally { if (conn) conn.release(); }
 });
 
 // ---- Student subject allocation (NCTB) ----
@@ -369,10 +431,17 @@ router.get('/teachers', async (req, res) => {
       t.class_teacher = typeof t.is_class_teacher === 'string'
         ? JSON.parse(t.is_class_teacher || '[]')
         : (t.is_class_teacher || []);
-      t.signature_url = t.signature ? '/uploads/signatures/' + t.signature : null;
+      t.signature_url = t.signature || null;
     }
     res.json(rows);
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+router.get('/class-signatories', async (req, res) => {
+  const classId = Number(req.query.class_id);
+  if (!classId) return res.status(400).json({ error: 'class_id required' });
+  try { res.json(await getClassSignatories(classId)); }
+  catch (err) { console.error(err); res.status(500).json({ error: 'Signatories could not be loaded' }); }
 });
 
 router.put('/teachers/:id/active', async (req, res) => {
@@ -498,6 +567,7 @@ router.post('/classes', async (req, res) => {
   if (!name || !section) return res.status(400).json({ error: 'name and section required' });
   try {
     const [result] = await pool.query('INSERT INTO classes (name, section, group_name, teacher_id) VALUES (?,?,?,?)', [name, section, group_name || null, teacher_id || null]);
+    await syncCanonicalEventClasses();
     if (teacher_id) await refreshClassTeacher(Number(teacher_id));
     await log(req.user.id, 'class_add', 'Added class ' + name + ' ' + section + (group_name ? ' (' + group_name + ')' : ''));
     res.status(201).json({ id: result.insertId });
@@ -513,6 +583,7 @@ router.put('/classes/:id', async (req, res) => {
     const [prev] = await pool.query('SELECT teacher_id FROM classes WHERE id=?', [req.params.id]);
     const prevTid = prev[0]?.teacher_id;
     await pool.query('UPDATE classes SET name=?, section=?, group_name=?, teacher_id=? WHERE id=?', [name, section, group_name || null, teacher_id || null, req.params.id]);
+    await syncCanonicalEventClasses();
     const newTid = Number(teacher_id) || null;
     if (prevTid && prevTid !== newTid) await refreshClassTeacher(prevTid);
     if (newTid) await refreshClassTeacher(newTid);
@@ -525,6 +596,7 @@ router.delete('/classes/:id', async (req, res) => {
   try {
     const [prev] = await pool.query('SELECT teacher_id FROM classes WHERE id=?', [req.params.id]);
     await pool.query('DELETE FROM classes WHERE id=?', [req.params.id]);
+    await syncCanonicalEventClasses();
     if (prev[0]?.teacher_id) await refreshClassTeacher(prev[0].teacher_id);
     await log(req.user.id, 'class_delete', 'Deleted class id ' + req.params.id);
     res.json({ ok: true });
@@ -546,23 +618,33 @@ router.get('/sessions', async (req, res) => {
 
 router.post('/sessions', async (req, res) => {
   const { name, is_active } = req.body || {};
-  if (!name) return res.status(400).json({ error: 'name required (e.g. 2026)' });
+  const sessionName = String(name || '').trim();
+  if (!sessionName) return res.status(400).json({ error: 'name required (e.g. 2026)' });
+  if (!/^\d{4}$/.test(sessionName)) return res.status(400).json({ error: 'Academic session must be a 4-digit year (e.g. 2027)' });
+  let conn;
   try {
-    let sid;
-    try {
-      const [r] = await pool.query('INSERT INTO sessions (name, is_active) VALUES (?,?)', [String(name).trim(), is_active ? 1 : 0]);
-      sid = r.insertId;
-    } catch (e) {
-      if (e.code === '23505') {
-        const [[ex]] = await pool.query('SELECT id FROM sessions WHERE name=?', [String(name).trim()]);
-        sid = ex.id;
-      } else throw e;
-    }
-    if (is_active) await pool.query('UPDATE sessions SET is_active=0 WHERE id<>?', [sid]);
-    const ensured = await ensureSessionExams(sid);
-    await log(req.user.id, 'session_create', `Session ${name} ensured (${ensured.created.length} created, ${ensured.adopted.length} adopted)`);
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+    const [inserted] = await conn.query(
+      'INSERT INTO sessions (name, is_active) VALUES (?,?) ON CONFLICT (name) DO NOTHING',
+      [sessionName, is_active ? 1 : 0]);
+    const sid = inserted.insertId || (await conn.query('SELECT id FROM sessions WHERE name=?', [sessionName]))[0][0]?.id;
+    if (!sid) throw new Error('Session row could not be resolved after insert');
+    if (is_active) await conn.query('UPDATE sessions SET is_active=0 WHERE id<>?', [sid]);
+    const ensured = await ensureSessionExams(sid, conn);
+    await conn.commit();
+    await log(req.user.id, 'session_create', `Session ${sessionName} ensured (${ensured.created.length} created, ${ensured.adopted.length} adopted)`);
     res.status(201).json({ id: sid, ensured });
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+  } catch (err) {
+    if (conn) { try { await conn.rollback(); } catch (_) {} }
+    const requestId = `session-${Date.now().toString(36)}`;
+    console.error(`[${requestId}] session creation failed`, { code: err.code, constraint: err.constraint, message: err.message, stack: err.stack });
+    if (err.code === '42703' || err.code === '42P01') {
+      return res.status(503).json({ error: 'Database schema update required. Apply backend/migrations/20261022_exam_session_columns.sql in Supabase, then retry.', code: 'SCHEMA_MIGRATION_REQUIRED', request_id: requestId });
+    }
+    if (err.code === '23505') return res.status(409).json({ error: 'This academic session already exists.', code: 'SESSION_ALREADY_EXISTS' });
+    res.status(500).json({ error: 'Academic session could not be created. Please retry or share this reference with support.', request_id: requestId });
+  } finally { conn?.release(); }
 });
 
 router.put('/sessions/:id/active', async (req, res) => {
@@ -705,7 +787,15 @@ router.get('/exams', async (req, res) => {
 
 // Unified Exam Session Dashboard for Admin
 // Returns complete event + class + subject data with progress
-router.get('/exam-dashboard', getUnifiedExamDashboard);
+router.get('/exam-dashboard', async (req, res) => {
+  try {
+    await ensureSessionHorizon();
+    return getUnifiedExamDashboard(req, res);
+  } catch (err) {
+    console.error('exam session horizon provisioning failed:', err);
+    res.status(500).json({ error: 'Academic session horizon could not be prepared.' });
+  }
+});
 
 router.post('/exams', async (req, res) => {
   const { name, exam_type, class_id, subject_id, exam_date, entry_deadline, event_id } = req.body || {};
@@ -768,19 +858,38 @@ router.put('/exams/:id', async (req, res) => {
 router.delete('/exams/:id', async (req, res) => {
   // Password-gated delete: exam-সহ সব marks মুছে যাবে — নিজের admin
   // password দিয়ে confirm করতে হবে।
-  const { password, confirm_password } = req.body || {};
+  const { password, confirm_password, reason } = req.body || {};
   const pw = password !== undefined ? password : confirm_password;
   if (!pw) return res.status(400).json({ error: 'Admin password required to delete an exam' });
+  if (!String(reason || '').trim()) return res.status(400).json({ error: 'পরীক্ষা delete করার কারণ লিখতে হবে।' });
   try {
     const [[me]] = await pool.query('SELECT id, password_hash FROM users WHERE id=? AND role=?', [req.user.id, 'admin']);
     if (!me) return res.status(403).json({ error: 'Admin account not found' });
     const ok = await bcrypt.compare(String(pw), me.password_hash);
     if (!ok) return res.status(403).json({ error: 'ভুল password — exam delete হয়নি।' });
-    const [[exam]] = await pool.query('SELECT id, name FROM exams WHERE id=?', [req.params.id]);
+    const [[exam]] = await pool.query(
+      `SELECT e.*, c.name AS class_name, c.section, sub.name AS subject_name,
+              ev.name AS event_name, ev.session_id, ev.exam_kind, ev.year
+       FROM exams e LEFT JOIN classes c ON c.id=e.class_id
+       LEFT JOIN subjects sub ON sub.id=e.subject_id
+       LEFT JOIN exam_events ev ON ev.id=e.event_id WHERE e.id=?`, [req.params.id]);
     if (!exam) return res.status(404).json({ error: 'Exam not found' });
     const conn = await pool.getConnection();
     try {
       await conn.beginTransaction();
+      const [markRows] = await conn.query('SELECT * FROM marks WHERE exam_id=? ORDER BY id', [req.params.id]);
+      const [shareRows] = await conn.query('SELECT * FROM exam_shares WHERE exam_id=? ORDER BY id', [req.params.id]);
+      const [notificationRows] = await conn.query(
+        `SELECT * FROM notifications WHERE related_id=? AND type IN ('result','class_test_result') ORDER BY id`, [req.params.id]);
+      const [[admin]] = await conn.query('SELECT name FROM users WHERE id=?', [req.user.id]);
+      const audit = {
+        exam, marks: markRows, shares: shareRows, notifications: notificationRows,
+        reason: String(reason).trim(),
+        deleted_by: { id: req.user.id, name: admin?.name || req.user.name || null },
+        deleted_at: new Date().toISOString(),
+      };
+      await conn.query('INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)',
+        [req.user.id, 'exam_delete', JSON.stringify(audit)]);
       const [m] = await conn.query('DELETE FROM marks WHERE exam_id=?', [req.params.id]);
       await conn.query('DELETE FROM exam_shares WHERE exam_id=?', [req.params.id]);
       await conn.query(`DELETE FROM notifications WHERE related_id=? AND type IN ('result','class_test_result')`, [req.params.id]);
@@ -790,7 +899,6 @@ router.delete('/exams/:id', async (req, res) => {
       try { await conn.rollback(); } catch (_) {}
       throw e;
     } finally { conn.release(); }
-    await log(req.user.id, 'exam_delete_pw', `Deleted exam ${req.params.id} (${exam.name}) with password confirm`);
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
@@ -895,6 +1003,44 @@ router.put('/marks/:id/unlock', async (req, res) => {
 // only ONE holder at a time. Admin sees holders here, removes a holder
 // (clear their designation), which frees the post for someone else.
 // =====================================================================
+router.put('/leadership-assignments', async (req, res) => {
+  const body = req.body || {};
+  const headId = body.headmaster_id == null || body.headmaster_id === '' ? null : Number(body.headmaster_id);
+  const assistantId = body.assistant_headmaster_id == null || body.assistant_headmaster_id === '' ? null : Number(body.assistant_headmaster_id);
+  const seniorIds = Array.isArray(body.senior_teacher_ids) ? body.senior_teacher_ids.map(Number) : [];
+  const assistantTeacherIds = Array.isArray(body.assistant_teacher_ids) ? body.assistant_teacher_ids.map(Number) : [];
+  const all = [headId, assistantId, ...seniorIds, ...assistantTeacherIds].filter(Boolean);
+  if (all.some(id => !Number.isInteger(id) || id < 1) || new Set(all).size !== all.length) {
+    return res.status(400).json({ error: 'একজন শিক্ষককে একাধিক পদে নির্বাচন করা যাবে না।' });
+  }
+  let conn;
+  try {
+    if (all.length) {
+      const marks = all.map(() => '?').join(',');
+      const [found] = await pool.query(`SELECT id FROM users WHERE role='teacher' AND active=1 AND id ${all.length === 1 ? '= ?' : `IN (${marks})`}`, all);
+      if (found.length !== all.length) return res.status(400).json({ error: 'নির্বাচিত শিক্ষক সক্রিয় নন বা পাওয়া যায়নি।' });
+    }
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+    await conn.query(`UPDATE users SET designation='' WHERE role='teacher'
+      AND LOWER(TRIM(designation)) IN ('headmaster','head teacher','principal','assistant headmaster','assistant head teacher','vice principal','senior teacher','assistant teacher')`);
+    const assignments = [
+      ...(headId ? [[headId, 'Headmaster']] : []),
+      ...(assistantId ? [[assistantId, 'Assistant Headmaster']] : []),
+      ...seniorIds.map(id => [id, 'Senior Teacher']),
+      ...assistantTeacherIds.map(id => [id, 'Assistant Teacher']),
+    ];
+    for (const [id, title] of assignments) await conn.query("UPDATE users SET designation=? WHERE id=? AND role='teacher'", [title, id]);
+    await conn.query('INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)',
+      [req.user.id, 'leadership_assignments', JSON.stringify({ headId, assistantId, seniorIds, assistantTeacherIds })]);
+    await conn.commit();
+    res.json({ ok: true });
+  } catch (err) {
+    if (conn) { try { await conn.rollback(); } catch (_) {} }
+    console.error(err); res.status(500).json({ error: 'পদবি সংরক্ষণ করা যায়নি।' });
+  } finally { if (conn) conn.release(); }
+});
+
 router.get('/designation-slots', async (req, res) => {
   try {
     const headFam = ['head teacher', 'headmaster', 'principal'];
@@ -1357,19 +1503,8 @@ router.put('/settings', async (req, res) => {
 });
 
 // Logo upload endpoint - multipart form with 'logo' field
-const logoUploadsDir = process.env.VERCEL_UPLOAD_DIR
-  ? path.join(process.env.VERCEL_UPLOAD_DIR, 'logos')
-  : path.join(__dirname, '..', 'uploads', 'logos');
-if (!fs.existsSync(logoUploadsDir)) fs.mkdirSync(logoUploadsDir, { recursive: true });
-
 const logoUpload = multer({
-  storage: multer.diskStorage({
-    destination: logoUploadsDir,
-    filename: (req, file, cb) => {
-      const ext = (path.extname(file.originalname) || '.png').toLowerCase();
-      cb(null, 'school_logo' + ext);
-    }
-  }),
+  storage: multer.memoryStorage(),
   limits: { fileSize: 2 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (/^image\/(jpeg|png|webp)$/.test(file.mimetype)) cb(null, true);
@@ -1381,19 +1516,18 @@ router.post('/settings/logo', auth('admin'), logoUpload.single('logo'), async (r
   try {
     if (!req.file) return res.status(400).json({ error: 'logo file required' });
     
-    // Validate dimensions (max 800px)
     const sharp = require('sharp');
-    const metadata = await sharp(req.file.path).metadata();
-    if (metadata.width > 800 || metadata.height > 800) {
-      // Resize if too large
-      const resizedPath = req.file.path.replace(ext, '_resized' + ext);
-      await sharp(req.file.path).resize({ width: 800, height: 800, fit: 'inside' }).toFile(resizedPath);
-      fs.unlinkSync(req.file.path);
-      fs.renameSync(resizedPath, req.file.path);
+    const metadata = await sharp(req.file.buffer).metadata();
+    if (!metadata.width || !metadata.height) {
+      return res.status(400).json({ error: 'The selected image could not be read. Please choose a PNG, JPG, or WebP image.' });
     }
-    
-    // Store logo path in settings
-    const logoUrl = '/uploads/logos/' + req.file.filename;
+    // Normalize uploads to a compact PNG while preserving any transparent background.
+    const png = await sharp(req.file.buffer)
+      .rotate()
+      .resize({ width: 800, height: 800, fit: 'inside', withoutEnlargement: true })
+      .png({ compressionLevel: 9 })
+      .toBuffer();
+    const logoUrl = await uploadSchoolLogo(png);
     await pool.query(
       'INSERT INTO app_settings (setting_key, setting_value) VALUES (?,?) ON CONFLICT (setting_key) DO UPDATE SET setting_value=EXCLUDED.setting_value',
       ['school_logo_path', logoUrl]
@@ -1403,8 +1537,7 @@ router.post('/settings/logo', auth('admin'), logoUpload.single('logo'), async (r
     res.json({ ok: true, logo_url: logoUrl });
   } catch (err) {
     console.error(err);
-    if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-    res.status(500).json({ error: 'Server error' });
+    res.status(err.status || 500).json({ error: err.message || 'Logo upload failed' });
   }
 });
 
@@ -1595,23 +1728,18 @@ async function promotionDestination(conn, cls) {
   const name = String(cls.name || '');
   const key = cls.group_name || cls.section || null;
   if (/class\s*10/i.test(name)) {
-    const [[d]] = await conn.query(
-      `SELECT c2.id, c2.name FROM classes c2
-        WHERE c2.name='SSC Batch' AND (c2.group_name IS NOT DISTINCT FROM COALESCE(?, c2.group_name))
-        ORDER BY c2.id LIMIT 1`, [key]);
-    // fall back to any SSC Batch row with a matching section label
-    if (d) return d;
-    const [[d2]] = await conn.query(
-      `SELECT id, name FROM classes WHERE name='SSC Batch' ORDER BY id LIMIT 1`, []);
-    return d2 || null;
+    const [batches] = await conn.query(
+      `SELECT id, name, section, group_name FROM classes WHERE name='SSC Batch' ORDER BY id`, []);
+    return batches.find(b => String(b.group_name || b.section || '') === String(key || '')) ||
+      (batches.length === 1 ? batches[0] : null);
   }
   const m = name.match(/(\d+)/);
   if (!m) return null;
   const nextName = 'Class ' + (Number(m[1]) + 1);
-  const [[d]] = await conn.query(
-    `SELECT id, name FROM classes WHERE name=? AND (section IS NOT DISTINCT FROM ? OR group_name IS NOT DISTINCT FROM ?)
-     ORDER BY id LIMIT 1`, [nextName, cls.section, cls.group_name]);
-  return d || null;
+  const [destinations] = await conn.query(
+    `SELECT id, name, section, group_name FROM classes WHERE name=? ORDER BY id`, [nextName]);
+  return destinations.find(d => String(d.group_name || d.section || '') === String(key || '')) ||
+    (destinations.length === 1 ? destinations[0] : null);
 }
 
 // =====================================================================
@@ -1701,6 +1829,9 @@ router.post('/promote/review', async (req, res) => {
     if (!ev) return res.status(400).json({ error: 'No exam event found for this class' });
     const [[cls]] = await pool.query('SELECT id, name, section, group_name FROM classes WHERE id=?', [cid]);
     if (!cls) return res.status(404).json({ error: 'Class not found' });
+    if (/ssc/i.test(String(cls.name || ''))) {
+      return res.status(400).json({ error: 'SSC Batch শেষ শিক্ষাবর্ষ; এখান থেকে আর promotion হয় না।' });
+    }
     // Source rule (same as teacher review): 6–9 ← annual, 10 ← test, published.
     const isClass10 = /class\s*10/i.test(String(cls.name || ''));
     const needKind = isClass10 ? 'test' : 'annual';
@@ -2112,18 +2243,34 @@ router.get('/promotion-rules/class/:classId', async (req, res) => {
 // Calculate promotion eligibility for a class/event
 router.post('/promotion/calculate', async (req, res) => {
   try {
-    const { class_id, event_id } = req.body || {};
+    const { class_id, event_id, target_session_id } = req.body || {};
     const cid = Number(class_id);
     const eid = Number(event_id);
-    if (!cid || !eid) return res.status(400).json({ error: 'class_id and event_id required' });
+    const targetSessionId = Number(target_session_id);
+    if (!cid || !eid || !targetSessionId) return res.status(400).json({ error: 'class_id, event_id and next academic session are required' });
 
     // Get class and event info
     const [[cls]] = await pool.query('SELECT id, name, section, group_name FROM classes WHERE id=?', [cid]);
     if (!cls) return res.status(404).json({ error: 'Class not found' });
+    if (/ssc/i.test(String(cls.name || ''))) {
+      return res.status(400).json({ error: 'SSC Batch শেষ শিক্ষাবর্ষ; এখান থেকে আর promotion হয় না।' });
+    }
 
-    const [[ev]] = await pool.query('SELECT id, name, exam_kind, is_published FROM exam_events WHERE id=?', [eid]);
+    const [[ev]] = await pool.query(
+      `SELECT e.id, e.name, e.exam_kind, e.year, e.session_id, e.is_published, s.name AS session_name
+       FROM exam_events e LEFT JOIN sessions s ON s.id=e.session_id WHERE e.id=?`, [eid]);
     if (!ev) return res.status(404).json({ error: 'Event not found' });
     if (Number(ev.is_published) !== 1) return res.status(400).json({ error: 'Event must be published' });
+
+    const sourceYear = Number(ev.year) || Number(String(ev.session_name || '').match(/(19|20)\d{2}/)?.[0]);
+    const [[targetSession]] = await pool.query('SELECT id, name FROM sessions WHERE id=?', [targetSessionId]);
+    const targetYear = Number(String(targetSession?.name || '').match(/(19|20)\d{2}/)?.[0]);
+    if (!sourceYear || !targetSession || targetYear !== sourceYear + 1) {
+      return res.status(400).json({ error: `প্রমোশনের target session অবশ্যই ${sourceYear ? sourceYear + 1 : 'পরবর্তী'} শিক্ষাবর্ষ হতে হবে।` });
+    }
+    if (ev.session_name && Number(String(ev.session_name).match(/(19|20)\d{2}/)?.[0]) !== Number(ev.year)) {
+      return res.status(400).json({ error: `পরীক্ষার বছর ${ev.year} এবং একাডেমিক সেশন ${ev.session_name} মিলছে না। পরীক্ষা/সেশন ঠিক করে আবার চেষ্টা করুন।` });
+    }
 
     // Determine if this event type is a promotion source for this class
     const isClass10 = /class\s*10/i.test(String(cls.name || ''));
@@ -2139,7 +2286,14 @@ router.post('/promotion/calculate', async (req, res) => {
     );
 
     const graceFailed = rule ? Number(rule.grace_failed_subjects) : 0;
-    const mandatorySubjects = rule ? (rule.mandatory_subjects || []) : [];
+    let configuredMandatory = rule?.mandatory_subjects || [];
+    if (typeof configuredMandatory === 'string') {
+      try { configuredMandatory = JSON.parse(configuredMandatory); } catch (_) { configuredMandatory = [configuredMandatory]; }
+    }
+    if (!Array.isArray(configuredMandatory)) configuredMandatory = [];
+    const [mandatoryRows] = await pool.query(
+      `SELECT sub.name FROM mandatory_pass mp JOIN subjects sub ON sub.id=mp.subject_id WHERE mp.class_id=?`, [cid]);
+    const mandatorySubjects = [...new Set([...configuredMandatory, ...mandatoryRows.map(r => r.name)])];
     const minGpa = rule ? Number(rule.min_passing_gpa) : 2.0;
     const allowConditional = rule ? Number(rule.allow_conditional) === 1 : true;
 
@@ -2174,7 +2328,7 @@ router.post('/promotion/calculate', async (req, res) => {
       const failedNames = (r.families || [])
         .filter(f => !f.is_optional && (f.letter_grade === 'F' || f.absent === true))
         .map(f => f.subject);
-      const mandatoryFailed = failedNames.filter(f => mandatorySubjects.some(m => m.toLowerCase() === f.toLowerCase()));
+      const mandatoryFailed = failedNames.filter(f => mandatorySubjects.some(m => String(m).trim().toLowerCase() === f.trim().toLowerCase()));
       const failCount = failedNames.length;
 
       let status, decision, eligible = false, reason = '';
@@ -2182,12 +2336,12 @@ router.post('/promotion/calculate', async (req, res) => {
         status = 'not_eligible'; decision = 'retained'; eligible = false; reason = 'Absent or no marks';
       } else if (mandatoryFailed.length > 0) {
         status = 'not_eligible'; decision = 'retained'; eligible = false; reason = `Mandatory subject failed: ${mandatoryFailed.join(', ')}`;
+      } else if (Number(r.final_gpa || 0) < minGpa) {
+        status = 'not_eligible'; decision = 'retained'; eligible = false; reason = `GPA ${r.final_gpa} below minimum ${minGpa}`;
       } else if (failCount === 0) {
         status = 'eligible'; decision = 'promoted'; eligible = true; reason = 'All subjects passed';
       } else if (failCount <= graceFailed && allowConditional) {
         status = 'conditional'; decision = 'conditional'; eligible = true; reason = `Failed ${failCount} subject(s) within grace limit`;
-      } else if (Number(r.final_gpa || 0) < minGpa) {
-        status = 'not_eligible'; decision = 'retained'; eligible = false; reason = `GPA ${r.final_gpa} below minimum ${minGpa}`;
       } else {
         status = 'not_eligible'; decision = 'retained'; eligible = false; reason = `Failed ${failCount} subject(s) exceeds grace`;
       }
@@ -2202,7 +2356,6 @@ router.post('/promotion/calculate', async (req, res) => {
     }
 
     // Save/update student_promotion_status
-    const targetSessionId = ev.session_id || 2; // Default to next session
     const destClassId = dest && dest.id ? dest.id : null;
     const conn = await pool.getConnection();
     try {
@@ -2232,7 +2385,7 @@ router.post('/promotion/calculate', async (req, res) => {
       conn.release();
     }
 
-    res.json({ event: ev, class: cls, kind: needKind, dest_class: dest || null, review, summary: { total: review.length, eligible: review.filter(r => r.eligible).length, conditional: review.filter(r => r.status === 'conditional').length, not_eligible: review.filter(r => !r.eligible).length } });
+    res.json({ event: ev, class: cls, target_session: targetSession, kind: needKind, dest_class: dest || null, review, summary: { total: review.length, eligible: review.filter(r => r.eligible).length, conditional: review.filter(r => r.status === 'conditional').length, not_eligible: review.filter(r => !r.eligible).length } });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -2271,8 +2424,11 @@ router.put('/promotion/status/:studentId', async (req, res) => {
     const studentId = Number(req.params.studentId);
     const { status, decision, target_class_id, target_session_id, admin_note } = req.body || {};
     if (!studentId) return res.status(400).json({ error: 'studentId required' });
+    if (!target_session_id) return res.status(400).json({ error: 'target_session_id required' });
 
-    const [[sps]] = await pool.query('SELECT * FROM student_promotion_status WHERE student_id=?', [studentId]);
+    const [[sps]] = await pool.query(
+      'SELECT * FROM student_promotion_status WHERE student_id=? AND target_session_id=?',
+      [studentId, target_session_id]);
     if (!sps) return res.status(404).json({ error: 'Student promotion status not found' });
 
     const fromStatus = sps.status;
@@ -2292,9 +2448,9 @@ router.put('/promotion/status/:studentId', async (req, res) => {
       updates.push('approved_by = ?'); params.push(req.user.id);
       updates.push('approved_at = NOW()');
     }
-    params.push(studentId);
+    params.push(studentId, target_session_id);
 
-    await pool.query(`UPDATE student_promotion_status SET ${updates.join(', ')} WHERE student_id = ?`, params);
+    await pool.query(`UPDATE student_promotion_status SET ${updates.join(', ')} WHERE student_id = ? AND target_session_id = ?`, params);
 
     await pool.query(
       `INSERT INTO promotion_audit_log (student_id, action, from_status, to_status, from_class_id, target_session_id, admin_id, reason, metadata, created_at)
@@ -2428,6 +2584,7 @@ router.post('/promotion/execute', async (req, res) => {
 
     const conn = await pool.getConnection();
     let moved = 0;
+    const movedRecords = [];
     try {
       await conn.beginTransaction();
       // Group by target class to assign rolls efficiently
@@ -2476,16 +2633,95 @@ router.post('/promotion/execute', async (req, res) => {
             `UPDATE student_promotion_status SET status='promoted', updated_at=NOW() WHERE student_id=? AND target_session_id=?`,
             [p.student_id, target_session_id]
           );
-          // Guardian-facing notification (same channel the guardian app reads).
-          await conn.query(
-            `INSERT INTO notifications (student_id, class_id, title, body, type, target_type, related_id, created_by, created_at)
-             VALUES (?,?,?,?,?,?,?,?,NOW())`,
-            [p.student_id, tcId, 'Promotion — উত্তীর্ণ',
-             `অভিনন্দন! আপনি ${tc.name}-এ উত্তীর্ণ হয়েছেন। নতুন রোল: ${roll}`,
-             'promotion', 'students', p.source_event_id, req.user.id]
-          );
+          movedRecords.push({
+            student_id: p.student_id,
+            source_event_id: p.source_event_id,
+            from_class_id: p.from_class_id,
+            target_class_id: tcId,
+            target_class_name: tc.name,
+            target_section: targetSection,
+            old_roll: Number(p.roll || 0),
+          });
           moved++;
         }
+      }
+
+      // Final roster rule: new arrivals first by source-exam merit; current
+      // students who repeat the class go after them, ranked by their own exam
+      // marks. Other active records keep their old order between these groups.
+      const movedById = new Map(movedRecords.map(r => [Number(r.student_id), r]));
+      const targetClassIds = [...new Set(movedRecords.map(r => Number(r.target_class_id)))];
+      const finalRollByStudent = new Map();
+      for (const targetClassId of targetClassIds) {
+        const [roster] = await conn.query(
+          `SELECT s.id, s.name, s.roll, s.status AS student_status,
+                  sps.from_class_id, sps.status AS promotion_status, sps.decision,
+                  sps.source_event_id, sps.final_gpa
+             FROM students s
+             LEFT JOIN student_promotion_status sps
+               ON sps.student_id=s.id AND sps.target_session_id=?
+            WHERE s.class_id=? ORDER BY s.roll, s.id`,
+          [target_session_id, targetClassId]);
+        const rankedRoster = [];
+        for (const row of roster) {
+          const incoming = movedById.get(Number(row.id));
+          const repeats = !incoming && Number(row.from_class_id) === targetClassId &&
+            (row.decision === 'retained' || row.promotion_status === 'retained' || row.promotion_status === 'not_eligible');
+          const eventId = incoming?.source_event_id || row.source_event_id;
+          let percentage = 0;
+          let gpa = Number(row.final_gpa || 0);
+          if (eventId) {
+            const result = await computeResult(Number(row.id), Number(eventId));
+            if (result) {
+              const full = Number(result.total_full || 0);
+              percentage = full > 0 ? Number(result.total_marks || 0) / full : 0;
+              gpa = Number(result.final_gpa || gpa);
+            }
+          }
+          rankedRoster.push({
+            ...row,
+            priority: incoming ? 0 : repeats ? 2 : (row.student_status == null || row.student_status === 'active') ? 1 : 3,
+            percentage,
+            gpa,
+            previousRoll: Number(incoming?.old_roll ?? row.roll ?? 0),
+          });
+        }
+        rankedRoster.sort((a, b) =>
+          a.priority - b.priority ||
+          ((a.priority === 0 || a.priority === 2) ? (b.percentage - a.percentage || b.gpa - a.gpa) : 0) ||
+          a.previousRoll - b.previousRoll ||
+          String(a.name || '').localeCompare(String(b.name || ''), 'bn') ||
+          Number(a.id) - Number(b.id));
+
+        const maxOldRoll = Math.max(0, ...rankedRoster.map(r => Number(r.roll || 0)));
+        const offset = maxOldRoll + rankedRoster.length + 1000;
+        await conn.query('UPDATE students SET roll=roll+? WHERE class_id=?', [offset, targetClassId]);
+        let nextRoll = 0;
+        for (const row of rankedRoster) {
+          nextRoll++;
+          await conn.query(
+            `UPDATE students SET roll=?, session_id=CASE WHEN status IS NULL OR status='active' THEN ? ELSE session_id END WHERE id=?`,
+            [nextRoll, target_session_id, row.id]);
+          finalRollByStudent.set(Number(row.id), nextRoll);
+          const incoming = movedById.get(Number(row.id));
+          if (incoming) {
+            await conn.query(
+              `UPDATE promotions SET promoted_roll=? WHERE student_id=? AND event_id=?`,
+              [nextRoll, row.id, incoming.source_event_id]);
+          }
+        }
+      }
+
+      // Notify guardians only after final rolls have been assigned.
+      for (const p of movedRecords) {
+        const roll = finalRollByStudent.get(Number(p.student_id));
+        await conn.query(
+          `INSERT INTO notifications (student_id, class_id, title, body, type, target_type, related_id, created_by, created_at)
+           VALUES (?,?,?,?,?,?,?,?,NOW())`,
+          [p.student_id, p.target_class_id, 'Promotion — উত্তীর্ণ',
+           `অভিনন্দন! আপনি ${p.target_class_name}-এ উত্তীর্ণ হয়েছেন। নতুন রোল: ${roll}`,
+           'promotion', 'students', p.source_event_id, req.user.id]
+        );
       }
 
       // Students approved without a destination class: keep them in place

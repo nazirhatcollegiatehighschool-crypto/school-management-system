@@ -1,21 +1,18 @@
 import 'package:flutter/material.dart';
+
 import '../fcm_service.dart';
 import '../api.dart';
 import 'students_screen.dart';
 import 'teachers_screen.dart';
 import 'classes_screen.dart';
-import 'approvals_screen.dart';
-import 'exam_catalog_screen.dart';
-import 'exams_screen.dart';
-import 'results_screen.dart';
 import 'notices_screen.dart';
 import 'sibling_request_screen.dart';
 import 'settings_screen.dart';
 import 'routines_screen.dart';
-import 'promotion_screen.dart';
 import 'attendance_screen.dart';
 import 'login_screen.dart';
-import 'exam_dashboard_screen.dart';
+import 'exam_center_screen.dart';
+import 'delete_logs_screen.dart';
 import '../widgets/offline_sync_banner.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -54,10 +51,15 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             Icon(Icons.logout_rounded, color: Colors.redAccent, size: 24),
             SizedBox(width: 10),
-            Text('Sign Out', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+            Text(
+              'Sign Out',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+            ),
           ],
         ),
-        content: const Text('Are you sure you want to log out of the admin panel?'),
+        content: const Text(
+          'Are you sure you want to log out of the admin panel?',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -67,7 +69,9 @@ class _HomeScreenState extends State<HomeScreen> {
             style: FilledButton.styleFrom(
               backgroundColor: Colors.redAccent,
               foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
             ),
             onPressed: () => Navigator.pop(ctx, true),
             child: const Text('Logout'),
@@ -89,125 +93,125 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final now = DateTime.now();
+    const months = [
+      '',
+      'জানুয়ারি',
+      'ফেব্রুয়ারি',
+      'মার্চ',
+      'এপ্রিল',
+      'মে',
+      'জুন',
+      'জুলাই',
+      'আগস্ট',
+      'সেপ্টেম্বর',
+      'অক্টোবর',
+      'নভেম্বর',
+      'ডিসেম্বর',
+    ];
+    final dateLabel = '${now.day} ${months[now.month]} ${now.year}';
     final items = [
       (
         title: 'Students',
         subtitle: 'Admissions & records',
         icon: Icons.people_alt_rounded,
-        color: const Color(0xFF2563EB),
+        color: const Color(0xFF5C50E8),
         screen: const StudentsScreen(),
       ),
       (
         title: 'Teachers',
         subtitle: 'Faculty & subjects',
         icon: Icons.school_rounded,
-        color: const Color(0xFF0D9488),
+        color: const Color(0xFF8676F4),
         screen: const TeachersScreen(),
       ),
       (
         title: 'Classes',
         subtitle: 'Sections & groups',
         icon: Icons.meeting_room_rounded,
-        color: const Color(0xFF7C3AED),
+        color: const Color(0xFF3D4A75),
         screen: const ClassesScreen(),
       ),
       (
-        title: 'Exam Session Dashboard',
-        subtitle: 'Sessions, progress, publish, entry',
-        icon: Icons.dashboard_rounded,
-        color: const Color(0xFF6366F1),
-        screen: const ExamDashboardScreen(),
-      ),
-      (
-        title: 'Exams & Marks',
-        subtitle: 'Assessments & entries',
-        icon: Icons.assignment_turned_in_rounded,
-        color: const Color(0xFFEA580C),
-        screen: const ExamsScreen(),
-      ),
-      (
-        title: 'Results',
-        subtitle: 'Running / Published + PDF',
-        icon: Icons.emoji_events_rounded,
-        color: const Color(0xFFB45309),
-        screen: const ResultsScreen(),
-      ),
-      (
-        title: 'Exam Approvals',
-        subtitle: 'Pending marks entry',
-        icon: Icons.rule_folder_rounded,
-        color: const Color(0xFF0D9488),
-        screen: const ApprovalsScreen(),
-      ),
-      (
-        title: 'Exam Weightage',
-        subtitle: 'NCTB catalog & pass rules',
-        icon: Icons.tune_rounded,
-        color: const Color(0xFF7C3AED),
-        screen: const ExamCatalogScreen(),
-      ),
-      (
-        title: 'Promotion → SSC',
-        subtitle: 'Yearly graduation',
-        icon: Icons.how_to_reg_rounded,
-        color: const Color(0xFF4F46E5),
-        screen: const PromotionScreen(),
+        title: 'স্কুল পরীক্ষা · Class 6–10',
+        subtitle: 'নিজস্ব পরীক্ষা, ফলাফল ও শ্রেণি উত্তরণ / SSC Batch',
+        icon: Icons.school_rounded,
+        color: const Color(0xFF675DEB),
+        screen: const ExamCenterScreen(),
       ),
       (
         title: 'Routines',
         subtitle: 'Class & bell schedule',
         icon: Icons.calendar_today_rounded,
-        color: const Color(0xFF16A34A),
+        color: const Color(0xFF8BC34A),
         screen: const RoutinesScreen(),
       ),
       (
         title: 'Attendance',
         subtitle: 'Board, requests & report',
         icon: Icons.fact_check_rounded,
-        color: const Color(0xFF0EA5E9),
+        color: const Color(0xFF5C50E8),
         screen: const AttendanceScreen(),
       ),
       (
         title: 'Notices',
         subtitle: 'Broadcast alerts',
         icon: Icons.campaign_rounded,
-        color: const Color(0xFFE11D48),
+        color: const Color(0xFF8676F4),
         screen: const NoticesScreen(),
       ),
       (
         title: 'Sibling Req.',
         subtitle: 'Guardian pairings',
         icon: Icons.family_restroom_rounded,
-        color: const Color(0xFF0284C7),
+        color: const Color(0xFF3D4A75),
         screen: const SiblingRequestScreen(),
+      ),
+      (
+        title: 'স্থায়ী delete log',
+        subtitle: 'কারণ ও সম্পূর্ণ audit record',
+        icon: Icons.history_rounded,
+        color: const Color(0xFFB45309),
+        screen: const DeleteLogsScreen(),
       ),
       (
         title: 'Settings',
         subtitle: 'System preferences',
         icon: Icons.tune_rounded,
-        color: const Color(0xFF475569),
+        color: const Color(0xFF5C50E8),
         screen: const SettingsScreen(),
       ),
     ];
 
     return Scaffold(
-      backgroundColor: const Color(0xFFF8FAFC),
+      backgroundColor: const Color(0xFFEEF0F8),
       appBar: AppBar(
         title: const Row(
           children: [
-            Icon(Icons.shield_outlined, size: 22),
+            Image(
+              image: AssetImage('assets/school_logo.png'),
+              width: 26,
+              height: 26,
+              fit: BoxFit.contain,
+            ),
             SizedBox(width: 8),
-            Text('Admin Dashboard', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+            Text(
+              'Admin Dashboard',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+            ),
           ],
         ),
         actions: [
           IconButton(
             tooltip: 'Refresh',
             icon: _loading
-                ? const SizedBox(
+                ? SizedBox(
                     width: 18,
                     height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
                   )
                 : const Icon(Icons.refresh_rounded),
             onPressed: _load,
@@ -226,8 +230,91 @@ class _HomeScreenState extends State<HomeScreen> {
             child: RefreshIndicator(
               onRefresh: _load,
               child: ListView(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 14,
+                ),
                 children: [
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 16),
+                    padding: const EdgeInsets.fromLTRB(20, 20, 20, 18),
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: [
+                          Color(0xFF5148E5),
+                          Color(0xFF675DEB),
+                          Color(0xFF8676F4),
+                        ],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      ),
+                      borderRadius: BorderRadius.circular(24),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFF6659E8).withValues(alpha: .25),
+                          blurRadius: 22,
+                          offset: const Offset(0, 8),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 48,
+                          height: 48,
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: .16),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(
+                              color: Colors.white.withValues(alpha: .3),
+                            ),
+                          ),
+                          child: Container(
+                            width: 38,
+                            height: 38,
+                            decoration: const BoxDecoration(
+                              color: Colors.white,
+                              shape: BoxShape.circle,
+                            ),
+                            padding: const EdgeInsets.all(5),
+                            child: Image.asset(
+                              'assets/school_logo.png',
+                              fit: BoxFit.contain,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'স্কুল পরিচালনা এক নজরে',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                '$dateLabel • শিক্ষার্থী, শিক্ষক ও পরীক্ষার তথ্য',
+                                style: TextStyle(
+                                  color: Colors.white.withValues(alpha: .82),
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const Icon(
+                          Icons.auto_awesome_rounded,
+                          color: Color(0xFFD7F7A0),
+                          size: 24,
+                        ),
+                      ],
+                    ),
+                  ),
                   // Overview Stats Header Row
                   Row(
                     children: [
@@ -235,21 +322,21 @@ class _HomeScreenState extends State<HomeScreen> {
                         label: 'Students',
                         value: _stats?['students'],
                         icon: Icons.people_outline_rounded,
-                        color: const Color(0xFF2563EB),
+                        color: const Color(0xFF5C50E8),
                       ),
                       const SizedBox(width: 10),
                       _statCard(
                         label: 'Teachers',
                         value: _stats?['teachers'],
                         icon: Icons.school_outlined,
-                        color: const Color(0xFF0D9488),
+                        color: const Color(0xFF3D4A75),
                       ),
                       const SizedBox(width: 10),
                       _statCard(
                         label: 'Exams',
                         value: _stats?['exams'],
                         icon: Icons.assignment_outlined,
-                        color: const Color(0xFFEA580C),
+                        color: const Color(0xFF8676F4),
                       ),
                     ],
                   ),
@@ -270,7 +357,11 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                       Text(
                         '${items.length} Modules',
-                        style: TextStyle(fontSize: 12, color: Colors.grey.shade600, fontWeight: FontWeight.w500),
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey.shade600,
+                          fontWeight: FontWeight.w500,
+                        ),
                       ),
                     ],
                   ),
@@ -280,12 +371,13 @@ class _HomeScreenState extends State<HomeScreen> {
                   GridView.builder(
                     shrinkWrap: true,
                     physics: const NeverScrollableScrollPhysics(),
-                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: 2,
-                      mainAxisSpacing: 12,
-                      crossAxisSpacing: 12,
-                      childAspectRatio: 1.25,
-                    ),
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 2,
+                          mainAxisSpacing: 12,
+                          crossAxisSpacing: 12,
+                          childAspectRatio: 1.25,
+                        ),
                     itemCount: items.length,
                     itemBuilder: (context, index) {
                       final item = items[index];
@@ -293,7 +385,9 @@ class _HomeScreenState extends State<HomeScreen> {
                         decoration: BoxDecoration(
                           color: Colors.white,
                           borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: Colors.grey.withValues(alpha: 0.12)),
+                          border: Border.all(
+                            color: Colors.grey.withValues(alpha: 0.12),
+                          ),
                           boxShadow: [
                             BoxShadow(
                               color: Colors.black.withValues(alpha: 0.03),
@@ -317,18 +411,28 @@ class _HomeScreenState extends State<HomeScreen> {
                               padding: const EdgeInsets.all(14),
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
                                 children: [
                                   Row(
-                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
                                     children: [
                                       Container(
                                         padding: const EdgeInsets.all(9),
                                         decoration: BoxDecoration(
-                                          color: item.color.withValues(alpha: 0.12),
-                                          borderRadius: BorderRadius.circular(12),
+                                          color: item.color.withValues(
+                                            alpha: 0.12,
+                                          ),
+                                          borderRadius: BorderRadius.circular(
+                                            12,
+                                          ),
                                         ),
-                                        child: Icon(item.icon, size: 22, color: item.color),
+                                        child: Icon(
+                                          item.icon,
+                                          size: 22,
+                                          color: item.color,
+                                        ),
                                       ),
                                       Icon(
                                         Icons.arrow_forward_ios_rounded,
@@ -338,7 +442,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                     ],
                                   ),
                                   Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
                                       Text(
                                         item.title,
@@ -419,7 +524,10 @@ class _HomeScreenState extends State<HomeScreen> {
                 Container(
                   width: 6,
                   height: 6,
-                  decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+                  decoration: BoxDecoration(
+                    color: color,
+                    shape: BoxShape.circle,
+                  ),
                 ),
               ],
             ),

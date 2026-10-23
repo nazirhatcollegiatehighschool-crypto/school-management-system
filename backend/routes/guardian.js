@@ -6,6 +6,7 @@ const { computeResult } = require('../grading');
 const PDFDocument = require('pdfkit');
 const path = require('path');
 const fs = require('fs');
+const { loadTeacherSignature } = require('../lib/teacher_signatures');
 
 router.use(auth('guardian'));
 
@@ -116,6 +117,21 @@ router.get('/student/:id/attendance', async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
+router.get('/student/:id/daily-reports', async (req, res) => {
+  try {
+    const student = await getApprovedStudent(req.user.id, req.params.id);
+    if (!student) return res.status(403).json({ error: 'Not authorized for this student' });
+    const [rows] = await pool.query(
+      `SELECT r.report_date, r.subject_name, r.homework_status, r.learning_status,
+              r.performance, r.uniform_brought, r.note, r.updated_at,
+              u.name AS teacher_name
+       FROM student_daily_reports r JOIN users u ON u.id=r.teacher_id
+       WHERE r.student_id=? ORDER BY r.report_date DESC, r.updated_at DESC`,
+      [student.id]);
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
 // Today's live status for one child: morning mark + P5 mark + final synthesis.
 router.get('/student/:id/attendance/today', async (req, res) => {
   try {
@@ -201,11 +217,13 @@ router.get('/student/:id/homework', async (req, res) => {
     const stu = await getApprovedStudent(req.user.id, req.params.id);
     if (!stu) return res.status(403).json({ error: 'Not authorized for this student' });
     const [rows] = await pool.query(
-      `SELECT h.id, h.title, h.description, h.due_date,
-              sub.name AS subject_name, u.name AS teacher_name, h.created_at
+      `SELECT h.id, h.title, h.description, h.due_date, h.subject_id,
+              sub.name AS subject_name, u.id AS teacher_id, u.name AS teacher_name,
+              u.phone AS teacher_phone, c.name AS class_name, c.section, h.created_at
        FROM homework h
        LEFT JOIN subjects sub ON h.subject_id = sub.id
        LEFT JOIN users u ON h.created_by = u.id
+       JOIN classes c ON c.id = h.class_id
        WHERE h.class_id = ?
        ORDER BY h.id DESC LIMIT 50`,
       [stu.class_id]
@@ -575,11 +593,13 @@ async function loadResultCardPayload(guardianId, studentId, eventId) {
       `SELECT id, name, designation, signature, signature_name FROM users WHERE role='teacher'
         AND LOWER(TRIM(designation)) IN ('head teacher','headmaster','principal') LIMIT 1`);
     const head = heads[0] || null;
-    const sigUrl = (u) => (u && u.signature ? '/uploads/signatures/' + u.signature : null);
-    signatures = {
-      class_teacher: ct ? { name: ct.name, designation: ct.designation || 'শ্রেণি শিক্ষক', url: sigUrl(ct) } : null,
-      head_teacher: head ? { name: head.name, designation: head.designation || 'প্রধান শিক্ষক', url: sigUrl(head) } : null,
+    const pack = async (u, fallback) => {
+      if (!u) return null;
+      const bytes = await loadTeacherSignature(u.signature);
+      return { name: u.signature_name || u.name, designation: u.designation || fallback,
+        data_base64: bytes ? bytes.toString('base64') : null };
     };
+    signatures = { class_teacher: await pack(ct, 'শ্রেণি শিক্ষক'), head_teacher: await pack(head, 'প্রধান শিক্ষক') };
   } catch (e) { /* signatures optional */ }
   return { student: stu, event, result, promotion, position, dual_position, marksheet_hidden, subject_highest: subjectHighest, attendance, settings, examTypes, signatures };
 }
@@ -745,13 +765,10 @@ router.get('/student/:id/result-card.pdf', async (req, res) => {
     y = Math.max(y + 8, doc.page.height - 150);
     const drawSigBlock = (sig, fallbackTitle, x) => {
       let imgTop = y;
-      if (sig && sig.url) {
+      if (sig && sig.data_base64) {
         try {
-          const p = path.join(__dirname, '..', sig.url.replace(/^\//, ''));
-          if (fs.existsSync(p)) {
-            doc.image(p, x, y, { fit: [110, 42], align: 'center' });
-            imgTop = y + 42;
-          }
+          doc.image(Buffer.from(sig.data_base64, 'base64'), x + 25, y, { fit: [110, 34], align: 'center' });
+          imgTop = y + 34;
         } catch (_) { /* stamp optional */ }
       }
       doc.font(NORMAL).fontSize(9.5).fillColor('#111');

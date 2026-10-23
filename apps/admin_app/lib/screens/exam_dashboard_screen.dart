@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 import '../api.dart';
-import '../pdf/admin_pdfs.dart';
-import '../pdf/app_pdf.dart';
 
 class ExamDashboardScreen extends StatefulWidget {
   const ExamDashboardScreen({super.key});
@@ -11,6 +9,8 @@ class ExamDashboardScreen extends StatefulWidget {
 
 class _ExamDashboardScreenState extends State<ExamDashboardScreen> {
   List _events = [];
+  List _sessions = [];
+  int? _selectedSessionId;
   bool _loading = true;
   String? _error;
   int? _expandedEvent;
@@ -27,6 +27,12 @@ class _ExamDashboardScreenState extends State<ExamDashboardScreen> {
       final r = await Api.get('/admin/exam-dashboard');
       setState(() {
         _events = r['events'] is List ? r['events'] : [];
+        _sessions = r['sessions'] is List ? r['sessions'] : [];
+        if (_selectedSessionId == null || !_sessions.any((s) => (s['id'] as num?)?.toInt() == _selectedSessionId)) {
+          final active = _sessions.where((s) => s['is_active'] == true || s['is_active'] == 1).toList();
+          final defaultSession = active.isNotEmpty ? active.first : (_sessions.isNotEmpty ? _sessions.first : null);
+          _selectedSessionId = (defaultSession?['id'] as num?)?.toInt();
+        }
         _loading = false;
         _error = null;
       });
@@ -34,6 +40,10 @@ class _ExamDashboardScreenState extends State<ExamDashboardScreen> {
       setState(() { _loading = false; _error = e.toString().replaceFirst('Exception: ', ''); });
     }
   }
+
+  List get _sessionEvents => _selectedSessionId == null
+      ? _events
+      : _events.where((e) => (e['session_id'] as num?)?.toInt() == _selectedSessionId).toList();
 
   String _kindLabel(String kind) {
     switch (kind) {
@@ -66,6 +76,65 @@ class _ExamDashboardScreenState extends State<ExamDashboardScreen> {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         backgroundColor: Colors.red,
         content: Text(e.toString().replaceFirst('Exception: ', ''))));
+    }
+  }
+
+  Future<void> _toggleSubjectEntry(int examId, bool open) async {
+    try {
+      await Api.put('/admin/exams/$examId/entry', {'entry_open': open ? 1 : 0});
+      _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        backgroundColor: Colors.red,
+        content: Text(e.toString().replaceFirst('Exception: ', ''))));
+    }
+  }
+
+  Future<void> _deleteEvent(Map event) async {
+    final reasonCtl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('পরীক্ষা মুছে ফেলবেন?'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          Text('${event['name']} এবং এর নম্বর/ফলাফলও মুছে যাবে। সম্পূর্ণ তথ্য ও কারণ স্থায়ী delete log-এ থাকবে।'),
+          const SizedBox(height: 12),
+          TextField(
+            controller: reasonCtl,
+            maxLines: 3,
+            decoration: const InputDecoration(labelText: 'Delete করার কারণ *', border: OutlineInputBorder()),
+          ),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('বাতিল')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () {
+              if (reasonCtl.text.trim().isEmpty) {
+                ScaffoldMessenger.of(dialogContext).showSnackBar(const SnackBar(content: Text('কারণ লিখুন।')));
+                return;
+              }
+              Navigator.pop(dialogContext, true);
+            },
+            child: const Text('স্থায়ীভাবে মুছুন'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    try {
+      await Api.delete('/results/events/${event['id']}', body: {'reason': reasonCtl.text.trim()});
+      if (!mounted) return;
+      setState(() => _expandedEvent = null);
+      await _load();
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('পরীক্ষা delete হয়েছে; full record delete log-এ রাখা হয়েছে।')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        backgroundColor: Colors.red,
+        content: Text(e.toString().replaceFirst('Exception: ', '')),
+      ));
     }
   }
 
@@ -126,21 +195,38 @@ Future<void> _showCoverage(Map ev) async {
                   ? Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
                       const Icon(Icons.event_busy, size: 64, color: Colors.grey),
                       const SizedBox(height: 16),
-                      const Text('No exam sessions found', style: TextStyle(fontSize: 16, color: Colors.grey)),
+                      const Text('কোনো পরীক্ষা নেই। আগে একাডেমিক সেশন তৈরি করুন।', style: TextStyle(fontSize: 16, color: Colors.grey)),
                       const SizedBox(height: 8),
-                      FilledButton.icon(icon: const Icon(Icons.add), label: const Text('Create Session'), onPressed: _showCreateSession),
+                      FilledButton.icon(icon: const Icon(Icons.add), label: const Text('নতুন সেশন'), onPressed: _showCreateSession),
                     ]))
                   : RefreshIndicator(
                       onRefresh: _load,
-                      child: ListView.builder(
+                      child: ListView(
                         padding: const EdgeInsets.all(12),
-                        itemCount: _events.length,
-                        itemBuilder: (_, i) => _buildEventCard(_events[i]),
+                        children: [
+                          if (_sessions.isNotEmpty)
+                            DropdownButtonFormField<int>(
+                              initialValue: _sessions.any((s) => (s['id'] as num?)?.toInt() == _selectedSessionId) ? _selectedSessionId : null,
+                              isExpanded: true,
+                              decoration: const InputDecoration(labelText: 'একাডেমিক সেশন', border: OutlineInputBorder()),
+                              items: _sessions.map<DropdownMenuItem<int>>((s) => DropdownMenuItem<int>(
+                                value: (s['id'] as num).toInt(), child: Text('${s['name']}${s['is_active'] == true || s['is_active'] == 1 ? ' · বর্তমান' : ''}'),
+                              )).toList(),
+                              onChanged: (value) => setState(() => _selectedSessionId = value),
+                            ),
+                          const SizedBox(height: 12),
+                          if (_sessionEvents.isEmpty)
+                            const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 38),
+                              child: Center(child: Text('এই শিক্ষাবর্ষে কোনো পরীক্ষার event নেই।', style: TextStyle(color: Colors.grey))),
+                            ),
+                          for (final event in _sessionEvents) _buildEventCard(event),
+                        ],
                       ),
                     ),
       floatingActionButton: FloatingActionButton.extended(
         icon: const Icon(Icons.add),
-        label: const Text('New Session'),
+        label: const Text('নতুন একাডেমিক সেশন'),
         onPressed: _showCreateSession,
       ),
     );
@@ -152,6 +238,9 @@ Future<void> _showCoverage(Map ev) async {
     final hasEntryOpen = ((ev['entry_open_count'] as num?)?.toInt() ?? 0) > 0;
     final isExpanded = _expandedEvent == ev['id'];
     final eventId = ev['id'] as int;
+    final sessionYear = RegExp(r'(19|20)\d{2}').firstMatch(ev['session_name']?.toString() ?? '')?.group(0);
+    final examYear = ev['year']?.toString();
+    final yearMismatch = sessionYear != null && examYear != null && sessionYear != examYear;
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
@@ -178,11 +267,14 @@ Future<void> _showCoverage(Map ev) async {
                   // Session info
                   Expanded(
                     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Text(ev['name'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                      Text(ev['name']?.toString() ?? 'পরীক্ষা', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
                       const SizedBox(height: 2),
                       Wrap(spacing: 8, children: [
-                        Chip(label: Text('Year: ${ev['year'] ?? '—'}'), backgroundColor: Colors.white, labelStyle: const TextStyle(fontSize: 11)),
-                        Chip(label: Text(ev['session_name'] ?? ''), backgroundColor: Colors.white, labelStyle: const TextStyle(fontSize: 11)),
+                        Chip(label: Text('বছর ${ev['year'] ?? '—'}'), backgroundColor: Colors.white, labelStyle: const TextStyle(fontSize: 11)),
+                        if ((ev['session_name']?.toString() ?? '').isNotEmpty)
+                          Chip(label: Text('সেশন ${ev['session_name']}'), backgroundColor: Colors.white, labelStyle: const TextStyle(fontSize: 11)),
+                        if (yearMismatch)
+                          const Chip(label: Text('বছর মিলছে না', style: TextStyle(fontSize: 11, color: Colors.deepOrange)), backgroundColor: Color(0xFFFFF1E6)),
                         if (published) Chip(label: const Text('Published', style: TextStyle(fontSize: 11, color: Colors.green)), backgroundColor: Colors.green.shade100),
                         if (!published && hasEntryOpen) Chip(label: const Text('Entry Open', style: TextStyle(fontSize: 11, color: Colors.blue)), backgroundColor: Colors.blue.shade100),
                       ]),
@@ -196,12 +288,12 @@ Future<void> _showCoverage(Map ev) async {
                         tooltip: 'Toggle Teacher Entry',
                         onPressed: () => _toggleEntry(ev['id'], hasEntryOpen ? 0 : 1),
                       ),
-                      IconButton(
-                        icon: const Icon(Icons.publish, color: Colors.blue),
-                        tooltip: 'Publish Exam',
-                        onPressed: () => _showPublishDialog(ev),
-                      ),
                     ],
+                    IconButton(
+                      tooltip: 'কারণ লিখে পরীক্ষা delete করুন',
+                      icon: const Icon(Icons.delete_outline_rounded, color: Colors.redAccent),
+                      onPressed: () => _deleteEvent(ev),
+                    ),
                     IconButton(
                       icon: Icon(isExpanded ? Icons.expand_less : Icons.expand_more),
                       onPressed: () => setState(() => _expandedEvent = isExpanded ? null : ev['id']),
@@ -229,13 +321,11 @@ Future<void> _showCoverage(Map ev) async {
 
   Widget _buildEventDetails(Map ev) {
     final classes = ev['classes'] as List? ?? [];
-    final eventId = ev['id'] as int;
-
     if (classes.isEmpty) {
       return Column(children: [
-        const Text('No classes assigned to this session', style: TextStyle(color: Colors.grey)),
+        const Text('এখনও বিষয়ভিত্তিক পরীক্ষা তৈরি হয়নি।', style: TextStyle(color: Colors.grey)),
         const SizedBox(height: 8),
-        FilledButton.icon(icon: const Icon(Icons.settings), label: const Text('Assign Classes'), onPressed: () => _showAssignClasses(ev)),
+        FilledButton.icon(icon: const Icon(Icons.auto_fix_high), label: const Text('বিষয়ভিত্তিক পরীক্ষা তৈরি করুন'), onPressed: () => _autoCreateSubjects(ev)),
       ]);
     }
 
@@ -261,13 +351,11 @@ Future<void> _showCoverage(Map ev) async {
         ),
         const SizedBox(height: 12),
         // Classes list
-        for (final c in classes) _buildClassCard(c, eventId),
+        for (final c in classes) _buildClassCard(c),
         const SizedBox(height: 8),
         // Actions
         Row(children: [
           Expanded(child: OutlinedButton.icon(icon: const Icon(Icons.analytics), label: const Text('Coverage'), onPressed: () => _showCoverage(ev))),
-          const SizedBox(width: 8),
-          Expanded(child: OutlinedButton.icon(icon: const Icon(Icons.picture_as_pdf), label: const Text('All PDFs'), onPressed: () => _generateAllPdfs(ev))),
           const SizedBox(width: 8),
           Expanded(child: FilledButton.icon(icon: const Icon(Icons.auto_fix_high), label: const Text('Auto-Create Missing'), onPressed: () => _autoCreateSubjects(ev))),
         ]),
@@ -280,7 +368,7 @@ Future<void> _showCoverage(Map ev) async {
     Text(label, style: const TextStyle(fontSize: 11, color: Colors.grey)),
   ]);
 
-  Widget _buildClassCard(Map c, int eventId) {
+  Widget _buildClassCard(Map c) {
     final subjectCount = c['subject_count'] as num? ?? 0;
     final subjectsWithMarks = c['subjects_with_marks'] as num? ?? 0;
     final studentCount = c['student_count'] as num? ?? 0;
@@ -311,29 +399,19 @@ Future<void> _showCoverage(Map ev) async {
               children: [
                 LinearProgressIndicator(value: subjPct / 100, backgroundColor: Colors.grey.shade200, color: Colors.blue, minHeight: 6),
                 const SizedBox(height: 4),
-                Text('Subject Progress: $subjectsWithMarks / $subjectCount (${subjPct}%)', style: const TextStyle(fontSize: 12)),
+                Text('Subject Progress: $subjectsWithMarks / $subjectCount ($subjPct%)', style: const TextStyle(fontSize: 12)),
               ],
             ),
           ),
           // Subjects list
-          for (final s in subjects) _buildSubjectRow(s, eventId, c['class_id']),
+          for (final s in subjects) _buildSubjectRow(s),
           // Actions
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: Row(children: [
-              Expanded(child: OutlinedButton.icon(icon: const Icon(Icons.analytics), label: const Text('Coverage'), onPressed: () => _showClassCoverage(context, eventId, c['class_id']))),
-              const SizedBox(width: 8),
-              Expanded(child: OutlinedButton.icon(icon: const Icon(Icons.picture_as_pdf), label: const Text('Class PDF'), onPressed: () => _generateClassPdf(context, eventId, c['class_id']))),
-              const SizedBox(width: 8),
-              Expanded(child: FilledButton.icon(icon: const Icon(Icons.edit), label: const Text('Marks Entry'), onPressed: () => _openMarksEntry(context, c['class_id'], eventId))),
-            ]),
-          ),
         ],
       ),
     );
   }
 
-  Widget _buildSubjectRow(Map s, int eventId, int classId) {
+  Widget _buildSubjectRow(Map s) {
     final entered = s['entered_count'] as num? ?? 0;
     final total = s['student_count'] as num? ?? 0;
     final published = s['exam_published'] == true;
@@ -345,9 +423,19 @@ Future<void> _showCoverage(Map ev) async {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       child: Row(children: [
+        CircleAvatar(
+          radius: 16,
+          backgroundColor: entryOpen && !published ? Colors.green.shade100 : Colors.red.shade100,
+          child: Icon(
+            entryOpen && !published ? Icons.lock_open : Icons.lock,
+            size: 24,
+            color: entryOpen && !published ? Colors.green : Colors.red,
+          ),
+        ),
+        const SizedBox(width: 10),
         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
-            Text(s['subject_name'], style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+            Flexible(child: Text(s['subject_name'], style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13))),
             if (isMine) const Padding(padding: EdgeInsets.only(left: 4), child: Text('(Mine)', style: TextStyle(fontSize: 11, color: Colors.blue))),
           ]),
           Text(
@@ -363,50 +451,65 @@ Future<void> _showCoverage(Map ev) async {
           ),
           child: Text('$entered/$total', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: entered > 0 ? Colors.green.shade800 : Colors.grey.shade700)),
         ),
-        const SizedBox(width: 8),
-        FilledButton.tonal(
-          style: FilledButton.styleFrom(minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap, padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8)),
-          onPressed: closed && !isMine ? null : () => _openSubjectEntry(context, s, classId, eventId),
-          child: Text(published ? 'View' : (isMine ? 'Entry' : 'Open'), style: const TextStyle(fontSize: 11)),
+        const SizedBox(width: 4),
+        Switch(
+          value: entryOpen && !published,
+          onChanged: published ? null : (val) => _toggleSubjectEntry(s['exam_id'] as int, val),
+          activeThumbColor: Colors.green,
+          inactiveThumbColor: Colors.red,
         ),
       ]),
     );
   }
 
   void _showCreateSession() {
-    final nameCtrl = TextEditingController();
-    String kind = 'test';
-    int? sessionId;
-    int? year;
-    showDialog(context: context, builder: (_) => AlertDialog(
-      title: const Text('Create Exam Session'),
-      content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
-        TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: 'Session Name *', border: OutlineInputBorder())),
-        DropdownButtonFormField<String>(initialValue: kind, decoration: const InputDecoration(labelText: 'Kind', border: OutlineInputBorder()),
-          items: ['half_yearly', 'annual', 'pretest', 'test', 'other'].map((k) => DropdownMenuItem(value: k, child: Text(k))).toList(),
-          onChanged: (v) => kind = v!),
-        FutureBuilder<dynamic>(future: Api.get('/admin/sessions'), builder: (_, snap) {
-          if (!snap.hasData) return const SizedBox();
-          final sessions = snap.data as List;
-          return DropdownButtonFormField<int>(initialValue: sessionId, decoration: const InputDecoration(labelText: 'Academic Session', border: OutlineInputBorder()),
-            items: sessions.map<DropdownMenuItem<int>>((s) => DropdownMenuItem(value: s['id'] as int, child: Text(s['name'] as String))).toList(),
-            onChanged: (v) => sessionId = v);
-        }),
-        TextField(decoration: const InputDecoration(labelText: 'Year (e.g., 2026)', border: OutlineInputBorder()), keyboardType: TextInputType.number,
-          onChanged: (v) => year = int.tryParse(v)),
-      ])),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-        FilledButton(onPressed: () async {
-          try {
-            await Api.post('/results/events', {'name': nameCtrl.text.trim(), 'exam_kind': kind, 'session_id': sessionId, 'year': year});
-            Navigator.pop(context);
-            _load();
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Session created')));
-          } catch (e) { ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: Colors.red, content: Text(e.toString()))); }
-        }, child: const Text('Create')),
-      ],
-    ));
+    final yearCtrl = TextEditingController(text: '${DateTime.now().year + 1}');
+    var makeActive = false;
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: const Text('নতুন একাডেমিক সেশন'),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(
+              controller: yearCtrl,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'শিক্ষাবর্ষ', hintText: 'যেমন ২০২৭', border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 10),
+            const Text('সেশন তৈরি হলে Half-Yearly, Annual, Pre-Test ও Test-এর জন্য আলাদা পরীক্ষা স্বয়ংক্রিয়ভাবে তৈরি হবে।', style: TextStyle(fontSize: 12)),
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              value: makeActive,
+              onChanged: (value) => setDialogState(() => makeActive = value ?? false),
+              title: const Text('এটিকে বর্তমান সেশন করুন', style: TextStyle(fontSize: 13)),
+            ),
+          ]),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('বাতিল')),
+            FilledButton(
+              onPressed: () async {
+                final year = int.tryParse(yearCtrl.text.trim());
+                if (year == null || year < 2000 || year > 2200) {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('সঠিক শিক্ষাবর্ষ লিখুন।')));
+                  return;
+                }
+                try {
+                  await Api.post('/admin/sessions', {'name': '$year', 'is_active': makeActive});
+                  if (!mounted) return;
+                  Navigator.pop(dialogContext);
+                  await _load();
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$year শিক্ষাবর্ষ তৈরি হয়েছে।')));
+                } catch (e) {
+                  if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: Colors.red, content: Text(e.toString().replaceFirst('Exception: ', ''))));
+                }
+              },
+              child: const Text('সেশন তৈরি করুন'),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   void _showPublishDialog(Map ev) {
@@ -421,10 +524,6 @@ Future<void> _showCoverage(Map ev) async {
     ));
   }
 
-  void _showAssignClasses(Map ev) {
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Assign Classes - coming soon')));
-  }
-
   Future<void> _autoCreateSubjects(Map ev) async {
     try {
       final r = await Api.post('/admin/auto-create-subject-exams', {'event_id': ev['id']});
@@ -435,26 +534,6 @@ Future<void> _showCoverage(Map ev) async {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: Colors.red, content: Text(e.toString())));
     }
-  }
-
-  void _generateAllPdfs(Map ev) {
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('All PDFs - coming soon')));
-  }
-
-  void _generateClassPdf(BuildContext context, int eventId, int classId) {
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Class PDF - coming soon')));
-  }
-
-  void _showClassCoverage(BuildContext context, int eventId, int classId) {
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Class coverage - coming soon')));
-  }
-
-  void _openMarksEntry(BuildContext context, int classId, int eventId) {
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Marks entry - coming soon')));
-  }
-
-  void _openSubjectEntry(BuildContext context, Map s, int classId, int eventId) {
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Subject entry - coming soon')));
   }
 
   bool _pastDeadline(String raw) {

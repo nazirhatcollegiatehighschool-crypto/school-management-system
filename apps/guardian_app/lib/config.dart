@@ -7,7 +7,7 @@ class Config {
   static const String _defined = String.fromEnvironment('API_URL', defaultValue: 'https://school-management-system-brown-mu.vercel.app');
   static String _override = '';
 
-  static String get serverUrl => _defined;
+  static String get serverUrl => _override.isNotEmpty ? _override : _defined;
   static String get api => '$serverUrl/api';
 
   static const String _key = 'server_url_override';

@@ -115,7 +115,7 @@ async function getUnifiedExamDashboard(req, res) {
       ev.event_ready = eventReady;
     }
     
-    res.json({ events, sessions: await pool.query('SELECT id, name FROM sessions ORDER BY id').then(r => r[0]) });
+    res.json({ events, sessions: await pool.query('SELECT id, name, is_active FROM sessions ORDER BY name DESC').then(r => r[0]) });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 }
 

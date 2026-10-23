@@ -14,6 +14,7 @@ class HomeworkScreen extends StatefulWidget {
 class _HomeworkScreenState extends State<HomeworkScreen> {
   List _homework = [];
   List _classes = [];
+  List _subjects = [];
   String? _error;
   bool _loading = true;
 
@@ -27,7 +28,25 @@ class _HomeworkScreenState extends State<HomeworkScreen> {
   Future<void> _loadClasses() async {
     try {
       final r = await Api.get('/teacher/profile');
-      if (mounted) setState(() => _classes = r['classes']);
+      if (!mounted) return;
+      final classes = <int, Map>{};
+      for (final c in (r['classes'] as List? ?? [])) {
+        final id = int.tryParse('${c['id']}');
+        if (id != null) classes[id] = {
+          ...Map<String, dynamic>.from(c as Map),
+          'class_name': c['class_name'] ?? c['name'],
+        };
+      }
+      for (final s in (r['subjects'] as List? ?? [])) {
+        final id = int.tryParse('${s['class_id']}');
+        if (id != null) classes.putIfAbsent(id, () => {
+          'id': id, 'class_name': s['class_name'], 'section': s['section'],
+        });
+      }
+      setState(() {
+        _classes = classes.values.toList();
+        _subjects = List.from(r['subjects'] ?? const []);
+      });
     } catch (_) {}
   }
 
@@ -45,16 +64,15 @@ class _HomeworkScreenState extends State<HomeworkScreen> {
 
   Future<void> _createHomework() async {
     if (_classes.isEmpty) return;
-    final titleCtrl = TextEditingController();
     final descCtrl = TextEditingController();
-    final dueCtrl = TextEditingController();
     int? classId = _classes.first['id'] as int;
-    DateTime? dueDate;
+    int? subjectId;
+    subjectId = _subjectForClass(classId)?['id'] as int?;
 
     await showDialog(context: context, builder: (ctx) {
       return StatefulBuilder(builder: (ctx, setCtx) {
         return AlertDialog(
-          title: const Text('New Homework'),
+          title: const Text('আজকের পড়া যোগ করুন'),
           content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
             DropdownButtonFormField<int>(
               initialValue: classId,
@@ -62,33 +80,36 @@ class _HomeworkScreenState extends State<HomeworkScreen> {
               items: _classes.map((c) => DropdownMenuItem(
                   value: c['id'] as int,
                   child: Text('${c['class_name']} (${c['section']})'))).toList(),
-              onChanged: (v) => setCtx(() => classId = v),
+              onChanged: (v) => setCtx(() {
+                classId = v;
+                subjectId = _subjectForClass(v)?['id'] as int?;
+              }),
             ),
-            TextField(controller: titleCtrl, decoration: const InputDecoration(labelText: 'Title'),
-                maxLines: 1, autofocus: true),
-            TextField(controller: descCtrl, decoration: const InputDecoration(labelText: 'Description (optional)'),
-                maxLines: 3),
-            TextField(controller: dueCtrl, readOnly: true, onTap: () async {
-              final d = await showDatePicker(context: ctx,
-                  initialDate: dueDate ?? DateTime.now(),
-                  firstDate: DateTime(2020), lastDate: DateTime(2035));
-              if (d != null) {
-                dueDate = d;
-                setCtx(() => dueCtrl.text = d.toIso8601String().substring(0, 10));
-              }
-            }, decoration: const InputDecoration(labelText: 'Due date (optional)')),
+            DropdownButtonFormField<int>(
+              initialValue: subjectId,
+              decoration: const InputDecoration(labelText: 'বিষয়'),
+              items: _subjects.where((s) => '${s['class_id']}' == '$classId').map((s) => DropdownMenuItem<int>(
+                value: s['id'] as int, child: Text('${s['name']}'),
+              )).toList(),
+              onChanged: (v) => setCtx(() => subjectId = v),
+            ),
+            TextField(controller: descCtrl,
+                decoration: const InputDecoration(labelText: 'আজ কী পড়িয়েছেন?', hintText: 'অধ্যায়, পৃষ্ঠা, বিষয়বস্তু বা classwork লিখুন'),
+                minLines: 4, maxLines: 7, autofocus: true),
+            const SizedBox(height: 8),
+            Text('তারিখ আজকের তারিখ হিসেবে নিজে থেকে যুক্ত হবে।', style: TextStyle(color: Colors.blueGrey.shade600, fontSize: 12)),
           ])),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('বাতিল')),
             FilledButton(onPressed: () async {
-              if (titleCtrl.text.trim().isEmpty) return;
+              if (descCtrl.text.trim().isEmpty || subjectId == null) return;
               Navigator.pop(ctx);
               try {
                 final r = await Api.post('/teacher/homework', {
                   'class_id': classId,
-                  'title': titleCtrl.text.trim(),
-                  'description': descCtrl.text.trim().isEmpty ? null : descCtrl.text.trim(),
-                  'due_date': dueDate?.toIso8601String().substring(0, 10),
+                  'subject_id': subjectId,
+                  'title': 'আজকের পড়া',
+                  'description': descCtrl.text.trim(),
                 });
                 _load();
                 if (!mounted) return;
@@ -99,18 +120,25 @@ class _HomeworkScreenState extends State<HomeworkScreen> {
                   return;
                 }
                 ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Homework assigned (push: ${r['push']?['sent'] ?? 'n/a'})')));
+                    const SnackBar(content: Text('আজকের পড়া অভিভাবক অ্যাপে পাঠানো হয়েছে')));
               } catch (e) {
                 if (!mounted) return;
                 ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                     backgroundColor: Colors.red,
                     content: Text(e.toString().replaceFirst('Exception: ', ''))));
               }
-            }, child: const Text('Assign')),
+            }, child: const Text('অভিভাবককে পাঠান')),
           ],
         );
       });
     });
+  }
+
+  Map? _subjectForClass(int? classId) {
+    for (final subject in _subjects) {
+      if ('${subject['class_id']}' == '$classId') return subject as Map;
+    }
+    return null;
   }
 
   Future<void> _sendComplaint() async {
@@ -199,10 +227,10 @@ class _HomeworkScreenState extends State<HomeworkScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Homework & Notices')),
+      appBar: AppBar(title: const Text('আজকের পড়া')),
       floatingActionButton: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.end, children: [
         FloatingActionButton.small(heroTag: 'hw', onPressed: _createHomework,
-            tooltip: 'Assign homework',
+            tooltip: 'আজকের পড়া যোগ করুন',
             child: const Icon(Icons.edit_note)),
         const SizedBox(height: 8),
         FloatingActionButton.small(heroTag: 'comp', onPressed: _sendComplaint,

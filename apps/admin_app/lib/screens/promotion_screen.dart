@@ -97,17 +97,54 @@ class _PromotionScreenState extends State<PromotionScreen>
   String _friendly(Object e) =>
       e.toString().replaceFirst('Exception: ', '');
 
+  int? _yearOf(dynamic value) {
+    final match = RegExp(r'(19|20)\d{2}').firstMatch(value?.toString() ?? '');
+    return match == null ? null : int.tryParse(match.group(0)!);
+  }
+
+  Map? get _activeSession {
+    final active = _sessions.where((s) => s['is_active'] == true || s['is_active'] == 1).toList();
+    if (active.isNotEmpty) return active.first as Map;
+    final sorted = [..._sessions]..sort((a, b) => (_yearOf(b['name']) ?? 0).compareTo(_yearOf(a['name']) ?? 0));
+    return sorted.isEmpty ? null : sorted.first as Map;
+  }
+
+  Map? _eventById(int? id) {
+    for (final event in _events) {
+      if ((event['id'] as num?)?.toInt() == id) return event as Map;
+    }
+    return null;
+  }
+
+  int? _nextSessionFor(Map? event) {
+    if (event == null) return null;
+    final sourceYear = _yearOf(event['year']) ?? _yearOf(event['session_name']);
+    if (sourceYear == null) return null;
+    for (final session in _sessions) {
+      if (_yearOf(session['name']) == sourceYear + 1) {
+        return (session['id'] as num?)?.toInt();
+      }
+    }
+    return null;
+  }
+
   // Only published promotion-source events are usable: Class 10 promotes from
   // a TEST event, Class 6–9 from an ANNUAL event.
   List get _promotionEvents {
     final cls = _selectedClass;
+    if (RegExp(r'ssc', caseSensitive: false).hasMatch(cls?['name']?.toString() ?? '')) return [];
     final isClass10 = cls != null &&
         RegExp(r'class\s*10', caseSensitive: false)
             .hasMatch(cls['name']?.toString() ?? '');
     final needKind = isClass10 ? 'test' : 'annual';
+    final activeSession = _activeSession;
+    final activeSessionId = (activeSession?['id'] as num?)?.toInt();
+    final activeYear = _yearOf(activeSession?['name']);
     return _events.where((e) {
       if (e['is_published'] != 1 && e['is_published'] != true) return false;
-      return e['exam_kind']?.toString() == needKind;
+      if (e['exam_kind']?.toString() != needKind) return false;
+      if (activeSessionId != null && (e['session_id'] as num?)?.toInt() != activeSessionId) return false;
+      return activeYear == null || _yearOf(e['year']) == activeYear;
     }).toList();
   }
 
@@ -116,6 +153,23 @@ class _PromotionScreenState extends State<PromotionScreen>
       if ((c['id'] as num?)?.toInt() == _classId) return c;
     }
     return null;
+  }
+
+  String get _promotionKind {
+    final name = _selectedClass?['name']?.toString() ?? '';
+    return RegExp(r'class\s*10', caseSensitive: false).hasMatch(name) ? 'test' : 'annual';
+  }
+
+  bool get _activeExamYearMismatch {
+    final session = _activeSession;
+    final sessionId = (session?['id'] as num?)?.toInt();
+    final sessionYear = _yearOf(session?['name']);
+    if (sessionId == null || sessionYear == null) return false;
+    return _events.any((event) =>
+        (event['is_published'] == 1 || event['is_published'] == true) &&
+        event['exam_kind']?.toString() == _promotionKind &&
+        (event['session_id'] as num?)?.toInt() == sessionId &&
+        _yearOf(event['year']) != sessionYear);
   }
 
   // ============================================================== TAB 1: RULES
@@ -218,8 +272,8 @@ class _PromotionScreenState extends State<PromotionScreen>
   // ================================================= TAB 2: ELIGIBILITY CALC
 
   Future<void> _calculate() async {
-    if (_classId == null || _eventId == null) {
-      setState(() => _error = 'প্রথমে শ্রেণি এবং পরীক্ষা নির্বাচন করুন');
+    if (_classId == null || _eventId == null || _targetSessionId == null) {
+      setState(() => _error = 'শ্রেণি, প্রকাশিত ফলাফল এবং পরবর্তী শিক্ষাবর্ষ নির্বাচন/তৈরি করুন');
       return;
     }
     setState(() {
@@ -231,6 +285,7 @@ class _PromotionScreenState extends State<PromotionScreen>
       final r = await Api.post('/admin/promotion/calculate', {
         'class_id': _classId,
         'event_id': _eventId,
+        'target_session_id': _targetSessionId,
       });
       if (!mounted) return;
       setState(() {
@@ -254,6 +309,7 @@ class _PromotionScreenState extends State<PromotionScreen>
       await Api.put('/admin/promotion/status/$studentId', {
         'status': status,
         'decision': decision,
+        'target_session_id': _targetSessionId,
         'admin_note': 'Admin override from app',
       });
       if (!mounted) return;
@@ -415,7 +471,7 @@ class _PromotionScreenState extends State<PromotionScreen>
     setState(() => _loading = true);
     try {
       final params = <String, String>{
-        'target_session_id': _targetSessionId.toString()
+        'session_id': _targetSessionId.toString()
       };
       final r = await Api.get('/admin/promotion/history', queryParams: params);
       if (!mounted) return;
@@ -557,7 +613,7 @@ class _PromotionScreenState extends State<PromotionScreen>
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('ছাত্র প্রমোশন ব্যবস্থাপনা'),
+        title: const Text('শ্রেণি উত্তরণ'),
         bottom: TabBar(
           controller: _tabs,
           isScrollable: true,
@@ -614,6 +670,15 @@ class _PromotionScreenState extends State<PromotionScreen>
 
   Widget _topBar() {
     final events = _promotionEvents;
+    final selectedEvent = _eventById(_eventId);
+    final eventYear = selectedEvent == null ? null : (_yearOf(selectedEvent['year']) ?? _yearOf(selectedEvent['session_name']));
+    final targetYear = eventYear == null ? null : eventYear + 1;
+    final nextSessionExists = _targetSessionId != null;
+    final className = _selectedClass?['name']?.toString() ?? '';
+    final classNumber = RegExp(r'(\d+)').firstMatch(className);
+    final destinationName = RegExp(r'class\s*10', caseSensitive: false).hasMatch(className)
+        ? 'SSC Batch'
+        : classNumber == null ? 'পরবর্তী শ্রেণি' : 'Class ${int.parse(classNumber.group(1)!) + 1}';
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
       child: Column(children: [
@@ -633,6 +698,9 @@ class _PromotionScreenState extends State<PromotionScreen>
                 setState(() {
                   _classId = v;
                   _eventId = null;
+                  _targetSessionId = null;
+                  _students = [];
+                  _history = [];
                   _reviewed = false;
                 });
                 _loadRules();
@@ -645,37 +713,49 @@ class _PromotionScreenState extends State<PromotionScreen>
               'পরীক্ষা Event *',
               _eventId,
               events.map((e) => (e['id'] as num).toInt()).toList(),
-              events.map((e) => e['name']?.toString() ?? '').toList(),
+              events.map((e) => '${e['name'] ?? 'পরীক্ষা'} · ${e['year'] ?? e['session_name'] ?? ''}').toList(),
               (v) {
+                final event = _eventById(v);
+                final nextSessionId = _nextSessionFor(event);
                 setState(() {
                   _eventId = v;
+                  _targetSessionId = nextSessionId;
                   _reviewed = false;
-                });
-              },
-            ),
-          ),
-        ]),
-        const SizedBox(height: 4),
-        Row(children: [
-          Expanded(
-            child: _picker(
-              'টার্গেট সেশন',
-              _targetSessionId,
-              _sessions.map((s) => (s['id'] as num).toInt()).toList(),
-              _sessions.map((s) => s['name']?.toString() ?? '').toList(),
-              (v) {
-                setState(() {
-                  _targetSessionId = v;
                   _students = [];
                   _history = [];
                 });
-                _loadStatus();
-                _loadHistory();
+                if (nextSessionId != null) {
+                  _loadStatus();
+                  _loadHistory();
+                }
               },
             ),
           ),
         ]),
-        if (_classId != null && _eventId != null) ...[
+        if (_selectedClass != null) ...[
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.only(top: 2, bottom: 4),
+            padding: const EdgeInsets.all(11),
+            decoration: BoxDecoration(color: const Color(0xFFF0F2FF), borderRadius: BorderRadius.circular(12)),
+            child: Row(children: [
+              const Icon(Icons.trending_up_rounded, color: Color(0xFF4F46E5)),
+              const SizedBox(width: 8),
+              Expanded(child: Text(
+                selectedEvent == null
+                    ? '$className → $destinationName  ·  ${targetYear == null ? 'প্রকাশিত ফলাফল বাছুন' : 'শিক্ষাবর্ষ $targetYear'}'
+                    : '$className → $destinationName  ·  ${eventYear ?? '—'} → ${nextSessionExists ? targetYear : 'পরের সেশন তৈরি করুন'}',
+                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF313B70)),
+              )),
+            ]),
+          ),
+        ],
+        if (_selectedClass != null && events.isEmpty && _activeExamYearMismatch)
+          const Padding(
+            padding: EdgeInsets.only(bottom: 8),
+            child: Text('এই session-এর প্রকাশিত উত্তরণ পরীক্ষার বছর মেলেনি। পরীক্ষা ও ফলাফল-এ event-এর শিক্ষাবর্ষ ঠিক করে আবার চেষ্টা করুন.', style: TextStyle(color: Colors.deepOrange, fontSize: 11)),
+          ),
+        if (_classId != null && _eventId != null && nextSessionExists) ...[
           const SizedBox(height: 4),
           SizedBox(
             width: double.infinity,
@@ -684,6 +764,11 @@ class _PromotionScreenState extends State<PromotionScreen>
               icon: const Icon(Icons.calculate),
               label: const Text('যোগ্যতা ক্যালকুলেট করুন'),
             ),
+          ),
+        ] else if (_classId != null && _eventId != null) ...[
+          const Padding(
+            padding: EdgeInsets.only(bottom: 8),
+            child: Text('আগের শিক্ষাবর্ষের পরের session তৈরি না হওয়া পর্যন্ত promotion হিসাব করা যাবে না। পরীক্ষা ও ফলাফল → নতুন একাডেমিক সেশন থেকে তৈরি করুন।', style: TextStyle(color: Colors.deepOrange, fontSize: 11)),
           ),
         ],
       ]),
@@ -698,40 +783,32 @@ class _PromotionScreenState extends State<PromotionScreen>
           child: Text('প্রথমে শ্রেণি নির্বাচন করুন',
               style: TextStyle(color: Colors.grey)));
     }
+    final sourceRules = _rules.where((r) => r['exam_type']?.toString() == _promotionKind).toList();
     return Column(children: [
       Padding(
         padding: const EdgeInsets.all(12),
-        child: Row(children: [
-          Expanded(
-            child: FilledButton.icon(
-              onPressed: () => _saveRule('annual'),
-              icon: const Icon(Icons.save),
-              label: const Text('Annual'),
-            ),
+        child: SizedBox(
+          width: double.infinity,
+          child: FilledButton.icon(
+            onPressed: () => _saveRule(_promotionKind),
+            icon: const Icon(Icons.tune_rounded),
+            label: Text('${_promotionKind.toUpperCase()} ফলাফলের উত্তরণ নিয়ম'),
           ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: FilledButton.icon(
-              onPressed: () => _saveRule('test'),
-              icon: const Icon(Icons.save),
-              label: const Text('Test'),
-            ),
-          ),
-        ]),
+        ),
       ),
       const SizedBox(height: 8),
       Expanded(
         child: _rulesLoading
             ? const Center(child: CircularProgressIndicator())
-            : _rules.isEmpty
+            : sourceRules.isEmpty
                 ? const Center(
-                    child: Text('কোনো নিয়ম নেই',
+                    child: Text('এই শ্রেণির উত্তরণের নিয়ম এখনো সংরক্ষণ করা হয়নি',
                         style: TextStyle(color: Colors.grey)))
                 : ListView.builder(
                     padding: const EdgeInsets.all(12),
-                    itemCount: _rules.length,
+                    itemCount: sourceRules.length,
                     itemBuilder: (_, i) {
-                      final r = _rules[i];
+                      final r = sourceRules[i];
                       final isSource = r['is_promotion_source'] == true ||
                           r['is_promotion_source'] == 1;
                       return Card(

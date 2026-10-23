@@ -113,6 +113,19 @@ class _HomeScreenState extends State<HomeScreen> {
           Expanded(child: screens[_tab]),
         ],
       ),
+      bottomNavigationBar: NavigationBar(
+        height: 68,
+        backgroundColor: Colors.white,
+        indicatorColor: const Color(0xFFE9E7FF),
+        selectedIndex: const [0, 4, 2, 6].indexOf(_tab).clamp(0, 3).toInt(),
+        onDestinationSelected: (i) => setState(() => _tab = const [0, 4, 2, 6][i]),
+        destinations: const [
+          NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home_rounded), label: 'হোম'),
+          NavigationDestination(icon: Icon(Icons.calendar_month_outlined), selectedIcon: Icon(Icons.calendar_month_rounded), label: 'রুটিন'),
+          NavigationDestination(icon: Icon(Icons.fact_check_outlined), selectedIcon: Icon(Icons.fact_check_rounded), label: 'হাজিরা'),
+          NavigationDestination(icon: Icon(Icons.person_outline_rounded), selectedIcon: Icon(Icons.person_rounded), label: 'প্রোফাইল'),
+        ],
+      ),
     );
   }
 }
@@ -133,18 +146,15 @@ class _TeacherTopBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
     return SafeArea(
       child: Container(
         height: 60,
         padding: const EdgeInsets.symmetric(horizontal: 12),
-        decoration: BoxDecoration(
-          color: scheme.primary,
-          boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.18), blurRadius: 8, offset: const Offset(0, 2))],
-        ),
+        decoration: BoxDecoration(color: Colors.white,
+          boxShadow: [BoxShadow(color: const Color(0xFF202A49).withValues(alpha: 0.07), blurRadius: 10, offset: const Offset(0, 2))]),
         child: Row(children: [
           Builder(builder: (ctx) => IconButton(
-                icon: const Icon(Icons.menu_rounded, color: Colors.white),
+                icon: const Icon(Icons.grid_view_rounded, color: Color(0xFF353B56)),
                 tooltip: 'Menu',
                 onPressed: () => _openNavMenu(ctx),
               )),
@@ -154,14 +164,20 @@ class _TeacherTopBar extends StatelessWidget {
               Container(
                 width: 34, height: 34,
                 decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.18),
+                    color: const Color(0xFFE9E7FF),
                     borderRadius: BorderRadius.circular(10)),
-                child: const Icon(Icons.school_rounded, color: Colors.white, size: 20),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Padding(
+                    padding: const EdgeInsets.all(4),
+                    child: Image.asset('assets/school_logo.png', fit: BoxFit.contain),
+                  ),
+                ),
               ),
               const SizedBox(width: 8),
               Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-                const Text('Teacher Panel', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 14)),
-                Text(teacherName, style: TextStyle(color: Colors.white.withValues(alpha: 0.75), fontSize: 11),
+                const Text('Teacher Panel', style: TextStyle(color: Color(0xFF202A49), fontWeight: FontWeight.w800, fontSize: 14)),
+                Text(teacherName, style: TextStyle(color: Colors.blueGrey.shade500, fontSize: 11),
                     overflow: TextOverflow.ellipsis),
               ]),
             ]),
@@ -196,14 +212,14 @@ class _TeacherTopBar extends StatelessWidget {
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 border: Border.all(
-                    color: activeTab == 6 ? Colors.white : Colors.white.withValues(alpha: 0.35),
+                    color: activeTab == 6 ? const Color(0xFF5C50E8) : Colors.grey.shade300,
                     width: activeTab == 6 ? 2.5 : 1.2),
               ),
               child: CircleAvatar(
                 radius: 15,
-                backgroundColor: Colors.white,
+                backgroundColor: const Color(0xFFE9E7FF),
                 child: Text(teacherName.isNotEmpty ? teacherName[0].toUpperCase() : 'T',
-                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: scheme.primary)),
+                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Color(0xFF5C50E8))),
               ),
             ),
           ),
@@ -220,7 +236,7 @@ class _TeacherTopBar extends StatelessWidget {
       (0, Icons.dashboard_rounded, 'হোম', 'Dashboard — আজকের সারসংক্ষেপ'),
       (1, Icons.quiz_rounded, 'Exams', 'Marks entry ও Events'),
       (2, Icons.fact_check_rounded, 'হাজিরা', 'Attendance ও analytics'),
-      (3, Icons.edit_note_rounded, 'Homework', 'বাড়ির কাজ'),
+      (3, Icons.menu_book_rounded, 'আজকের পড়া', 'পড়ানোর তথ্য'),
       (4, Icons.calendar_month_rounded, 'রুটিন', 'সাপ্তাহিক রুটিন'),
       (5, Icons.group_rounded, 'Students', 'Class-এর শিক্ষার্থী'),
       (6, Icons.person_rounded, 'Profile', 'প্রোফাইল ও সেটিংস'),
@@ -303,18 +319,18 @@ class _TopAction extends StatelessWidget {
         curve: Curves.easeInOut,
         padding: EdgeInsets.symmetric(horizontal: active ? 12 : 9, vertical: 7),
         decoration: BoxDecoration(
-          color: active ? Colors.white : Colors.white.withValues(alpha: 0.14),
+          color: active ? const Color(0xFFE9E7FF) : const Color(0xFFF2F3F8),
           borderRadius: BorderRadius.circular(999),
         ),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(icon, size: 17, color: active ? Theme.of(context).colorScheme.primary : Colors.white),
+          Icon(icon, size: 17, color: const Color(0xFF5C50E8)),
           AnimatedSize(
             duration: const Duration(milliseconds: 250),
             curve: Curves.easeInOut,
             child: active
                 ? Padding(padding: const EdgeInsets.only(left: 5),
                     child: Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800,
-                        color: Theme.of(context).colorScheme.primary)))
+                        color: const Color(0xFF5C50E8))))
                 : const SizedBox.shrink(),
           ),
         ]),

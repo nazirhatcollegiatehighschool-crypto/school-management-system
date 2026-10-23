@@ -106,7 +106,7 @@ class Api {
       http.Response res;
       try {
         res = await http
-            .get(Uri.parse(Config.api + path), headers: _headers)
+            .get(Uri.parse(Config.api + path), headers: _conditionalHeaders(path))
             .timeout(_timeout);
       } catch (e) {
         if (!isNetworkError(e)) rethrow;
@@ -114,13 +114,19 @@ class Api {
         await Future.delayed(Duration(
             milliseconds: 1000 + (DateTime.now().microsecond % 400)));
         res = await http
-            .get(Uri.parse(Config.api + path), headers: _headers)
+            .get(Uri.parse(Config.api + path), headers: _conditionalHeaders(path))
             .timeout(_timeout);
+      }
+      if (res.statusCode == 304) {
+        sync.markRequestOk();
+        final cached = sync.cacheGet(path);
+        if (cached != null) return jsOne(cached);
+        res = await http.get(Uri.parse(Config.api + path), headers: _headers).timeout(_timeout);
       }
       final data = _handle(res);
       sync.markRequestOk();
       // keep a copy for offline reads
-      unawaited(sync.cachePut(path, jsOne(data)));
+      unawaited(sync.cachePut(path, jsOne(data), etag: res.headers['etag']));
       return data;
     } catch (e) {
       if (isNetworkError(e)) {
@@ -130,6 +136,11 @@ class Api {
       }
       rethrow;
     }
+  }
+
+  static Map<String, String> _conditionalHeaders(String path) {
+    final etag = sync.etagFor(path);
+    return etag == null ? _headers : {..._headers, 'If-None-Match': etag};
   }
 
   /// Accurate user-facing message for a failed mutation: distinguishes

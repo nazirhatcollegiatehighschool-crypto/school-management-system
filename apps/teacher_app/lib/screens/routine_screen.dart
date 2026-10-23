@@ -6,7 +6,9 @@ const _days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'];
 
 class RoutineScreen extends StatefulWidget {
   final dynamic teacher;
-  const RoutineScreen({super.key, required this.teacher});
+  final int? initialTeacherId;
+  final String? initialTeacherName;
+  const RoutineScreen({super.key, required this.teacher, this.initialTeacherId, this.initialTeacherName});
   @override
   State<RoutineScreen> createState() => _RoutineScreenState();
 }

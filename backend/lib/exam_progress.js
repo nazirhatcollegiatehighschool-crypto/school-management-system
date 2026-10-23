@@ -326,11 +326,34 @@ async function autoCreateSubjectExams(req, res) {
     const [[ev]] = await pool.query('SELECT * FROM exam_events WHERE id=?', [event_id]);
     if (!ev) return res.status(404).json({ error: 'Event not found' });
     
-    const [classes] = await pool.query(
-      `SELECT DISTINCT c.id, c.name FROM classes c
-       JOIN exams x ON x.class_id = c.id WHERE x.event_id = ?`,
-      [event_id]
-    );
+    // Which classes this exam kind applies to:
+    //   Test / Pre-Test        -> Class 10 only
+    //   Annual / Half Yearly   -> Class 6, 7, 8, 9 (not Class 10)
+    //   other / custom         -> classes already attached to the event,
+    //                             else every class that has subjects.
+    let classes = [];
+    const kind = ev.exam_kind;
+    if (kind === 'special_model_test') {
+      [classes] = await pool.query(
+        `SELECT DISTINCT id, name FROM classes WHERE name = 'SSC Batch' ORDER BY name`);
+    } else if (kind === 'test' || kind === 'pretest') {
+      [classes] = await pool.query(
+        `SELECT DISTINCT id, name FROM classes WHERE name = 'Class 10' ORDER BY name`);
+    } else if (kind === 'annual' || kind === 'half_yearly') {
+      [classes] = await pool.query(
+        `SELECT DISTINCT id, name FROM classes
+         WHERE name IN ('Class 6','Class 7','Class 8','Class 9') ORDER BY name`);
+    } else {
+      [classes] = await pool.query(
+        `SELECT DISTINCT c.id, c.name FROM classes c
+         JOIN exams x ON x.class_id = c.id WHERE x.event_id = ? ORDER BY c.name`,
+        [event_id]);
+      if (!classes.length) {
+        [classes] = await pool.query(
+          `SELECT DISTINCT c.id, c.name FROM classes c
+           JOIN subjects sub ON sub.class_id = c.id ORDER BY c.name`);
+      }
+    }
     
     let created = 0;
     for (const cls of classes) {
@@ -356,8 +379,19 @@ async function autoCreateSubjectExams(req, res) {
         }
       }
     }
+
+    // Record the event <-> class mapping (used by teacher/guardian gating).
+    if (classes.length) {
+      try {
+        const vals = classes.map(() => '(?,?)').join(',');
+        const params = [];
+        for (const cls of classes) { params.push(Number(event_id), cls.id); }
+        await pool.query(
+          `INSERT IGNORE INTO exam_event_classes (event_id, class_id) VALUES ${vals}`, params);
+      } catch (e) { /* table may not exist on older schema */ }
+    }
     
-    res.json({ ok: true, created });
+    res.json({ ok: true, created, classes: classes.length });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 }
 

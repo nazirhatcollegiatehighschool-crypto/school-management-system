@@ -111,10 +111,12 @@ class _LoginScreenState extends State<LoginScreen> {
                           ),
                         ],
                       ),
-                      child: const Icon(
-                        Icons.family_restroom_rounded,
-                        size: 46,
-                        color: Colors.white,
+                      child: Container(
+                        width: 62,
+                        height: 62,
+                        decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
+                        padding: const EdgeInsets.all(7),
+                        child: Image.asset('assets/school_logo.png', fit: BoxFit.contain),
                       ),
                     ),
                   ),

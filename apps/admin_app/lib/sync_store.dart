@@ -47,6 +47,10 @@ class SyncStore extends ChangeNotifier {
   static const int _failsBeforeOffline = 3;
 
   Map<String, dynamic> _cache = {};
+  // HTTP validators let the server return 304 when a cached response has not
+  // changed. This keeps the durable payload on-device and avoids re-downloading
+  // unchanged school datasets on every screen visit.
+  Map<String, String> _etags = {};
   List<Map<String, dynamic>> _outbox = [];
   List<Map<String, dynamic>> _errors = [];
   // Optimistic overlays: queued mutations are ALSO mirrored onto the on-device
@@ -247,6 +251,7 @@ class SyncStore extends ChangeNotifier {
       if (await f.exists()) {
         final j = jsonDecode(await f.readAsString());
         _cache = (j['cache'] as Map?)?.cast<String, dynamic>() ?? {};
+        _etags = (j['etags'] as Map?)?.map((k, v) => MapEntry('$k', '$v')) ?? {};
         _outbox = (j['outbox'] as List?)?.cast<Map<String, dynamic>>() ?? [];
         _errors = (j['errors'] as List?)?.cast<Map<String, dynamic>>() ?? [];
         final ov = j['overlays'];
@@ -266,15 +271,19 @@ class SyncStore extends ChangeNotifier {
     try {
       final dir = await getApplicationSupportDirectory();
       final f = File('${dir.path}/sync_store.json');
-      await f.writeAsString(jsonEncode({'cache': _cache, 'outbox': _outbox, 'errors': _errors, 'overlays': _overlays}));
+      await f.writeAsString(jsonEncode({'cache': _cache, 'etags': _etags, 'outbox': _outbox, 'errors': _errors, 'overlays': _overlays}));
     } catch (_) {}
   }
 
   String _keyOf(String path) => 'GET $path';
 
   /// Store a successful GET response for offline reads.
-  Future<void> cachePut(String path, dynamic data) async {
+  String? etagFor(String path) => _etags[_keyOf(path)];
+
+  /// Store a successful GET response and its validator for later conditional reads.
+  Future<void> cachePut(String path, dynamic data, {String? etag}) async {
     _cache[_keyOf(path)] = data;
+    if (etag != null && etag.isNotEmpty) _etags[_keyOf(path)] = etag;
 
     if (_cache.length > 80) {
       // drop oldest half by insertion order (dart keeps insertion order)
@@ -296,6 +305,7 @@ class SyncStore extends ChangeNotifier {
 
   Future<void> cacheDel(String path) async {
     _cache.remove(_keyOf(path));
+    _etags.remove(_keyOf(path));
     await _save();
   }
 
@@ -377,6 +387,7 @@ class SyncStore extends ChangeNotifier {
 
   Future<void> clear() async {
     _cache = {};
+    _etags = {};
     _outbox = [];
     _errors = [];
     pending.value = 0;

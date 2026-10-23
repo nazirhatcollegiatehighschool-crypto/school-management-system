@@ -26,9 +26,10 @@ const STMTS = [
   )`,
   `CREATE UNIQUE INDEX IF NOT EXISTS uq_editreq_pending
    ON mark_edit_requests (mark_id) WHERE status = 'pending'`,
+  `DROP INDEX IF EXISTS uq_event_kind_year`,
   `CREATE UNIQUE INDEX IF NOT EXISTS uq_event_kind_year
    ON exam_events (exam_kind, year)
-   WHERE exam_kind IN ('half_yearly','annual','pretest','test') AND year IS NOT NULL`,
+   WHERE exam_kind IN ('half_yearly','annual','pretest','test','special_model_test') AND year IS NOT NULL`,
 ];
 
 (async () => {

@@ -367,6 +367,87 @@ class _ReportTabState extends State<_ReportTab> {
     }
   }
 
+  Future<void> _showActivity(Map student) async {
+    final sid = student['student_id'];
+    final month = widget.date.substring(0, 7);
+    try {
+      final r = await Api.get('/attendance/guardian/$sid?month=$month');
+      if (!mounted) return;
+      final records = (r is Map && r['records'] is List) ? r['records'] as List : [];
+      final summary = r is Map ? r['summary'] as Map? : null;
+      final s = summary ?? {};
+      showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        builder: (_) => DraggableScrollableSheet(
+          initialChildSize: 0.7, maxChildSize: 0.95,
+          expand: false,
+          builder: (_, scroll) => Container(
+            padding: const EdgeInsets.all(16),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('${student['name'] ?? ''} — হাজিরার বিস্তারিত',
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 4),
+              Text('মাস: $month · উপস্থিত ${s['present_days'] ?? 0} · দেরি ${s['late_days'] ?? 0} · '
+                  'ছুটি ${s['leave_days'] ?? 0} · অনুপস্থিত ${s['absent_days'] ?? 0} · '
+                  '${s['percent'] ?? 0}%',
+                  style: const TextStyle(fontSize: 12, color: Colors.black54)),
+              const Divider(),
+              Expanded(
+                child: records.isEmpty
+                    ? const Center(child: Text('এই মাসে কোনো রেকর্ড নেই'))
+                    : ListView.builder(
+                        controller: scroll,
+                        itemCount: records.length,
+                        itemBuilder: (_, i) {
+                          final a = records[i];
+                          final st = '${a['status'] ?? a['final_state'] ?? ''}';
+                          final sess = a['session'] == 'p5' ? '৫ম পিরিয়ড' : 'সকাল';
+                          final remark = '${a['remark'] ?? ''}'.trim();
+                          return ListTile(
+                            dense: true,
+                            title: Text('${a['date'].toString().substring(0, 10)} · $sess'),
+                            subtitle: Text([
+                              if (a['recorded_by'] != null) 'নিয়েছেন: ${a['recorded_by']}',
+                              if (remark.isNotEmpty) 'নোট: $remark',
+                            ].join(' · '), style: const TextStyle(fontSize: 12)),
+                            trailing: Text(_statusLabel(st),
+                                style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold,
+                                    color: _statusColor(st))),
+                          );
+                        },
+                      ),
+              ),
+            ]),
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))));
+    }
+  }
+
+  String _statusLabel(String st) => switch (st) {
+    'present' => 'উপস্থিত',
+    'absent' => 'অনুপস্থিত',
+    'late' => 'দেরি',
+    'leave' => 'ছুটি',
+    'early_departure_with_leave' => 'ছুটি নিয়ে প্রস্থান',
+    'early_departure_no_leave' => 'ছুটি ছাড়া প্রস্থান',
+    _ => st,
+  };
+
+  Color _statusColor(String st) => switch (st) {
+    'present' => Colors.green,
+    'absent' => Colors.red,
+    'late' => Colors.orange,
+    'leave' => Colors.blue,
+    'early_departure_with_leave' || 'early_departure_no_leave' => Colors.purple,
+    _ => Colors.grey,
+  };
+
   Future<void> _export() async {
     try {
       final r = await Api.get('/attendance/admin/export');
@@ -390,7 +471,7 @@ class _ReportTabState extends State<_ReportTab> {
         child: Row(children: [
           Expanded(
             child: DropdownButtonFormField<int>(
-              value: _classId,
+              initialValue: _classId,
               decoration: const InputDecoration(labelText: 'Class', border: OutlineInputBorder(), isDense: true),
               items: _classes.map<DropdownMenuItem<int>>((c) {
                 final id = int.tryParse('${c['id']}') ?? 0;
@@ -420,6 +501,7 @@ class _ReportTabState extends State<_ReportTab> {
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                     child: ListTile(
                       dense: true,
+                      onTap: () => _showActivity(Map<String, dynamic>.from(s as Map)),
                       leading: CircleAvatar(child: Text('${s['roll'] ?? ''}', style: const TextStyle(fontSize: 12))),
                       title: Text('${s['name'] ?? ''}', style: const TextStyle(fontWeight: FontWeight.w600)),
                       subtitle: Text('${s['present'] ?? 0}P ${s['late'] ?? 0}L ${s['absent'] ?? 0}A ${s['leave'] ?? 0}Lv · ${s['school_days'] ?? 0} দিন',

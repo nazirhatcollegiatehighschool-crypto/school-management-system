@@ -75,23 +75,26 @@ class Api {
 
   static Future<dynamic> get(String path, {Map<String, String>? queryParams}) async {
     final uri = Uri.parse(Config.api + path).replace(queryParameters: queryParams);
+    final cachePath = queryParams == null || queryParams.isEmpty
+        ? path
+        : '$path?${(queryParams.keys.toList()..sort()).map((k) => '${Uri.encodeQueryComponent(k)}=${Uri.encodeQueryComponent(queryParams[k]!)}').join('&')}';
     // Offline-first: serve the locally stored copy immediately instead of
     // waiting for a slow network timeout.
     if (sync.isOffline) {
-      final cached = sync.cacheGet(path);
+      final cached = sync.cacheGet(cachePath);
       if (cached != null) return jsOne(cached);
     }
     // Server known-down (recent probe failed): don't hang 25s, serve cache.
     // Manual refresh paths use refreshCache(), which always re-probes.
     if (!sync.isOffline && sync.serverKnownDown()) {
-      final cached = sync.cacheGet(path);
+      final cached = sync.cacheGet(cachePath);
       if (cached != null) return jsOne(cached);
     }
     try {
       http.Response res;
       try {
         res = await http
-            .get(uri, headers: _headers)
+            .get(uri, headers: _conditionalHeaders(cachePath))
             .timeout(_timeout);
       } catch (e) {
         if (!isNetworkError(e)) rethrow;
@@ -99,22 +102,35 @@ class Api {
         await Future.delayed(Duration(
             milliseconds: 1000 + (DateTime.now().microsecond % 400)));
         res = await http
-            .get(uri, headers: _headers)
+            .get(uri, headers: _conditionalHeaders(cachePath))
             .timeout(_timeout);
+      }
+      if (res.statusCode == 304) {
+        sync.markRequestOk();
+        final cached = sync.cacheGet(cachePath);
+        if (cached != null) return jsOne(cached);
+        // A validator without its payload can occur after storage cleanup;
+        // retry once unconditionally so the UI never receives an empty 304.
+        res = await http.get(uri, headers: _headers).timeout(_timeout);
       }
       final data = _handle(res);
       sync.markRequestOk();
       // keep a copy for offline reads
-      unawaited(sync.cachePut(path, jsOne(data)));
+      unawaited(sync.cachePut(cachePath, jsOne(data), etag: res.headers['etag']));
       return data;
     } catch (e) {
       if (isNetworkError(e)) {
         sync.markRequestFailed();
-        final cached = sync.cacheGet(path);
+        final cached = sync.cacheGet(cachePath);
         if (cached != null) return jsOne(cached);
       }
       rethrow;
     }
+  }
+
+  static Map<String, String> _conditionalHeaders(String path) {
+    final etag = sync.etagFor(path);
+    return etag == null ? _headers : {..._headers, 'If-None-Match': etag};
   }
 
   /// Accurate user-facing message for a failed mutation: distinguishes
@@ -163,10 +179,11 @@ class Api {
     }
   }
 
-  static Future<dynamic> delete(String path) async {
+  static Future<dynamic> delete(String path, {Map<String, dynamic>? body}) async {
     try {
       final res = await http
-          .delete(Uri.parse(Config.api + path), headers: _headers)
+          .delete(Uri.parse(Config.api + path), headers: _headers,
+              body: body == null ? null : jsonEncode(body))
           .timeout(_timeout);
       final data = _handle(res);
       sync.markRequestOk();
@@ -174,7 +191,7 @@ class Api {
     } catch (e) {
       if (isNetworkError(e)) {
         sync.markRequestFailed();
-        await sync.enqueue('DELETE', path, null);
+        await sync.enqueue('DELETE', path, body);
         return {'offline_queued': true};
       }
       rethrow;

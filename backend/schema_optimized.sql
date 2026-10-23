@@ -103,6 +103,7 @@ CREATE TABLE IF NOT EXISTS `students` (
   `section` VARCHAR(20) DEFAULT NULL,
   `status` VARCHAR(20) NOT NULL DEFAULT 'active',
   `session_id` INT DEFAULT NULL,
+  `receives_scholarship` TINYINT(1) NOT NULL DEFAULT 0,
   `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY `uq_student_code` (`student_code`),
   UNIQUE KEY `uq_roll` (`class_id`,`roll`),

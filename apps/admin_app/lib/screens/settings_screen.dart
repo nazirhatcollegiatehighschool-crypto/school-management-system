@@ -68,15 +68,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.image,
         allowedExtensions: ['jpg', 'jpeg', 'png', 'webp'],
-        withData: false,
+        withData: true,
       );
       if (result == null || result.files.isEmpty) return;
 
       setState(() { _logoLoading = true; _error = null; _msg = null; });
 
       final file = result.files.first;
-      if (file.path == null) {
-        setState(() { _logoLoading = false; _error = 'File path not available'; });
+      if (file.bytes == null && file.path == null) {
+        setState(() { _logoLoading = false; _error = 'ফাইলটি পড়া যায়নি। PNG/JPG/WebP ছবি আবার বাছুন।'; });
         return;
       }
 
@@ -84,7 +84,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final uri = Uri.parse(Config.api + '/admin/settings/logo');
       final request = http.MultipartRequest('POST', uri);
       request.headers['Authorization'] = 'Bearer ${Api.token}';
-      request.files.add(await http.MultipartFile.fromPath('logo', file.path!));
+      if (file.bytes != null) {
+        request.files.add(http.MultipartFile.fromBytes(
+          'logo',
+          file.bytes!,
+          filename: file.name,
+        ));
+      } else {
+        request.files.add(await http.MultipartFile.fromPath('logo', file.path!, filename: file.name));
+      }
       final streamed = await request.send().timeout(const Duration(seconds: 30));
       final resp = await http.Response.fromStream(streamed);
 
@@ -176,6 +184,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             ],
                           ),
                           const SizedBox(height: 12),
+                          Text(
+                            'স্বচ্ছ ব্যাকগ্রাউন্ডসহ PNG লোগো দিলে সবচেয়ে ভালো দেখাবে। JPG/PNG/WebP, সর্বোচ্চ ২ MB।',
+                            style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+                          ),
+                          const SizedBox(height: 12),
                           if (_logoUrl != null && _logoUrl!.isNotEmpty)
                             Center(
                               child: Container(
@@ -187,7 +200,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 child: ClipRRect(
                                   borderRadius: BorderRadius.circular(8),
                                   child: Image.network(
-                                    Config.downloadBase + _logoUrl!,
+                                    _logoUrl!.startsWith('http://') || _logoUrl!.startsWith('https://')
+                                        ? _logoUrl!
+                                        : Config.downloadBase + _logoUrl!,
                                     fit: BoxFit.contain,
                                     errorBuilder: (_, __, ___) =>
                                         const Icon(Icons.broken_image, size: 60, color: Colors.grey),

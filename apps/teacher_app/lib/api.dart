@@ -77,9 +77,11 @@ class Api {
   /// One bounded retry for safe (idempotent) reads when the first attempt hit
   /// a transient network error. Never retries 4xx/5xx responses — only real
   /// transport failures — so we can't duplicate work or hammer the server.
-  static Future<http.Response> _getOnce(String path) => http
-      .get(Uri.parse(Config.api + path), headers: _headers)
-      .timeout(_timeout);
+  static Future<http.Response> _getOnce(String path) {
+    final etag = sync.etagFor(path);
+    final headers = etag == null ? _headers : {..._headers, 'If-None-Match': etag};
+    return http.get(Uri.parse(Config.api + path), headers: headers).timeout(_timeout);
+  }
 
   static Future<dynamic> get(String path) async {
     // Offline-first: serve the locally stored copy immediately instead of
@@ -105,10 +107,16 @@ class Api {
             milliseconds: 1000 + (DateTime.now().microsecond % 400)));
         res = await _getOnce(path);
       }
+      if (res.statusCode == 304) {
+        sync.markRequestOk();
+        final cached = sync.cacheGet(path);
+        if (cached != null) return jsOne(cached);
+        res = await http.get(Uri.parse(Config.api + path), headers: _headers).timeout(_timeout);
+      }
       final data = _handle(res);
       sync.markRequestOk();
       // keep a copy for offline reads
-      unawaited(sync.cachePut(path, jsOne(data)));
+      unawaited(sync.cachePut(path, jsOne(data), etag: res.headers['etag']));
       return data;
     } catch (e) {
       if (isNetworkError(e)) {
@@ -320,6 +328,23 @@ class Api {
     } catch (_) {
       sync.markRequestFailed();
       return null;
+    }
+  }
+
+  /// Read security-sensitive exam visibility directly from the server.
+  /// Unlike offline-first [get], this never falls back to an old cached value.
+  static Future<dynamic> getFresh(String path) async {
+    try {
+      final res = await http
+          .get(Uri.parse(Config.api + path), headers: _headers)
+          .timeout(_timeout);
+      final data = _handle(res);
+      sync.markRequestOk();
+      await sync.cachePut(path, jsOne(data));
+      return data;
+    } catch (e) {
+      if (isNetworkError(e)) sync.markRequestFailed();
+      rethrow;
     }
   }
 
