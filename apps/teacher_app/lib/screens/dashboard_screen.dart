@@ -5,19 +5,17 @@ import 'package:flutter/material.dart';
 
 import '../api.dart';
 import '../class_alerts.dart';
-import '../widgets/offline_sync_banner.dart';
+import '../routine_roster_targets.dart';
 import 'class_students_screen.dart';
 import 'attendance_screen.dart';
 import 'exams_screen.dart';
 import 'exam_detail_screen.dart';
 import 'event_list_screen.dart';
 import 'student_progress_screen.dart';
-import 'event_detail_screen.dart';
 import 'homework_screen.dart';
+import 'written_complaint_screen.dart';
 import 'routine_screen.dart';
 import 'who_is_free_screen.dart';
-
-const _days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'];
 
 class DashboardScreen extends StatefulWidget {
   final dynamic teacher;
@@ -31,7 +29,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
   List _exams = [];
   List _classes = [];
   List _routineEntries = [];
-  List _events = [];
   bool _loading = true;
   String? _error;
 
@@ -48,11 +45,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _loading = true;
       _error = null;
       _exams = [];
-      _events = [];
     });
     List exams = [];
     List routine = _routineEntries;
-    List events = [];
     Map<String, dynamic> profile = {};
     void apply() {
       if (!mounted) return;
@@ -60,7 +55,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _exams = exams;
         _classes = (profile['classes'] as List? ?? []);
         _routineEntries = routine;
-        _events = events;
         _loading = false;
       });
     }
@@ -76,10 +70,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
             profile = r as Map<String, dynamic>;
             apply();
           }
-        }),
-        Api.getFresh('/teacher/events').then((r) {
-          events = r is List ? r.where(_isOpenEvent).toList() : [];
-          apply();
         }),
         Api.loadCachedFirst('/routine/teacher/mine', (r) {
           routine = r is List ? r : [];
@@ -98,8 +88,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
-  bool _isEnabled(dynamic value) => value == true || value == 1 || value == '1';
-
   bool _isOpenAdminExam(dynamic item) {
     if (item is! Map || item['status'] == 'published') return false;
     final flag = item['entry_open'];
@@ -107,11 +95,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     // Older teacher-created exams may not have an event or explicit flag.
     return flag != null || item['event_id'] == null;
   }
-
-  bool _isOpenEvent(dynamic item) =>
-      item is Map &&
-      _isEnabled(item['entry_open']) &&
-      !_isEnabled(item['is_published']);
 
   int _schoolDayOf(DateTime d) {
     if (d.weekday == 7) return 0;
@@ -145,6 +128,109 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   void _open(BuildContext context, Widget screen) {
     Navigator.push(context, MaterialPageRoute(builder: (_) => screen));
+  }
+
+  Future<RoutineRosterTarget?> _chooseRoutineTarget(
+    List<RoutineRosterTarget> targets, {
+    required String title,
+  }) {
+    if (targets.length == 1) return Future.value(targets.first);
+    if (targets.isEmpty) return Future.value(null);
+    return showDialog<RoutineRosterTarget>(
+      context: context,
+      builder: (dialogContext) => SimpleDialog(
+        title: Text(title),
+        children: [
+          for (final target in targets)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(dialogContext, target),
+              child: Text(target.label),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openLiveStudents(
+    RoutineAlert routine,
+    List<RoutineRosterTarget> targets,
+  ) async {
+    final target = await _chooseRoutineTarget(
+      targets,
+      title: 'চলমান class-এর section বাছুন',
+    );
+    if (!mounted || target == null) return;
+    _open(
+      context,
+      StudentProgressScreen(
+        classId: target.classId,
+        classLabel: target.label,
+        subjectName: routine.subject,
+        showUniform: false,
+      ),
+    );
+  }
+
+  Future<void> _openLiveAttendance(List<RoutineRosterTarget> targets) async {
+    final target = await _chooseRoutineTarget(
+      targets,
+      title: 'চলমান class-এর attendance নিন',
+    );
+    if (!mounted || target == null) return;
+    _open(
+      context,
+      AttendanceScreen(teacher: widget.teacher, initialClassId: target.classId),
+    );
+  }
+
+  Future<void> _openUniformReport() async {
+    if (_classes.isEmpty) return;
+    final classId = await showDialog<int>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Uniform report — class বাছুন'),
+        children: [
+          for (final c in _classes)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, int.tryParse('${c['id']}')),
+              child: Text(
+                '${c['name'] ?? c['class_name'] ?? 'Class'} '
+                '${c['section'] ?? c['group_name'] ?? ''}',
+              ),
+            ),
+        ],
+      ),
+    );
+    if (!mounted || classId == null) return;
+    final classRow = _classes.firstWhere(
+      (c) => int.tryParse('${c['id']}') == classId,
+    );
+    var subjectName = 'Class Teacher';
+    for (final entry in _routineEntries) {
+      final sectionMatch = (entry['sections'] as List? ?? []).any(
+        (section) => int.tryParse('${section['class_id']}') == classId,
+      );
+      final groupMatch = (entry['groups'] as List? ?? []).any(
+        (group) => int.tryParse('${group['class_id']}') == classId,
+      );
+      if (sectionMatch || groupMatch) {
+        subjectName =
+            '${entry['subject'] ?? entry['subject_name'] ?? subjectName}';
+        break;
+      }
+    }
+    final section = classRow['section'] ?? classRow['group_name'] ?? '';
+    _open(
+      context,
+      StudentProgressScreen(
+        classId: classId,
+        classLabel:
+            '${classRow['name'] ?? classRow['class_name'] ?? 'Class'} $section',
+        subjectName: subjectName,
+        showUniform: false,
+        uniformOnly: true,
+      ),
+    );
   }
 
   @override
@@ -199,7 +285,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     dateText:
                         '${today.day} ${_monthName(today.month)}, ${today.year}',
                     isClassTeacher: isClassTeacher,
-                    pendingCount: myPending.length,
                     truantCount: 0,
                   ),
                   const SizedBox(height: 12),
@@ -250,7 +335,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       Expanded(
                         child: _QuickAction(
                           icon: Icons.edit_note_rounded,
-                          title: 'নম্বর দিন',
+                          title: 'Marks entry',
                           tint: const Color(0xFF3D4A75),
                           onTap: () => _open(
                             context,
@@ -260,6 +345,33 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       ),
                     ],
                   ),
+                  if (isClassTeacher) ...[
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _QuickAction(
+                            icon: Icons.checkroom_rounded,
+                            title: 'Uniform report',
+                            tint: const Color(0xFF0F8B72),
+                            onTap: _openUniformReport,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: _QuickAction(
+                            icon: Icons.report_gmailerrorred_rounded,
+                            title: 'লিখিত অভিযোগ',
+                            tint: const Color(0xFFCA4650),
+                            onTap: () =>
+                                _open(context, const WrittenComplaintScreen()),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        const Expanded(child: SizedBox()),
+                      ],
+                    ),
+                  ],
                   const SizedBox(height: 10),
                   SizedBox(
                     width: double.infinity,
@@ -278,75 +390,47 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   const SizedBox(height: 18),
 
                   // ===== Live & Upcoming Period widget =====
-                  Builder(
-                    builder: (context) {
-                      final routine =
-                          ClassAlertService.instance.snapshot.value.routine;
-                      int? attClassId;
-                      int? progressClassId;
-                      if (routine != null) {
-                        for (final e in _routineEntries) {
-                          if (e['id'] != routine.id) continue;
-                          final classIds = <int>{};
-                          for (final s in (e['sections'] as List?) ?? []) {
-                            classIds.add(s['class_id'] as int);
-                          }
-                          for (final g in (e['groups'] as List?) ?? []) {
-                            classIds.add(g['class_id'] as int);
-                          }
-                          if (classIds.isNotEmpty)
-                            progressClassId = classIds.first;
-                          for (final c in _classes) {
-                            if (classIds.contains(c['id'])) {
-                              attClassId = c['id'] as int;
-                              break;
-                            }
-                          }
-                          break;
-                        }
-                      }
+                  ValueListenableBuilder<ClassAlertSnapshot>(
+                    valueListenable: ClassAlertService.instance.snapshot,
+                    builder: (context, snap, _) {
+                      final routine = snap.routine;
+                      final routineEntry = routineEntryForId(
+                        _routineEntries,
+                        routine?.id,
+                      );
+                      final targets = routineRosterTargets(routineEntry);
+                      final teacherClassIds = _classes
+                          .map((classRow) => int.tryParse('${classRow['id']}'))
+                          .whereType<int>()
+                          .toSet();
+                      final attendanceTargets = targets
+                          .where(
+                            (target) =>
+                                teacherClassIds.contains(target.classId),
+                          )
+                          .toList();
+                      final now = DateTime.now();
                       final nowSec =
-                          DateTime.now().hour * 3600 +
-                          DateTime.now().minute * 60 +
-                          DateTime.now().second;
-                      return ValueListenableBuilder<ClassAlertSnapshot>(
-                        valueListenable: ClassAlertService.instance.snapshot,
-                        builder: (_, snap, _) => _LiveUpcomingCard(
-                          snapshot: snap,
-                          nowSec: nowSec,
-                          isWeekend: isWeekend,
-                          onOpenRoutine: () => _open(
-                            context,
-                            RoutineScreen(teacher: widget.teacher),
-                          ),
-                          attendanceClassId: attClassId,
-                          progressClassId: progressClassId,
-                          onOpenStudents: progressClassId == null
-                              ? null
-                              : () => _open(
-                                  context,
-                                  StudentProgressScreen(
-                                    classId: progressClassId!,
-                                    classLabel: routine!.classLabel,
-                                    subjectName: routine.subject,
-                                  ),
-                                ),
-                          onTakeAttendance: attClassId != null && isClassTeacher
-                              ? () => _open(
-                                  context,
-                                  AttendanceScreen(
-                                    teacher: widget.teacher,
-                                    initialClassId: attClassId,
-                                  ),
-                                )
-                              : null,
+                          now.hour * 3600 + now.minute * 60 + now.second;
+                      return _LiveUpcomingCard(
+                        snapshot: snap,
+                        nowSec: nowSec,
+                        isWeekend: isWeekend,
+                        onOpenRoutine: () => _open(
+                          context,
+                          RoutineScreen(teacher: widget.teacher),
                         ),
+                        hasStudentTargets: targets.isNotEmpty,
+                        onOpenStudents: routine == null || targets.isEmpty
+                            ? null
+                            : () => _openLiveStudents(routine, targets),
+                        onTakeAttendance:
+                            isClassTeacher && attendanceTargets.isNotEmpty
+                            ? () => _openLiveAttendance(attendanceTargets)
+                            : null,
                       );
                     },
                   ),
-                  const SizedBox(height: 12),
-
-                  const OfflineSyncBanner(),
                   const SizedBox(height: 12),
 
                   // ===== মার্কস এন্ট্রি — আমার করণীয় (Admin Created Exams) =====
@@ -702,138 +786,17 @@ class _MarkingTasksCard extends StatelessWidget {
   }
 }
 
-// ===================== Running event coverage tile =====================
-// Test-Exam year rule: event rows show "Test Exam 2025" (year included);
-// tap opens the subject-wise breakdown (entry per subject).
-class _EventCoverageTile extends StatelessWidget {
-  final dynamic event;
-  final VoidCallback onTap;
-  const _EventCoverageTile({required this.event, required this.onTap});
-
-  String get _titleYear {
-    final name = '${event['name'] ?? ''}';
-    final year = event['year']?.toString() ?? '';
-    if (year.isNotEmpty && !name.contains(year)) return '$name $year';
-    return name;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final classes = (event['my_classes'] as List?) ?? const [];
-    int stuDone = 0, stuTotal = 0, subDone = 0, subTotal = 0;
-    for (final c in classes) {
-      stuDone += (c['students_with_marks'] as num?)?.toInt() ?? 0;
-      stuTotal += (c['student_count'] as num?)?.toInt() ?? 0;
-      subDone += (c['subjects_with_marks'] as num?)?.toInt() ?? 0;
-      subTotal += (c['subject_count'] as num?)?.toInt() ?? 0;
-    }
-    final pct = subTotal > 0 ? (subDone / subTotal).clamp(0.0, 1.0) : 0.0;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(14),
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: Colors.blue.withValues(alpha: 0.18)),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.02),
-              blurRadius: 6,
-              offset: const Offset(0, 2),
-            ),
-          ],
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    _titleYear,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w800,
-                      fontSize: 14,
-                    ),
-                  ),
-                ),
-                if (event['is_published'] == 1 || event['is_published'] == true)
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 3,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.green.shade100,
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                    child: Text(
-                      'Published',
-                      style: TextStyle(
-                        fontSize: 10.5,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.green.shade800,
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 2),
-            const Text(
-              'tap করলে subject-wise entry দেখা যাবে',
-              style: TextStyle(fontSize: 11, color: Colors.black45),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              '📚 $subDone/$subTotal subject  •  👥 $stuDone/$stuTotal student',
-              style: TextStyle(
-                fontSize: 12,
-                color: Colors.blueGrey.shade600,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(height: 6),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(6),
-              child: LinearProgressIndicator(
-                value: pct,
-                minHeight: 6,
-                backgroundColor: Colors.blue.withValues(alpha: 0.12),
-                color: Colors.blue,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ===================== World-class hero + workspace menu =====================
-// Menu-first rationale (Fitts + Hick + Miller 7±2):
-//  - ONE navigation surface (no drawer/bottom-nav/top-tab triple mapping).
-//  - 6 workspace cards (≤7 chunks) ordered by daily workflow:
-//    হাজিরা → মার্কস → Homework → রুটিন → Students → ফ্রি শিক্ষক।
-//  - Each card carries LIVE status (pending count / today's count), so the
-//    teacher never opens a module just to discover "nothing to do".
-//  - Premium depth: layered gradient hero, glass stat chips, per-card accent
-//    gradient icon wells + soft colored shadows.
 class _WorldHero extends StatelessWidget {
   final dynamic teacher;
   final String greeting;
   final String dateText;
   final bool isClassTeacher;
-  final int pendingCount;
   final int truantCount;
   const _WorldHero({
     required this.teacher,
     required this.greeting,
     required this.dateText,
     required this.isClassTeacher,
-    required this.pendingCount,
     required this.truantCount,
   });
 
@@ -955,25 +918,15 @@ class _WorldHero extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 14),
-          Row(
-            children: [
-              _GlassChip(
-                icon: Icons.edit_document,
-                label: pendingCount == 0
-                    ? 'Entry সম্পূর্ণ 🎉'
-                    : '$pendingCount টি entry বাকি',
-                strong: pendingCount > 0,
-              ),
-              const SizedBox(width: 8),
-              if (truantCount > 0)
-                _GlassChip(
-                  icon: Icons.warning_amber_rounded,
-                  label: '$truantCount জন পলাতক!',
-                  strong: true,
-                  alert: true,
-                ),
-            ],
-          ),
+          if (truantCount > 0) ...[
+            const SizedBox(height: 12),
+            _GlassChip(
+              icon: Icons.warning_amber_rounded,
+              label: '$truantCount জন পলাতক!',
+              strong: true,
+              alert: true,
+            ),
+          ],
         ],
       ),
     );
@@ -1114,34 +1067,56 @@ class _SecondaryToolsCard extends StatelessWidget {
     padding: const EdgeInsets.all(14),
     decoration: BoxDecoration(
       color: Colors.white,
-      borderRadius: BorderRadius.circular(18),
+      borderRadius: BorderRadius.circular(22),
+      border: Border.all(color: const Color(0xFFE8EDF3)),
+      boxShadow: [
+        BoxShadow(
+          color: const Color(0xFF102A43).withValues(alpha: .045),
+          blurRadius: 18,
+          offset: const Offset(0, 7),
+        ),
+      ],
     ),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'অন্যান্য কাজ',
-          style: TextStyle(
-            fontSize: 14,
-            fontWeight: FontWeight.w800,
-            color: Color(0xFF18213A),
+        const Padding(
+          padding: EdgeInsets.fromLTRB(3, 1, 3, 11),
+          child: Text(
+            'দ্রুত সেবা',
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w900,
+              color: Color(0xFF18213A),
+            ),
           ),
         ),
-        const SizedBox(height: 5),
-        _ToolRow(
+        _SecondaryFeatureCard(
           icon: Icons.menu_book_rounded,
-          label: 'আজকের পড়া',
+          title: 'আজকের পড়া',
+          subtitle: 'আজকের পাঠ লিখুন ও অভিভাবককে জানান',
+          color: const Color(0xFF7654D8),
+          softColor: const Color(0xFFF1EDFF),
           onTap: onHomework,
         ),
-        if (onStudents != null)
-          _ToolRow(
+        if (onStudents != null) ...[
+          const SizedBox(height: 9),
+          _SecondaryFeatureCard(
             icon: Icons.groups_rounded,
-            label: 'শিক্ষার্থী তালিকা',
+            title: 'শিক্ষার্থী তালিকা',
+            subtitle: 'আমার class-এর শিক্ষার্থী দেখুন',
+            color: const Color(0xFF3155A6),
+            softColor: const Color(0xFFEDF2FF),
             onTap: onStudents!,
           ),
-        _ToolRow(
-          icon: Icons.access_time_rounded,
-          label: 'কে ফ্রি?',
+        ],
+        const SizedBox(height: 9),
+        _SecondaryFeatureCard(
+          icon: Icons.access_time_filled_rounded,
+          title: 'Resting Teacher',
+          subtitle: 'দিন ও period অনুযায়ী বিশ্রামে থাকা শিক্ষক দেখুন',
+          color: const Color(0xFF0B8A78),
+          softColor: const Color(0xFFE8F7F3),
           onTap: onFree,
         ),
       ],
@@ -1149,26 +1124,90 @@ class _SecondaryToolsCard extends StatelessWidget {
   );
 }
 
-class _ToolRow extends StatelessWidget {
+class _SecondaryFeatureCard extends StatelessWidget {
   final IconData icon;
-  final String label;
+  final String title;
+  final String subtitle;
+  final Color color;
+  final Color softColor;
   final VoidCallback onTap;
-  const _ToolRow({
+
+  const _SecondaryFeatureCard({
     required this.icon,
-    required this.label,
+    required this.title,
+    required this.subtitle,
+    required this.color,
+    required this.softColor,
     required this.onTap,
   });
+
   @override
-  Widget build(BuildContext context) => ListTile(
-    contentPadding: EdgeInsets.zero,
-    dense: true,
-    leading: Icon(icon, color: const Color(0xFF6559E9)),
-    title: Text(
-      label,
-      style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+  Widget build(BuildContext context) => Material(
+    color: Colors.white,
+    borderRadius: BorderRadius.circular(18),
+    child: InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(18),
+      child: Container(
+        constraints: const BoxConstraints(minHeight: 82),
+        padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 12),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: color.withValues(alpha: .19)),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 48,
+              height: 48,
+              decoration: BoxDecoration(
+                color: softColor,
+                borderRadius: BorderRadius.circular(15),
+              ),
+              child: Icon(icon, color: color, size: 25),
+            ),
+            const SizedBox(width: 13),
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      color: color,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    subtitle,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Color(0xFF64748B),
+                      fontSize: 11.5,
+                      height: 1.25,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Container(
+              width: 30,
+              height: 30,
+              decoration: BoxDecoration(
+                color: softColor,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(Icons.arrow_forward_rounded, color: color, size: 17),
+            ),
+          ],
+        ),
+      ),
     ),
-    trailing: const Icon(Icons.chevron_right_rounded),
-    onTap: onTap,
   );
 }
 
@@ -1214,236 +1253,21 @@ class _GlassChip extends StatelessWidget {
   }
 }
 
-class _WorkspaceMenu extends StatelessWidget {
-  final bool isClassTeacher;
-  final int pendingMarks;
-  final VoidCallback onExams;
-  final VoidCallback? onAttendance;
-  final VoidCallback onHomework;
-  final VoidCallback onRoutine;
-  final VoidCallback? onStudents;
-  final VoidCallback onWhoIsFree;
-  const _WorkspaceMenu({
-    required this.isClassTeacher,
-    required this.pendingMarks,
-    required this.onExams,
-    required this.onAttendance,
-    required this.onHomework,
-    required this.onRoutine,
-    required this.onStudents,
-    required this.onWhoIsFree,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final cards = [
-      _WsCard(
-        icon: Icons.fact_check_rounded,
-        title: 'হাজিরা',
-        sub: 'সকাল 10:15–11:10 • P5 2:00–2:45',
-        gradient: const [Color(0xFF0D9488), Color(0xFF0F766E)],
-        status: isClassTeacher ? null : 'শুধু class teacher',
-        enabled: isClassTeacher,
-        onTap: onAttendance,
-      ),
-      _WsCard(
-        icon: Icons.quiz_rounded,
-        title: 'Exams ও মার্কস',
-        sub: pendingMarks > 0
-            ? '$pendingMarks টি entry বাকি'
-            : 'সব entry সম্পূর্ণ',
-        gradient: const [Color(0xFFF59E0B), Color(0xFFD97706)],
-        badge: pendingMarks > 0 ? '$pendingMarks' : null,
-        onTap: onExams,
-      ),
-      _WsCard(
-        icon: Icons.edit_note_rounded,
-        title: 'আজকের পড়া',
-        sub: 'আজ কী পড়িয়েছেন লিখুন ও অভিভাবককে জানান',
-        gradient: const [Color(0xFF8B5CF6), Color(0xFF6D28D9)],
-        onTap: onHomework,
-      ),
-      _WsCard(
-        icon: Icons.calendar_month_rounded,
-        title: 'রুটিন',
-        sub: 'সাপ্তাহিক ক্লাস সূচি',
-        gradient: const [Color(0xFF3B82F6), Color(0xFF1D4ED8)],
-        onTap: onRoutine,
-      ),
-      _WsCard(
-        icon: Icons.group_rounded,
-        title: 'Students',
-        sub: isClassTeacher ? 'আমার class-এর শিক্ষার্থী' : 'শুধু class teacher',
-        gradient: const [Color(0xFF10B981), Color(0xFF047857)],
-        enabled: isClassTeacher,
-        onTap: onStudents,
-      ),
-      _WsCard(
-        icon: Icons.access_time_rounded,
-        title: 'কে ফ্রি?',
-        sub: 'এই মুহূর্তে ফাঁকা শিক্ষক',
-        gradient: const [Color(0xFFEC4899), Color(0xFFBE1858)],
-        onTap: onWhoIsFree,
-      ),
-    ];
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 2,
-        mainAxisSpacing: 10,
-        crossAxisSpacing: 10,
-        childAspectRatio: 1.55,
-      ),
-      itemCount: cards.length,
-      itemBuilder: (_, i) => cards[i],
-    );
-  }
-}
-
-class _WsCard extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String sub;
-  final List<Color> gradient;
-  final String? badge;
-  final String? status;
-  final bool enabled;
-  final VoidCallback? onTap;
-  const _WsCard({
-    required this.icon,
-    required this.title,
-    required this.sub,
-    required this.gradient,
-    this.badge,
-    this.status,
-    this.enabled = true,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final card = Container(
-      padding: const EdgeInsets.all(13),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: gradient[0].withValues(alpha: 0.22)),
-        boxShadow: [
-          BoxShadow(
-            color: gradient[0].withValues(alpha: enabled ? 0.14 : 0.04),
-            blurRadius: 14,
-            offset: const Offset(0, 5),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: enabled
-                        ? gradient
-                        : [Colors.grey.shade300, Colors.grey.shade400],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
-                  borderRadius: BorderRadius.circular(13),
-                  boxShadow: [
-                    BoxShadow(
-                      color: gradient[0].withValues(
-                        alpha: enabled ? 0.35 : 0.0,
-                      ),
-                      blurRadius: 8,
-                      offset: const Offset(0, 3),
-                    ),
-                  ],
-                ),
-                child: Icon(icon, color: Colors.white, size: 21),
-              ),
-              const Spacer(),
-              if (badge != null)
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 9,
-                    vertical: 3,
-                  ),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFDC2626),
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                  child: Text(
-                    badge!,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-            ],
-          ),
-          const Spacer(),
-          Text(
-            title,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 14.5,
-              fontWeight: FontWeight.w800,
-              color: enabled ? Colors.grey.shade900 : Colors.grey,
-            ),
-          ),
-          const SizedBox(height: 1),
-          Text(
-            status ?? sub,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 11,
-              color: enabled ? Colors.blueGrey.shade500 : Colors.grey,
-            ),
-          ),
-        ],
-      ),
-    );
-    if (!enabled || onTap == null) {
-      return Opacity(opacity: 0.75, child: card);
-    }
-    return Material(
-      color: Colors.transparent,
-      borderRadius: BorderRadius.circular(20),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(20),
-        child: card,
-      ),
-    );
-  }
-}
-
-// ===================== Live & Upcoming period =====================
 class _LiveUpcomingCard extends StatelessWidget {
   final ClassAlertSnapshot snapshot;
   final int nowSec;
   final bool isWeekend;
   final VoidCallback onOpenRoutine;
-  final int? attendanceClassId;
   final VoidCallback? onTakeAttendance;
-  final int? progressClassId;
+  final bool hasStudentTargets;
   final VoidCallback? onOpenStudents;
   const _LiveUpcomingCard({
     required this.snapshot,
     required this.nowSec,
     required this.isWeekend,
     required this.onOpenRoutine,
-    this.attendanceClassId,
     this.onTakeAttendance,
-    this.progressClassId,
+    this.hasStudentTargets = false,
     this.onOpenStudents,
   });
 
@@ -1502,7 +1326,6 @@ class _LiveUpcomingCard extends StatelessWidget {
     final isCountdown = phase == 'countdown';
     final idle = phase == 'idle';
     const liveColor = Color(0xFF16A34A);
-    const warnColor = Color(0xFFD97706);
 
     double progress = 0;
     if (live) {
@@ -1635,7 +1458,7 @@ class _LiveUpcomingCard extends StatelessWidget {
               color: Colors.white,
             ),
           ),
-          if (progressClassId != null && onOpenStudents != null) ...[
+          if (hasStudentTargets && onOpenStudents != null) ...[
             const SizedBox(height: 5),
             InkWell(
               onTap: live ? onOpenStudents : null,

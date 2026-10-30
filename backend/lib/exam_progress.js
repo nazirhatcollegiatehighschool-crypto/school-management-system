@@ -156,13 +156,13 @@ async function importMarks(req, res) {
             throw Object.assign(new Error(`Mark for student ${r.student_id} is locked`), { status: 403 });
           }
           await conn.query(
-            `UPDATE marks SET marks=?, total=?, cq=?, mcq=?, practical=?, written=?, ca=?, comment=?, recorded_by=?, recorded_at=NOW(), edit_until=DATE_ADD(NOW(), INTERVAL 5 HOUR) WHERE id=?`,
+            `UPDATE marks SET marks=?, total=?, cq=?, mcq=?, practical=?, written=?, ca=?, comment=?, recorded_by=?, recorded_at=NOW(), edit_until=NULL WHERE id=?`,
             [effectiveMarks, r.total, r.cq, r.mcq, r.practical, r.written, r.ca, r.comment, req.user.id, existing[0].id]
           );
         } else {
           await conn.query(
             `INSERT INTO marks (student_id, exam_id, marks, total, cq, mcq, practical, written, ca, comment, recorded_by, recorded_at, edit_until)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(),DATE_ADD(NOW(), INTERVAL 5 HOUR))`,
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(),NULL)`,
             [r.student_id, exam_id, effectiveMarks, r.total, r.cq, r.mcq, r.practical, r.written, r.ca, r.comment, req.user.id]
           );
         }
@@ -259,61 +259,55 @@ async function updateExamDates(req, res) {
 // Analytics API
 async function getAnalytics(req, res) {
   try {
-    const { event_id, class_id, session_id, compare_session_id } = req.query;
-    
-    // Overall pass % per class
+    const eventId = req.query.event_id ? Number(req.query.event_id) : null;
+    const classId = req.query.class_id ? Number(req.query.class_id) : null;
+    let sessionId = req.query.session_id ? Number(req.query.session_id) : null;
+    const [sessions] = await pool.query('SELECT id,name FROM sessions ORDER BY name DESC');
+    if (!sessionId && sessions.length) sessionId = Number(sessions[0].id);
+    if (sessionId && !sessions.some(s => Number(s.id) === sessionId)) {
+      return res.status(400).json({ error: 'Academic session not found.' });
+    }
+    const params = [sessionId];
+    let filters = 'e.session_id=?';
+    if (eventId) { filters += ' AND e.id=?'; params.push(eventId); }
+    if (classId) { filters += ' AND x.class_id=?'; params.push(classId); }
+    const [exams] = await pool.query(
+      `SELECT DISTINCT e.id AS event_id,e.name AS exam_name,e.exam_kind,e.year,e.is_published
+       FROM exam_events e JOIN exams x ON x.event_id=e.id AND x.status='published'
+       WHERE ${filters} AND e.is_published=1 ORDER BY e.year DESC,e.id`, params);
+    const rowsParams = [sessionId];
+    let rowFilters = 'e.session_id=?';
+    if (eventId) { rowFilters += ' AND e.id=?'; rowsParams.push(eventId); }
+    if (classId) { rowFilters += ' AND x.class_id=?'; rowsParams.push(classId); }
+    const [students] = await pool.query(
+      `SELECT e.id AS event_id,e.name AS exam_name,e.year,x.class_id,c.name AS class_name,c.section,
+         s.id AS student_id,s.name AS student_name,s.roll,s.student_code,
+         COALESCE(SUM(m.marks),0) AS marks_obtained,COALESCE(SUM(m.total),0) AS marks_full,
+         r.final_gpa,r.result_status,r.combined_position,r.section_position
+       FROM exam_events e JOIN exams x ON x.event_id=e.id AND x.status='published'
+       JOIN classes c ON c.id=x.class_id
+       JOIN students s ON s.id IN (SELECT student_id FROM marks WHERE exam_id=x.id)
+       JOIN marks m ON m.exam_id=x.id AND m.student_id=s.id
+       LEFT JOIN results r ON r.student_id=s.id AND r.exam_id=e.id
+       WHERE ${rowFilters}
+       GROUP BY e.id,e.name,e.year,x.class_id,c.name,c.section,s.id,s.name,s.roll,s.student_code,
+         r.final_gpa,r.result_status,r.combined_position,r.section_position
+       ORDER BY e.year DESC,e.id,c.name,c.section,s.roll`, rowsParams);
     const [classStats] = await pool.query(
-      `SELECT c.id, c.name, c.section, c.group_name,
-        COUNT(DISTINCT s.id) AS total_students,
-        COUNT(DISTINCT CASE WHEN r.result_status = 'PASSED' THEN s.id END) AS passed,
-        ROUND(COUNT(DISTINCT CASE WHEN r.result_status = 'PASSED' THEN s.id END) * 100.0 / 
-              NULLIF(COUNT(DISTINCT s.id), 0), 2) AS pass_pct,
-        ROUND(AVG(r.final_gpa), 2) AS avg_gpa
-       FROM classes c
-       LEFT JOIN students s ON s.class_id = c.id
-       LEFT JOIN results r ON r.student_id = s.id ${event_id ? 'AND r.exam_id = ' + event_id : ''}
-       ${class_id ? 'WHERE c.id = ' + class_id : ''}
-       GROUP BY c.id, c.name, c.section, c.group_name
-       ORDER BY c.name, c.section`,
-      []
-    );
-    
-    // Subject-wise pass % per class
-    const [subjectStats] = await pool.query(
-      `SELECT c.id AS class_id, c.name AS class_name, c.section,
-        sub.name AS subject_name,
-        COUNT(DISTINCT s.id) AS total,
-        COUNT(DISTINCT CASE WHEN r.final_gpa IS NOT NULL THEN s.id END) AS with_result,
-        ROUND(AVG(r.final_gpa), 2) AS avg_gpa
-       FROM classes c
-       LEFT JOIN students s ON s.class_id = c.id
-       LEFT JOIN exams e ON e.class_id = c.id ${event_id ? 'AND e.event_id = ' + event_id : ''}
-       LEFT JOIN subjects sub ON sub.id = e.subject_id
-       LEFT JOIN marks m ON m.exam_id = e.id AND m.student_id = s.id
-       LEFT JOIN results r ON r.student_id = s.id ${event_id ? 'AND r.exam_id = ' + event_id : ''}
-       ${class_id ? 'WHERE c.id = ' + class_id : ''}
-       GROUP BY c.id, c.name, c.section, sub.name
-       ORDER BY c.name, c.section, sub.name`,
-      []
-    );
-    
-    // Teacher workload
-    const [teacherStats] = await pool.query(
-      `SELECT u.id, u.name, u.phone,
-        COUNT(DISTINCT sub.id) AS subject_count,
-        COUNT(DISTINCT e.id) AS exam_count,
-        COUNT(DISTINCT m.student_id) AS marks_entered
-       FROM users u
-       LEFT JOIN subjects sub ON sub.teacher_id = u.id
-       LEFT JOIN exams e ON e.subject_id = sub.id ${event_id ? 'AND e.event_id = ' + event_id : ''}
-       LEFT JOIN marks m ON m.exam_id = e.id
-       WHERE u.role = 'teacher'
-       GROUP BY u.id, u.name, u.phone
-       ORDER BY marks_entered DESC`,
-      []
-    );
-    
-    res.json({ classStats, subjectStats, teacherStats });
+      `SELECT x.class_id,c.name,c.section,COUNT(DISTINCT r.student_id) AS students,
+         COUNT(DISTINCT CASE WHEN r.result_status='PASSED' THEN r.student_id END) AS passed,
+         ROUND(AVG(r.final_gpa),2) AS average_gpa
+       FROM exam_events e JOIN results r ON r.exam_id=e.id
+       JOIN (
+         SELECT DISTINCT x.event_id,x.class_id,m.student_id
+         FROM exams x JOIN marks m ON m.exam_id=x.id
+         WHERE x.status='published'
+       ) x ON x.event_id=e.id AND x.student_id=r.student_id
+       JOIN classes c ON c.id=x.class_id
+       WHERE e.session_id=? ${eventId ? 'AND e.id=?' : ''} ${classId ? 'AND x.class_id=?' : ''}
+       GROUP BY x.class_id,c.name,c.section ORDER BY c.name,c.section`,
+      [sessionId, ...(eventId ? [eventId] : []), ...(classId ? [classId] : [])]);
+    res.json({ sessions, selected_session_id: sessionId, exams, students, classStats });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 }
 
@@ -354,6 +348,12 @@ async function autoCreateSubjectExams(req, res) {
            JOIN subjects sub ON sub.class_id = c.id ORDER BY c.name`);
       }
     }
+    let snapshotIds = ev.class_ids;
+    if (typeof snapshotIds === 'string') { try { snapshotIds = JSON.parse(snapshotIds); } catch (_) { snapshotIds = null; } }
+    if (Array.isArray(snapshotIds) && snapshotIds.length) {
+      const allowedIds = new Set(snapshotIds.map(Number));
+      classes = classes.filter(cls => allowedIds.has(Number(cls.id)));
+    }
     
     let created = 0;
     for (const cls of classes) {
@@ -369,11 +369,10 @@ async function autoCreateSubjectExams(req, res) {
         );
         
         if (!existing) {
-          const examType = ev.exam_kind && ['half_yearly', 'annual', 'pretest', 'test'].includes(ev.exam_kind) ? ev.exam_kind : 'class_test';
           await pool.query(
             `INSERT INTO exams (name, exam_type, class_id, subject_id, source, created_by, event_id, status, entry_open)
              VALUES (?,?,?,?,?,?,?,?,?)`,
-            [`${ev.name} - ${sub.name}`, examType, cls.id, sub.id, 'admin', req.user.id, event_id, 'draft', 1]
+            [`${ev.name} - ${sub.name}`, 'class_test', cls.id, sub.id, 'admin', req.user.id, event_id, 'draft', Number(ev.entry_open) === 1 ? 1 : 0]
           );
           created++;
         }

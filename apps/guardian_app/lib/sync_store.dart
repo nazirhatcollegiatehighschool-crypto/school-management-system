@@ -1,9 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;import 'package:path_provider/path_provider.dart';
+import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
+
 import 'config.dart';
 
 /// Three-state connection health used by the status banner + request layer.
@@ -64,6 +67,7 @@ class SyncStore extends ChangeNotifier {
   String? _redirectBase;
   Connectivity? _conn;
   String? Function()? tokenProvider;
+
   /// Called whenever connectivity returns (offline -> online). Apps use this
   /// to refresh cached GET data so the latest server data gets stored again.
   void Function()? onReconnected;
@@ -107,17 +111,23 @@ class SyncStore extends ChangeNotifier {
       if (!online.value) return false; // device genuinely has no network
       // bounded exponential backoff with jitter: ~1s, ~2s, ~4s (+/- 40%)
       final base = 1000 * (1 << i);
-      final jitter = (base * 0.4 * (DateTime.now().microsecond / 1000000)).round();
+      final jitter = (base * 0.4 * (DateTime.now().microsecond / 1000000))
+          .round();
       await Future.delayed(Duration(milliseconds: base + jitter));
     }
     return false;
   }
 
   Future<bool> _probeServerInner(Duration timeout) async {
+    final base = Config.api;
     try {
       final res = await http
-          .get(Uri.parse('${Config.api}/health'))
-          .timeout(timeout);
+          .get(Uri.parse('$base/health'))
+          .timeout(Config.hasOverride ? const Duration(seconds: 4) : timeout);
+      if (Config.api != base) {
+        _markServer(false);
+        return false;
+      }
       final ok = res.statusCode >= 200 && res.statusCode < 300;
       _markServer(ok);
       return ok;
@@ -223,11 +233,13 @@ class SyncStore extends ChangeNotifier {
 
   void _applyConn(List<ConnectivityResult> res) {
     final was = online.value;
-    online.value = res.any((r) =>
-        r == ConnectivityResult.wifi ||
-        r == ConnectivityResult.mobile ||
-        r == ConnectivityResult.ethernet ||
-        r == ConnectivityResult.vpn);
+    online.value = res.any(
+      (r) =>
+          r == ConnectivityResult.wifi ||
+          r == ConnectivityResult.mobile ||
+          r == ConnectivityResult.ethernet ||
+          r == ConnectivityResult.vpn,
+    );
     if (online.value && !was) {
       // Connectivity returned: reset the failure streak and verify server.
       _consecutiveProbeFails = 0;
@@ -251,14 +263,17 @@ class SyncStore extends ChangeNotifier {
       if (await f.exists()) {
         final j = jsonDecode(await f.readAsString());
         _cache = (j['cache'] as Map?)?.cast<String, dynamic>() ?? {};
-        _etags = (j['etags'] as Map?)?.map((k, v) => MapEntry('$k', '$v')) ?? {};
+        _etags =
+            (j['etags'] as Map?)?.map((k, v) => MapEntry('$k', '$v')) ?? {};
         _outbox = (j['outbox'] as List?)?.cast<Map<String, dynamic>>() ?? [];
         _errors = (j['errors'] as List?)?.cast<Map<String, dynamic>>() ?? [];
         final ov = j['overlays'];
         if (ov is Map) {
           _overlays = {};
           ov.forEach((k, v) {
-            _overlays['$k'] = (v as List).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+            _overlays['$k'] = (v as List)
+                .map((e) => Map<String, dynamic>.from(e as Map))
+                .toList();
           });
         }
       }
@@ -271,7 +286,15 @@ class SyncStore extends ChangeNotifier {
     try {
       final dir = await getApplicationSupportDirectory();
       final f = File('${dir.path}/sync_store.json');
-      await f.writeAsString(jsonEncode({'cache': _cache, 'etags': _etags, 'outbox': _outbox, 'errors': _errors, 'overlays': _overlays}));
+      await f.writeAsString(
+        jsonEncode({
+          'cache': _cache,
+          'etags': _etags,
+          'outbox': _outbox,
+          'errors': _errors,
+          'overlays': _overlays,
+        }),
+      );
     } catch (_) {}
   }
 
@@ -313,10 +336,20 @@ class SyncStore extends ChangeNotifier {
   /// [optimistic] lets the caller mirror the change onto the read cache now:
   ///   { 'cache': 'GET path', 'action': 'append'|'update'|'remove',
   ///     'idField': 'id', 'item': { ...row... } }
-  Future<String> enqueue(String method, String path, Map<String, dynamic>? body,
-      {Map<String, dynamic>? optimistic}) async {
+  Future<String> enqueue(
+    String method,
+    String path,
+    Map<String, dynamic>? body, {
+    Map<String, dynamic>? optimistic,
+  }) async {
     final id = '${DateTime.now().millisecondsSinceEpoch}-${_outbox.length}';
-    final entry = {'id': id, 'method': method, 'path': path, 'body': body ?? {}, 't': DateTime.now().toIso8601String()};
+    final entry = {
+      'id': id,
+      'method': method,
+      'path': path,
+      'body': body ?? {},
+      't': DateTime.now().toIso8601String(),
+    };
     if (optimistic != null) entry['optimistic'] = optimistic;
     _outbox.add(entry);
     if (optimistic != null) {
@@ -367,7 +400,11 @@ class SyncStore extends ChangeNotifier {
         list.add(jsonDecode(jsonEncode(item)));
       } else if (action == 'update') {
         final i = list.indexWhere((e) => e is Map && '${e[idField]}' == itemId);
-        if (i >= 0) { list[i] = jsonDecode(jsonEncode(item)); } else { list.add(jsonDecode(jsonEncode(item))); }
+        if (i >= 0) {
+          list[i] = jsonDecode(jsonEncode(item));
+        } else {
+          list.add(jsonDecode(jsonEncode(item)));
+        }
       } else if (action == 'remove') {
         list.removeWhere((e) => e is Map && '${e[idField]}' == itemId);
       }
@@ -415,7 +452,12 @@ class SyncStore extends ChangeNotifier {
         if (!ok) {
           failed++;
           if (_errors.length > 20) _errors.removeAt(0);
-          _errors.add({'t': DateTime.now().toIso8601String(), 'method': entry['method'], 'path': entry['path'], 'error': 'Server rejected this request'});
+          _errors.add({
+            't': DateTime.now().toIso8601String(),
+            'method': entry['method'],
+            'path': entry['path'],
+            'error': 'Server rejected this request',
+          });
         } else {
           synced++;
           // Replace the optimistic cache entry with the server's real row.
@@ -436,15 +478,25 @@ class SyncStore extends ChangeNotifier {
 
   Future<bool?> _send(Map<String, dynamic> entry) async {
     try {
-      final res = await _http(entry['method'] as String, entry['path'] as String, entry['body'] as Map<String, dynamic>?);
-      if (res.statusCode == 401 || res.statusCode == 403) return false; // session expired — surface to user
+      final res = await _http(
+        entry['method'] as String,
+        entry['path'] as String,
+        entry['body'] as Map<String, dynamic>?,
+      );
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        return false; // session expired — surface to user
+      }
       return res.statusCode >= 200 && res.statusCode < 300;
     } catch (_) {
       return null; // unreachable — stop
     }
   }
 
-  Future<http.Response> _http(String method, String path, Map<String, dynamic>? body) async {
+  Future<http.Response> _http(
+    String method,
+    String path,
+    Map<String, dynamic>? body,
+  ) async {
     final headers = <String, String>{'Content-Type': 'application/json'};
     final tok = await _token();
     if (tok != null) headers['Authorization'] = 'Bearer $tok';
@@ -458,13 +510,21 @@ class SyncStore extends ChangeNotifier {
     final uri = Uri.parse(base + path);
     switch (method) {
       case 'POST':
-        return http.post(uri, headers: headers, body: jsonEncode(body ?? {})).timeout(const Duration(seconds: 20));
+        return http
+            .post(uri, headers: headers, body: jsonEncode(body ?? {}))
+            .timeout(const Duration(seconds: 20));
       case 'PUT':
-        return http.put(uri, headers: headers, body: jsonEncode(body ?? {})).timeout(const Duration(seconds: 20));
+        return http
+            .put(uri, headers: headers, body: jsonEncode(body ?? {}))
+            .timeout(const Duration(seconds: 20));
       case 'DELETE':
-        return http.delete(uri, headers: headers).timeout(const Duration(seconds: 20));
+        return http
+            .delete(uri, headers: headers)
+            .timeout(const Duration(seconds: 20));
       default:
-        return http.get(uri, headers: headers).timeout(const Duration(seconds: 20));
+        return http
+            .get(uri, headers: headers)
+            .timeout(const Duration(seconds: 20));
     }
   }
 

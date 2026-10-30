@@ -1,9 +1,37 @@
 const router = require('express').Router();
 const pool = require('../db');
 const { auth } = require('../middleware/auth');
+const { canonicalReligion } = require('../curriculum');
 
 const DAYS = ['Saturday', 'Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 const DAY_KEYS = { Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4 };
+function isReligionSubject(name) {
+  return /religion|islam|hindu|buddh|christian|ধর্ম|ইসলাম|হিন্দু|বৌদ্ধ|খ্রিস্ট/i.test(String(name || ''));
+}
+
+function normalizeReligions(values, subjectName) {
+  if (!isReligionSubject(subjectName)) return [];
+  const aliases = new Map([
+    ['islam', 'Islam'], ['hindu', 'Hinduism'], ['hinduism', 'Hinduism'],
+    ['buddhist', 'Buddhism'], ['buddhism', 'Buddhism'],
+    ['christian', 'Christianity'], ['christianity', 'Christianity'],
+  ]);
+  const religions = [...new Set((Array.isArray(values) ? values : [])
+    .map(v => aliases.get(String(v || '').trim().toLowerCase())).filter(Boolean))];
+  if (!religions.length) throw Object.assign(new Error('ধর্মীয় subject-এর জন্য অন্তত একটি ধর্ম নির্বাচন করুন।'), { status: 400 });
+  return religions;
+}
+
+async function replaceRoutineReligions(db, routineId, religions) {
+  try { await db.query('DELETE FROM routine_religions WHERE routine_id=?', [routineId]); }
+  catch (e) {
+    if (!religions.length && (['42P01', 'ER_NO_SUCH_TABLE'].includes(e.code) || e.mysqlCode === 'ER_NO_SUCH_TABLE')) return;
+    throw e;
+  }
+  for (const religion of religions) {
+    await db.query('INSERT INTO routine_religions (routine_id, religion) VALUES (?,?)', [routineId, religion]);
+  }
+}
 
 // ------------------------------------------------------------------
 // helpers
@@ -23,6 +51,13 @@ async function hydrateRoutines(rows) {
       'SELECT rg.class_id, rg.group_name, c.name AS class_name FROM routine_groups rg JOIN classes c ON rg.class_id = c.id WHERE rg.routine_id = ? ORDER BY c.name, rg.group_name',
       [r.id]
     );
+    let religions = [];
+    try {
+      const [rows] = await pool.query('SELECT religion FROM routine_religions WHERE routine_id=? ORDER BY religion', [r.id]);
+      religions = rows.map(row => row.religion);
+    } catch (e) {
+      if (!['42P01', 'ER_NO_SUCH_TABLE'].includes(e.code) && e.mysqlCode !== 'ER_NO_SUCH_TABLE') throw e;
+    }
     out.push({
       id: r.id,
       teacher_id: r.teacher_id,
@@ -37,7 +72,8 @@ async function hydrateRoutines(rows) {
       room: r.room,
       subject: subjects[0] || null,
       sections: sections,
-      groups: groups
+      groups,
+      religions,
     });
   }
   return out;
@@ -117,8 +153,9 @@ router.post('/teacher', auth('teacher'), async (req, res) => {
     return res.status(400).json({ error: 'At least one section or group required' });
   }
   try {
-    const [subj] = await pool.query('SELECT id, class_id, teacher_id FROM subjects WHERE id = ?', [subject_id]);
+    const [subj] = await pool.query('SELECT id, class_id, teacher_id, name FROM subjects WHERE id = ?', [subject_id]);
     if (!subj[0]) return res.status(400).json({ error: 'Subject not found' });
+    const religions = normalizeReligions(req.body.religions, subj[0].name);
 
     // auto-assign this subject to the teacher on their first pick
     if (!subj[0].teacher_id || Number(subj[0].teacher_id) !== Number(req.user.id)) {
@@ -158,16 +195,17 @@ router.post('/teacher', auth('teacher'), async (req, res) => {
         await conn.query('INSERT INTO routine_groups (routine_id, class_id, group_name) VALUES (?,?,?)',
           [rid, g.class_id, g.group_name]);
       }
+      if (religions.length) await replaceRoutineReligions(conn, rid, religions);
       await conn.commit();
       res.status(201).json({ id: rid });
     } catch (e) {
       await conn.rollback();
-      res.status(500).json({ error: 'Server error' });
+      res.status(e.status || 500).json({ error: e.message || 'Server error' });
       return;
     } finally {
       conn.release();
     }
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+  } catch (err) { console.error(err); res.status(err.status || 500).json({ error: err.message || 'Server error' }); }
 });
 
 router.put('/teacher/:id', auth('teacher'), async (req, res) => {
@@ -177,8 +215,9 @@ router.put('/teacher/:id', auth('teacher'), async (req, res) => {
     const [own] = await pool.query('SELECT id, subject_id FROM routines WHERE id = ? AND teacher_id = ?', [req.params.id, req.user.id]);
     if (!own[0]) return res.status(403).json({ error: 'Not your routine entry' });
     const oldSubjectId = own[0].subject_id;
-    const [subj] = await pool.query('SELECT id, class_id, teacher_id FROM subjects WHERE id = ?', [subject_id]);
+    const [subj] = await pool.query('SELECT id, class_id, teacher_id, name FROM subjects WHERE id = ?', [subject_id]);
     if (!subj[0]) return res.status(400).json({ error: 'Subject not found' });
+    const religions = normalizeReligions(req.body.religions, subj[0].name);
 
     // auto-assign this subject to the teacher on their pick
     if (!subj[0].teacher_id || Number(subj[0].teacher_id) !== Number(req.user.id)) {
@@ -207,6 +246,7 @@ router.put('/teacher/:id', auth('teacher'), async (req, res) => {
         await conn.query('INSERT INTO routine_groups (routine_id, class_id, group_name) VALUES (?,?,?)',
           [req.params.id, g.class_id, g.group_name]);
       }
+      await replaceRoutineReligions(conn, req.params.id, religions);
       await conn.commit();
       // If the edit swapped to a different subject, the old one is no longer
       // in this teacher's routine -> unassign it when fully unused.
@@ -221,7 +261,7 @@ router.put('/teacher/:id', auth('teacher'), async (req, res) => {
     } finally {
       conn.release();
     }
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+  } catch (err) { console.error(err); res.status(err.status || 500).json({ error: err.message || 'Server error' }); }
 });
 
 router.delete('/teacher/:id', auth('teacher'), async (req, res) => {
@@ -273,7 +313,7 @@ router.get('/teacher/delete-requests', auth('teacher'), async (req, res) => {
 });
 
 // shared insert-with-sections/groups used by admin create/update (teacher_id supplied)
-async function insertRoutine(teacherId, subjectId, dayNum, timeSlotId, sections, groups, notes, room) {
+async function insertRoutine(teacherId, subjectId, dayNum, timeSlotId, sections, groups, notes, room, religions) {
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
@@ -288,6 +328,7 @@ async function insertRoutine(teacherId, subjectId, dayNum, timeSlotId, sections,
     for (const g of groups || []) {
       await conn.query('INSERT INTO routine_groups (routine_id, class_id, group_name) VALUES (?,?,?)', [rid, g.class_id, g.group_name]);
     }
+    if (religions.length) await replaceRoutineReligions(conn, rid, religions);
     await conn.commit();
     conn.release();
     return rid;
@@ -310,17 +351,18 @@ router.post('/admin', auth('admin'), async (req, res) => {
     return res.status(400).json({ error: 'At least one section or group required' });
   }
   try {
-    const [subj] = await pool.query('SELECT id FROM subjects WHERE id = ? AND teacher_id = ?', [subject_id, teacher_id]);
+    const [subj] = await pool.query('SELECT id, name FROM subjects WHERE id = ? AND teacher_id = ?', [subject_id, teacher_id]);
     if (!subj[0]) return res.status(400).json({ error: 'Subject is not assigned to that teacher' });
+    const religions = normalizeReligions(req.body.religions, subj[0].name);
     const [tch] = await pool.query("SELECT id FROM users WHERE id = ? AND role='teacher'", [teacher_id]);
     if (!tch[0]) return res.status(400).json({ error: 'Teacher not found' });
     const conflicts = await findConflicts(teacher_id, dayNum, time_slot_id, null);
     if (conflicts.length > 0) {
       return res.status(409).json({ error: 'Conflict: another period already scheduled for that teacher at that time' });
     }
-    const rid = await insertRoutine(teacher_id, subject_id, dayNum, time_slot_id, sections, groups, notes, room);
+    const rid = await insertRoutine(teacher_id, subject_id, dayNum, time_slot_id, sections, groups, notes, room, religions);
     res.status(201).json({ id: rid });
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+  } catch (err) { console.error(err); res.status(err.status || 500).json({ error: err.message || 'Server error' }); }
 });
 
 router.put('/admin/:id', auth('admin'), async (req, res) => {
@@ -330,8 +372,9 @@ router.put('/admin/:id', auth('admin'), async (req, res) => {
     return res.status(400).json({ error: 'teacher_id and day required (Sunday..Thursday 0..4)' });
   }
   try {
-    const [subj] = await pool.query('SELECT id FROM subjects WHERE id = ? AND teacher_id = ?', [subject_id, teacher_id]);
+    const [subj] = await pool.query('SELECT id, name FROM subjects WHERE id = ? AND teacher_id = ?', [subject_id, teacher_id]);
     if (!subj[0]) return res.status(400).json({ error: 'Subject is not assigned to that teacher' });
+    const religions = normalizeReligions(req.body.religions, subj[0].name);
     const conflicts = await findConflicts(teacher_id, dayNum, time_slot_id, Number(req.params.id));
     if (conflicts.length > 0) {
       return res.status(409).json({ error: 'Conflict: another period already scheduled for that teacher at that time' });
@@ -351,14 +394,16 @@ router.put('/admin/:id', auth('admin'), async (req, res) => {
       for (const g of groups || []) {
         await conn.query('INSERT INTO routine_groups (routine_id, class_id, group_name) VALUES (?,?,?)', [req.params.id, g.class_id, g.group_name]);
       }
+      await replaceRoutineReligions(conn, req.params.id, religions);
       await conn.commit();
       conn.release();
       res.json({ ok: true });
     } catch (e) {
+      await conn.rollback();
       conn.release();
-      res.status(500).json({ error: 'Server error' });
+      res.status(e.status || 500).json({ error: e.message || 'Server error' });
     }
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+  } catch (err) { console.error(err); res.status(err.status || 500).json({ error: err.message || 'Server error' }); }
 });
 
 // teacher subject list with class info (for the routine subject dropdown)
@@ -573,13 +618,16 @@ router.get('/student', auth('guardian'), async (req, res) => {
     );
     const out = [];
     for (const st of students) {
-      const [cls] = await pool.query('SELECT section, group_name FROM classes WHERE id = ?', [st.class_id]);
+      const [cls] = await pool.query('SELECT name, section, group_name FROM classes WHERE id = ?', [st.class_id]);
       const sec = cls[0]?.section;
       const grp = cls[0]?.group_name;
+      if (cls[0]?.name) st.class_name = cls[0].name;
       const [routines] = await pool.query(
-        `SELECT DISTINCT r.*, ts.slot_order, ts.label AS slot_label, ts.start_time, ts.end_time
+        `SELECT DISTINCT r.*, ts.slot_order, ts.label AS slot_label, ts.start_time, ts.end_time,
+                u.name AS teacher_name, u.phone AS teacher_phone
          FROM routines r
          JOIN time_slots ts ON r.time_slot_id = ts.id
+         LEFT JOIN users u ON r.teacher_id = u.id
          LEFT JOIN routine_sections rs ON rs.routine_id = r.id
          LEFT JOIN routine_groups rg ON rg.routine_id = r.id
          WHERE (rs.class_id = ? AND rs.section = ?) OR (rg.class_id = ? AND rg.group_name = ?)
@@ -596,6 +644,12 @@ router.get('/student', auth('guardian'), async (req, res) => {
 async function hydrateRoutinesForStudent(rows, student, classId) {
   const out = [];
   for (const r of rows) {
+    try {
+      const [scopes] = await pool.query('SELECT religion FROM routine_religions WHERE routine_id=?', [r.id]);
+      if (scopes.length && !scopes.some(x => canonicalReligion(x.religion) === canonicalReligion(student.religion))) continue;
+    } catch (e) {
+      if (!['42P01', 'ER_NO_SUCH_TABLE'].includes(e.code) && e.mysqlCode !== 'ER_NO_SUCH_TABLE') throw e;
+    }
     const [subjects] = await pool.query(
       'SELECT id, name, group_name FROM subjects WHERE id = ?', [r.subject_id]
     );
@@ -620,6 +674,8 @@ async function hydrateRoutinesForStudent(rows, student, classId) {
       slot_label: r.slot_label,
       start_time: r.start_time,
       end_time: r.end_time,
+      teacher_name: r.teacher_name ?? null,
+      teacher_phone: r.teacher_phone ?? null,
       subject: { id: r.subject_id, name: displayName, base_name: subj?.name }
     });
   }

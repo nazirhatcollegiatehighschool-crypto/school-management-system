@@ -13,12 +13,12 @@ Future<void> showServerUrlDialog(BuildContext context) async {
     builder: (ctx) => StatefulBuilder(builder: (ctx, setD) => AlertDialog(
       title: const Text('🔧 Server URL'),
       content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        const Text('ডিফল্ট server ছাড়া অন্য URL লাগলে এখানে বসান।\nযেমন: https://school-management-system-brown-mu.vercel.app',
+        const Text('ডিফল্ট server ছাড়া অন্য URL লাগলে এখানে বসান।\nযেমন: https://school-management-system-mobile-api.vercel.app',
             style: TextStyle(fontSize: 12.5)),
         const SizedBox(height: 10),
         TextField(controller: ctl, keyboardType: TextInputType.url,
             decoration: const InputDecoration(labelText: 'Server URL *', border: OutlineInputBorder(),
-                hintText: 'https://school-management-system-brown-mu.vercel.app')),
+                hintText: 'https://school-management-system-mobile-api.vercel.app')),
         if (status != null) ...[
           const SizedBox(height: 8),
           Text(status!, style: TextStyle(fontSize: 12.5,

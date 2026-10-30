@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
 import '../api.dart';
 import '../student_prompt_parser.dart';
 import 'ocr_capture_screen.dart';
@@ -23,16 +24,21 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
   final _formKey = GlobalKey<FormState>();
   final _rollCtl = TextEditingController();
   final _nameCtl = TextEditingController();
+  final _birthCertCtl = TextEditingController();
+  final _guardianPhoneCtl = TextEditingController();
+  final _dobCtl = TextEditingController();
   String _name = '';
   DateTime? _dob;
   String _religion = '';
   String _guardianName = '';
-  String _guardianPhone = '';
   String _fatherName = '';
   String _motherName = '';
   String _birthCertNo = '';
+  String? _compulsoryChoice;
+  String? _optionalChoice;
   String _address = '';
   bool _receivesScholarship = false;
+  bool _quickAdd = true;
   bool _saving = false;
   String? _error;
   // Live roll-check state: null = unchecked/empty, true = taken, false = free.
@@ -45,6 +51,9 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
   void dispose() {
     _rollCtl.dispose();
     _nameCtl.dispose();
+    _birthCertCtl.dispose();
+    _guardianPhoneCtl.dispose();
+    _dobCtl.dispose();
     super.dispose();
   }
 
@@ -55,27 +64,31 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
     final v = raw.trim();
     final seq = ++_rollCheckSeq;
     if (v.isEmpty) {
-      if (mounted) setState(() {
-        _rollTaken = null;
-        _rollTakenBy = null;
-        _rollChecking = false;
-      });
+      if (mounted)
+        setState(() {
+          _rollTaken = null;
+          _rollTakenBy = null;
+          _rollChecking = false;
+        });
       return;
     }
     final n = int.tryParse(v);
     if (n == null || n <= 0) {
-      if (mounted) setState(() {
-        _rollTaken = null;
-        _rollTakenBy = null;
-        _rollChecking = false;
-      });
+      if (mounted)
+        setState(() {
+          _rollTaken = null;
+          _rollTakenBy = null;
+          _rollChecking = false;
+        });
       return;
     }
     if (mounted) setState(() => _rollChecking = true);
     await Future.delayed(const Duration(milliseconds: 450));
     if (seq != _rollCheckSeq || !mounted) return;
     try {
-      final r = await Api.get('/teacher/classes/${widget.classId}/roll-check?roll=$n');
+      final r = await Api.get(
+        '/teacher/classes/${widget.classId}/roll-check?roll=$n',
+      );
       if (seq != _rollCheckSeq || !mounted) return;
       setState(() {
         _rollChecking = false;
@@ -98,11 +111,54 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
 
   static const _religions = [
     'Islam',
-    'Hindu',
-    'Christian',
-    'Buddhist',
+    'Hinduism',
+    'Christianity',
+    'Buddhism',
     'Other',
   ];
+
+  bool get _class9or10 => RegExp(
+    r'class\s*(9|10)',
+    caseSensitive: false,
+  ).hasMatch(widget.classLabel);
+  bool get _arts =>
+      RegExp(r'arts|humanit', caseSensitive: false).hasMatch(widget.classLabel);
+  bool get _science =>
+      RegExp(r'science', caseSensitive: false).hasMatch(widget.classLabel);
+
+  List<Widget> _curriculumFields() {
+    if (!_class9or10) return const [];
+    final optionalItems = _science
+        ? const ['Higher Mathematics', 'Agriculture', 'Home Science']
+        : const ['Agriculture', 'Home Science'];
+    return [
+      if (_arts) ...[
+        DropdownButtonFormField<String>(
+          value: _compulsoryChoice,
+          decoration: const InputDecoration(labelText: 'Compulsory subject *'),
+          items: const [
+            'Civics',
+            'Economics',
+          ].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
+          validator: (v) =>
+              !_quickAdd && v == null ? 'Civics অথবা Economics বেছে নিন' : null,
+          onChanged: (v) => setState(() => _compulsoryChoice = v),
+        ),
+        const SizedBox(height: 12),
+      ],
+      DropdownButtonFormField<String>(
+        value: _optionalChoice,
+        decoration: const InputDecoration(labelText: 'Optional subject *'),
+        items: optionalItems
+            .map((v) => DropdownMenuItem(value: v, child: Text(v)))
+            .toList(),
+        validator: (v) =>
+            !_quickAdd && v == null ? 'Optional subject বেছে নিন' : null,
+        onChanged: (v) => setState(() => _optionalChoice = v),
+      ),
+      const SizedBox(height: 12),
+    ];
+  }
 
   Future<void> _pickDob() async {
     final d = await showDatePicker(
@@ -111,7 +167,11 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
       firstDate: DateTime(2005),
       lastDate: DateTime.now(),
     );
-    if (d != null) setState(() => _dob = d);
+    if (d != null)
+      setState(() {
+        _dob = d;
+        _dobCtl.text = d.toIso8601String().substring(0, 10);
+      });
   }
 
   Future<void> _showPromptImport() async {
@@ -130,10 +190,14 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
       _nameCtl.text = _name;
       _religion = data['religion'] ?? '';
       _guardianName = data['guardian_name'] ?? '';
-      _guardianPhone = data['guardian_phone'] ?? '';
       _fatherName = data['father_name'] ?? '';
       _motherName = data['mother_name'] ?? '';
       _birthCertNo = data['birth_cert_no'] ?? '';
+      _birthCertCtl.text = _birthCertNo;
+      _guardianPhoneCtl.text = data['guardian_phone'] ?? '';
+      final dobText = data['dob'] ?? '';
+      _dobCtl.text = dobText;
+      _dob = DateTime.tryParse(dobText);
       _address = data['address'] ?? '';
       // NOTE: class/section/group comes from the teacher's own class —
       // prompt-supplied section is intentionally ignored (default rule).
@@ -146,11 +210,16 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
     // the server 409, but the live banner already warned — this is the guard).
     if (_rollTaken == true) {
       setState(() {
-        _error = 'Roll ${_rollCtl.text.trim()} ইতিমধ্যে ${_rollTakenBy?['name'] ?? 'অন্য শিক্ষার্থীর'} — অন্য roll দিন বা নম্বর মুছে নতুন দিন।';
+        _error =
+            'Roll ${_rollCtl.text.trim()} ইতিমধ্যে ${_rollTakenBy?['name'] ?? 'অন্য শিক্ষার্থীর'} — অন্য roll দিন বা নম্বর মুছে নতুন দিন।';
       });
       return;
     }
     _name = _nameCtl.text.trim();
+    if (_dobCtl.text.isEmpty) {
+      setState(() => _error = 'জন্মতারিখ বেছে নিন।');
+      return;
+    }
     if (!_formKey.currentState!.validate()) return;
     _formKey.currentState!.save();
     setState(() {
@@ -160,26 +229,34 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
     try {
       final rollRaw = _rollCtl.text.trim();
       final r = await Api.post('/teacher/students', {
-        'name': _nameCtl.text.trim().isNotEmpty ? _nameCtl.text.trim() : _name.trim(),
+        'quick_add': _quickAdd,
+        'name': _nameCtl.text.trim().isNotEmpty ? _nameCtl.text.trim() : null,
         'class_id': widget.classId,
         'roll': rollRaw.isNotEmpty ? int.tryParse(rollRaw) : null,
-        'dob': _dob?.toIso8601String().substring(0, 10),
+        'dob': _dobCtl.text.trim().isNotEmpty ? _dobCtl.text.trim() : null,
         'religion': _religion.isNotEmpty ? _religion : null,
         'guardian_name': _guardianName.isNotEmpty ? _guardianName.trim() : null,
-        'guardian_phone': _guardianPhone.isNotEmpty
-            ? _guardianPhone.trim()
+        'guardian_phone': _guardianPhoneCtl.text.trim().isNotEmpty
+            ? _guardianPhoneCtl.text.trim()
             : null,
         'father_name': _fatherName.isNotEmpty ? _fatherName.trim() : null,
         'mother_name': _motherName.isNotEmpty ? _motherName.trim() : null,
-        'birth_cert_no': _birthCertNo.isNotEmpty ? _birthCertNo.trim() : null,
+        'birth_cert_no': _birthCertCtl.text.trim(),
+        'compulsory_subject': _compulsoryChoice,
+        'optional_subject': _optionalChoice,
         'address': _address.isNotEmpty ? _address.trim() : null,
         'receives_scholarship': _receivesScholarship,
       });
       if (!mounted) return;
       if (Api.isQueued(r)) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
             backgroundColor: Colors.orange,
-            content: Text('ইন্টারনেট নেই — ভর্তি ফোনে সেভ আছে, online হলেই roll/code সহ register হবে')));
+            content: Text(
+              'ইন্টারনেট নেই — ভর্তি ফোনে সেভ আছে, online হলেই roll/code সহ register হবে',
+            ),
+          ),
+        );
         return;
       }
       final code = r['student_code'] ?? '';
@@ -188,7 +265,7 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
         SnackBar(
           backgroundColor: Colors.green,
           content: Text(
-            '✓ ${_name.trim()} registered — Roll: $roll, Code: $code',
+            '✓ ভর্তি সম্পন্ন — Roll: $roll, Student ID: $code. অভিভাবককে ID, জন্মতারিখ, জন্মনিবন্ধন ও ফোন দিন।',
           ),
         ),
       );
@@ -225,34 +302,107 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
 
             // Roll FIRST: the identity of the admission. Live-taken banner
             // appears here the moment a duplicate roll is typed.
-            TextFormField(
-              controller: _rollCtl,
-              decoration: InputDecoration(
-                labelText: 'রোল নম্বর *',
-                hintText: 'যেমন: 5',
-                border: const OutlineInputBorder(),
-                prefixIcon: const Icon(Icons.confirmation_number_outlined),
-                suffixIcon: _rollChecking
-                    ? const Padding(
-                        padding: EdgeInsets.all(12),
-                        child: SizedBox(
-                            width: 16, height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2)),
-                      )
-                    : (_rollTaken == true
-                        ? const Icon(Icons.error_outline, color: Colors.red)
-                        : (_rollTaken == false
-                            ? const Icon(Icons.check_circle_outline, color: Colors.green)
-                            : null)),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    controller: _rollCtl,
+                    decoration: InputDecoration(
+                      labelText: 'রোল নম্বর *',
+                      hintText: 'যেমন: 5',
+                      border: const OutlineInputBorder(),
+                      prefixIcon: const Icon(
+                        Icons.confirmation_number_outlined,
+                      ),
+                      suffixIcon: _rollChecking
+                          ? const Padding(
+                              padding: EdgeInsets.all(12),
+                              child: SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              ),
+                            )
+                          : (_rollTaken == true
+                                ? const Icon(
+                                    Icons.error_outline,
+                                    color: Colors.red,
+                                  )
+                                : (_rollTaken == false
+                                      ? const Icon(
+                                          Icons.check_circle_outline,
+                                          color: Colors.green,
+                                        )
+                                      : null)),
+                    ),
+                    keyboardType: TextInputType.number,
+                    validator: (v) {
+                      if (v == null || v.trim().isEmpty) return 'রোল আবশ্যক';
+                      final n = int.tryParse(v.trim());
+                      if (n == null || n <= 0) return 'সঠিক রোল দিন';
+                      return null;
+                    },
+                    onChanged: _checkRoll,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: TextFormField(
+                    controller: _birthCertCtl,
+                    decoration: const InputDecoration(
+                      labelText: 'জন্মনিবন্ধন *',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.badge_outlined),
+                    ),
+                    keyboardType: TextInputType.number,
+                    validator: (v) => (v == null || v.trim().isEmpty)
+                        ? 'জন্মনিবন্ধন নম্বর আবশ্যক'
+                        : null,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: InkWell(
+                    onTap: _pickDob,
+                    child: InputDecorator(
+                      decoration: const InputDecoration(
+                        labelText: 'জন্মতারিখ *',
+                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.cake_outlined),
+                      ),
+                      child: Text(
+                        _dobCtl.text.isEmpty ? 'তারিখ বাছুন' : _dobCtl.text,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            if (_dobCtl.text.isEmpty)
+              const Padding(
+                padding: EdgeInsets.only(top: 4),
+                child: Text(
+                  'জন্মতারিখ বাছাই আবশ্যক',
+                  style: TextStyle(color: Colors.red, fontSize: 12),
+                ),
               ),
-              keyboardType: TextInputType.number,
-              validator: (v) {
-                if (v == null || v.trim().isEmpty) return 'রোল আবশ্যক';
-                final n = int.tryParse(v.trim());
-                if (n == null || n <= 0) return 'সঠিক রোল দিন';
-                return null;
-              },
-              onChanged: _checkRoll,
+            const SizedBox(height: 8),
+            TextFormField(
+              controller: _guardianPhoneCtl,
+              decoration: InputDecoration(
+                labelText: 'অভিভাবকের ফোন *',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.phone_outlined),
+              ),
+              keyboardType: TextInputType.phone,
+              validator: (v) =>
+                  (v == null || v.replaceAll(RegExp(r'\D'), '').length < 10)
+                  ? 'সঠিক অভিভাবক ফোন দিন'
+                  : null,
             ),
             if (_rollTaken == true && _rollTakenBy != null)
               Container(
@@ -263,32 +413,48 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
                   borderRadius: BorderRadius.circular(8),
                   border: Border.all(color: Colors.red.shade200),
                 ),
-                child: Row(children: [
-                  const Icon(Icons.info_outline, color: Colors.red),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Roll ${_rollTakenBy!['roll']} ইতিমধ্যে "${_rollTakenBy!['name']}"-এর — নম্বর মুছে অন্য roll দিন, নতুন student-এর form তখনই fill করা যাবে।',
-                      style: const TextStyle(fontSize: 13, color: Colors.black87),
+                child: Row(
+                  children: [
+                    const Icon(Icons.info_outline, color: Colors.red),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Roll ${_rollTakenBy!['roll']} ইতিমধ্যে "${_rollTakenBy!['name']}"-এর — নম্বর মুছে অন্য roll দিন, নতুন student-এর form তখনই fill করা যাবে।',
+                        style: const TextStyle(
+                          fontSize: 13,
+                          color: Colors.black87,
+                        ),
+                      ),
                     ),
-                  ),
-                ]),
+                  ],
+                ),
               ),
             if (_rollTaken == false)
               Container(
                 margin: const EdgeInsets.only(top: 8),
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
                 decoration: BoxDecoration(
                   color: Colors.green.shade50,
                   borderRadius: BorderRadius.circular(8),
                   border: Border.all(color: Colors.green.shade200),
                 ),
-                child: const Row(children: [
-                  Icon(Icons.check_circle_outline, color: Colors.green, size: 18),
-                  SizedBox(width: 8),
-                  Text('এই roll ফাঁকা আছে — form fill করে ভর্তি করুন।',
-                      style: TextStyle(fontSize: 13)),
-                ]),
+                child: const Row(
+                  children: [
+                    Icon(
+                      Icons.check_circle_outline,
+                      color: Colors.green,
+                      size: 18,
+                    ),
+                    SizedBox(width: 8),
+                    Text(
+                      'এই roll ফাঁকা আছে — form fill করে ভর্তি করুন।',
+                      style: TextStyle(fontSize: 13),
+                    ),
+                  ],
+                ),
               ),
             const SizedBox(height: 12),
 
@@ -330,30 +496,28 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
             // Name
             TextFormField(
               controller: _nameCtl,
-              decoration: const InputDecoration(
-                labelText: 'ছাত্র/ছাত্রীর নাম *',
+              decoration: InputDecoration(
+                labelText:
+                    'ছাত্র/ছাত্রীর নাম${_quickAdd ? ' (পরে পূরণ করা যাবে)' : ' *'}',
                 border: OutlineInputBorder(),
               ),
               textCapitalization: TextCapitalization.words,
-              validator: (v) =>
-                  (v == null || v.trim().isEmpty) ? 'নাম আবশ্যক' : null,
+              validator: (v) => !_quickAdd && (v == null || v.trim().isEmpty)
+                  ? 'নাম আবশ্যক'
+                  : null,
               onSaved: (v) => _name = v ?? '',
             ),
             const SizedBox(height: 12),
 
-            // DOB
-            ListTile(
+            SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              title: Text(
-                _dob != null
-                    ? 'জন্ম তারিখ: ${_dob!.toIso8601String().substring(0, 10)}'
-                    : 'জন্ম তারিখ (ঐচ্ছিক)',
+              title: const Text('দ্রুত প্রাথমিক ভর্তি'),
+              subtitle: const Text(
+                'শুধু রোল, জন্মনিবন্ধন, জন্মতারিখ ও অভিভাবকের ফোন দিয়ে ভর্তি',
               ),
-              leading: const Icon(Icons.cake_outlined),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: _pickDob,
+              value: _quickAdd,
+              onChanged: (v) => setState(() => _quickAdd = v),
             ),
-            const Divider(),
 
             // Religion dropdown
             DropdownButtonFormField<String>(
@@ -368,13 +532,14 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
               onChanged: (v) => setState(() => _religion = v ?? ''),
             ),
             const SizedBox(height: 12),
+            ..._curriculumFields(),
 
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('উপবৃত্তি পায়'),
-            value: _receivesScholarship,
-            onChanged: (v) => setState(() => _receivesScholarship = v),
-          ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('উপবৃত্তি পায়'),
+              value: _receivesScholarship,
+              onChanged: (v) => setState(() => _receivesScholarship = v),
+            ),
 
             // Father
             TextFormField(
@@ -399,15 +564,6 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
             const SizedBox(height: 12),
 
             // Birth cert
-            TextFormField(
-              decoration: const InputDecoration(
-                labelText: 'জন্মনিবন্ধন নং',
-                border: OutlineInputBorder(),
-              ),
-              keyboardType: TextInputType.number,
-              onSaved: (v) => _birthCertNo = v ?? '',
-            ),
-            const SizedBox(height: 12),
 
             // Guardian name
             TextFormField(
@@ -421,15 +577,6 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
             const SizedBox(height: 12),
 
             // Guardian phone
-            TextFormField(
-              decoration: const InputDecoration(
-                labelText: 'অভিভাবকের ফোন',
-                border: OutlineInputBorder(),
-              ),
-              keyboardType: TextInputType.phone,
-              onSaved: (v) => _guardianPhone = v ?? '',
-            ),
-            const SizedBox(height: 12),
 
             // Address
             TextFormField(
@@ -498,6 +645,8 @@ class _PromptImportDialogState extends State<_PromptImportDialog> {
   final _birthCertCtl = TextEditingController();
   final _addressCtl = TextEditingController();
   final _optionalCtl = TextEditingController();
+  String? _compulsoryChoice;
+  String? _optionalChoice;
   bool _busy = false;
   String? _error;
 
@@ -539,7 +688,7 @@ Phone: [শিক্ষার্থীর মোবাইল, থাকলে]
 Email: [ইমেইল, থাকলে]
 Date of Birth: [শুধু YYYY-MM-DD, যেমন 2011-05-15]
 Gender: [Male / Female / Other-এর একটি]
-Religion: [Islam / Hindu / Christian / Buddhist / Other-এর একটি]
+Religion: [Islam / Hinduism / Christianity / Buddhism / Other-এর একটি]
 Blood Group: [A+ / A- / B+ / B- / O+ / O- / AB+ / AB- এর একটি]
 Birth Certificate No: [শুধু ১৭ সংখ্যা]
 Optional Subject: [ঐচ্ছিক বিষয়, থাকলে]
@@ -561,7 +710,9 @@ Address: [ঠিকানা]
     b.showSnackBar(
       const SnackBar(
         backgroundColor: Colors.teal,
-        content: Text('✓ AI প্রম্পট টেমপ্লেট কপি হয়েছে — AI-তে paste করে উত্তর এখানে paste করুন'),
+        content: Text(
+          '✓ AI প্রম্পট টেমপ্লেট কপি হয়েছে — AI-তে paste করে উত্তর এখানে paste করুন',
+        ),
       ),
     );
   }
@@ -569,7 +720,9 @@ Address: [ঠিকানা]
   void _parseAndFill() {
     final res = parseStudentPrompt(_promptCtl.text);
     if (res.isEmpty) {
-      setState(() => _error = 'Prompt-এ কোনো তথ্য পাওয়া যায়নি। টেমপ্লেট অনুযায়ী লিখে আবার চেষ্টা করুন।');
+      setState(
+        () => _error = 'Prompt-এ কোনো তথ্য পাওয়া যায়নি। টেমপ্লেট অনুযায়ী লিখে আবার চেষ্টা করুন।',
+      );
       return;
     }
     setState(() {
@@ -581,30 +734,30 @@ Address: [ঠিকানা]
       if (res['blood_group'] != null) _bloodCtl.text = res['blood_group']!;
       if (res['email'] != null) _emailCtl.text = res['email']!;
       if (res['phone'] != null) _phoneCtl.text = res['phone']!;
-      if (res['guardian_name'] != null) _guardianNameCtl.text = res['guardian_name']!;
-      if (res['guardian_phone'] != null) _guardianPhoneCtl.text = res['guardian_phone']!;
+      if (res['guardian_name'] != null)
+        _guardianNameCtl.text = res['guardian_name']!;
+      if (res['guardian_phone'] != null)
+        _guardianPhoneCtl.text = res['guardian_phone']!;
       if (res['father_name'] != null) _fatherNameCtl.text = res['father_name']!;
       if (res['mother_name'] != null) _motherNameCtl.text = res['mother_name']!;
-      if (res['birth_cert_no'] != null) _birthCertCtl.text = res['birth_cert_no']!;
+      if (res['birth_cert_no'] != null)
+        _birthCertCtl.text = res['birth_cert_no']!;
       if (res['address'] != null) _addressCtl.text = res['address']!;
-      if (res['optional_subject'] != null) _optionalCtl.text = res['optional_subject']!;
+      if (res['optional_subject'] != null)
+        _optionalChoice = res['optional_subject'];
       _error = null;
     });
-    // Map parser's canonical religion labels to the school's dropdown labels.
-    if (_religionCtl.text == 'Hinduism') {
-      _religionCtl.text = 'Hindu';
-    }
-    if (_religionCtl.text == 'Christianity') {
-      _religionCtl.text = 'Christian';
-    }
-    if (_religionCtl.text == 'Buddhism') {
-      _religionCtl.text = 'Buddhist';
-    }
+    // The parser and backend both canonicalize to the database spellings
+    // (Islam/Hinduism/Christianity/Buddhism); keep the field as-is.
   }
 
   Future<void> _submit() async {
     if (_nameCtl.text.trim().isEmpty) {
       setState(() => _error = 'নাম আবশ্যক');
+      return;
+    }
+    if (_birthCertCtl.text.trim().isEmpty) {
+      setState(() => _error = 'জন্মনিবন্ধন নম্বর আবশ্যক');
       return;
     }
     setState(() {
@@ -618,25 +771,53 @@ Address: [ঠিকানা]
         'class_id': widget.classId,
         'roll': rollRaw.isNotEmpty ? int.tryParse(rollRaw) : null,
         'dob': _dobCtl.text.trim().isNotEmpty ? _dobCtl.text.trim() : null,
-        'religion': _religionCtl.text.trim().isNotEmpty ? _religionCtl.text.trim() : null,
-        'guardian_name': _guardianNameCtl.text.trim().isNotEmpty ? _guardianNameCtl.text.trim() : null,
-        'guardian_phone': _guardianPhoneCtl.text.trim().isNotEmpty ? _guardianPhoneCtl.text.trim() : null,
-        'father_name': _fatherNameCtl.text.trim().isNotEmpty ? _fatherNameCtl.text.trim() : null,
-        'mother_name': _motherNameCtl.text.trim().isNotEmpty ? _motherNameCtl.text.trim() : null,
-        'birth_cert_no': _birthCertCtl.text.trim().isNotEmpty ? _birthCertCtl.text.trim() : null,
-        'address': _addressCtl.text.trim().isNotEmpty ? _addressCtl.text.trim() : null,
-        'gender': _genderCtl.text.trim().isNotEmpty ? _genderCtl.text.trim() : null,
-        'blood_group': _bloodCtl.text.trim().isNotEmpty ? _bloodCtl.text.trim() : null,
-        'optional_subject': _optionalCtl.text.trim().isNotEmpty ? _optionalCtl.text.trim() : null,
-        'phone': _phoneCtl.text.trim().isNotEmpty ? _phoneCtl.text.trim() : null,
-        'email': _emailCtl.text.trim().isNotEmpty ? _emailCtl.text.trim() : null,
+        'religion': _religionCtl.text.trim().isNotEmpty
+            ? _religionCtl.text.trim()
+            : null,
+        'guardian_name': _guardianNameCtl.text.trim().isNotEmpty
+            ? _guardianNameCtl.text.trim()
+            : null,
+        'guardian_phone': _guardianPhoneCtl.text.trim().isNotEmpty
+            ? _guardianPhoneCtl.text.trim()
+            : null,
+        'father_name': _fatherNameCtl.text.trim().isNotEmpty
+            ? _fatherNameCtl.text.trim()
+            : null,
+        'mother_name': _motherNameCtl.text.trim().isNotEmpty
+            ? _motherNameCtl.text.trim()
+            : null,
+        'birth_cert_no': _birthCertCtl.text.trim(),
+        'compulsory_subject': _compulsoryChoice,
+        'optional_subject': _optionalChoice,
+        'address': _addressCtl.text.trim().isNotEmpty
+            ? _addressCtl.text.trim()
+            : null,
+        'gender': _genderCtl.text.trim().isNotEmpty
+            ? _genderCtl.text.trim()
+            : null,
+        'blood_group': _bloodCtl.text.trim().isNotEmpty
+            ? _bloodCtl.text.trim()
+            : null,
+        'phone': _phoneCtl.text.trim().isNotEmpty
+            ? _phoneCtl.text.trim()
+            : null,
+        'email': _emailCtl.text.trim().isNotEmpty
+            ? _emailCtl.text.trim()
+            : null,
       });
       if (!mounted) return;
       if (Api.isQueued(r)) {
-        setState(() { _busy = false; });
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        setState(() {
+          _busy = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
             backgroundColor: Colors.orange,
-            content: Text('ইন্টারনেট নেই — prompt ফোনে সেভ আছে, online হলেই register হবে')));
+            content: Text(
+              'ইন্টারনেট নেই — prompt ফোনে সেভ আছে, online হলেই register হবে',
+            ),
+          ),
+        );
         return;
       }
       final roll = r['roll'] ?? rollRaw;
@@ -656,7 +837,11 @@ Address: [ঠিকানা]
     }
   }
 
-  Widget _input(String label, TextEditingController ctl, {TextInputType? type}) {
+  Widget _input(
+    String label,
+    TextEditingController ctl, {
+    TextInputType? type,
+  }) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: TextFormField(
@@ -669,6 +854,50 @@ Address: [ঠিকানা]
         ),
       ),
     );
+  }
+
+  List<Widget> _curriculumFields() {
+    final class9or10 = RegExp(
+      r'class\s*(9|10)',
+      caseSensitive: false,
+    ).hasMatch(widget.classLabel);
+    if (!class9or10) return const [];
+    final arts = RegExp(
+      r'arts|humanit',
+      caseSensitive: false,
+    ).hasMatch(widget.classLabel);
+    final science = RegExp(
+      r'science',
+      caseSensitive: false,
+    ).hasMatch(widget.classLabel);
+    final optionalItems = science
+        ? const ['Higher Mathematics', 'Agriculture', 'Home Science']
+        : const ['Agriculture', 'Home Science'];
+    return [
+      if (arts) ...[
+        DropdownButtonFormField<String>(
+          value: _compulsoryChoice,
+          decoration: const InputDecoration(labelText: 'Compulsory subject *'),
+          items: const [
+            'Civics',
+            'Economics',
+          ].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
+          validator: (v) => v == null ? 'Civics অথবা Economics বেছে নিন' : null,
+          onChanged: (v) => setState(() => _compulsoryChoice = v),
+        ),
+        const SizedBox(height: 12),
+      ],
+      DropdownButtonFormField<String>(
+        value: _optionalChoice,
+        decoration: const InputDecoration(labelText: 'Optional subject *'),
+        items: optionalItems
+            .map((v) => DropdownMenuItem(value: v, child: Text(v)))
+            .toList(),
+        validator: (v) => v == null ? 'Optional subject বেছে নিন' : null,
+        onChanged: (v) => setState(() => _optionalChoice = v),
+      ),
+      const SizedBox(height: 12),
+    ];
   }
 
   @override
@@ -700,7 +929,8 @@ Address: [ঠিকানা]
                 minLines: 3,
                 decoration: const InputDecoration(
                   labelText: 'AI Prompt (বাংলা/English)',
-                  hintText: 'যেমন: Name: Rahim Uddin\nRoll: 5\nFather\'s Name: ...',
+                  hintText:
+                      'যেমন: Name: Rahim Uddin\nRoll: 5\nFather\'s Name: ...',
                   border: OutlineInputBorder(),
                 ),
               ),
@@ -727,18 +957,42 @@ Address: [ঠিকানা]
               const SizedBox(height: 12),
               _input('ছাত্র/ছাত্রীর নাম *', _nameCtl),
               _input('রোল', _rollCtl, type: TextInputType.number),
-              _input('লিঙ্গ (Male/Female/Other)', _genderCtl),
+              DropdownButtonFormField<String>(
+                initialValue: (_genderCtl.text.trim().isEmpty
+                    ? null
+                    : _genderCtl.text.trim()),
+                decoration: const InputDecoration(
+                  labelText: 'লিঙ্গ',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                items: const [
+                  DropdownMenuItem(value: 'Male', child: Text('Male')),
+                  DropdownMenuItem(value: 'Female', child: Text('Female')),
+                  DropdownMenuItem(value: 'Other', child: Text('Other')),
+                ],
+                onChanged: (v) =>
+                    setState(() => _genderCtl.text = (v ?? '').trim()),
+              ),
               _input('জন্ম তারিখ (YYYY-MM-DD)', _dobCtl),
               _input('ধর্ম', _religionCtl),
               _input('রক্তের গ্রুপ', _bloodCtl),
               _input('ইমেইল', _emailCtl, type: TextInputType.emailAddress),
               _input('মোবাইল', _phoneCtl, type: TextInputType.phone),
               _input('অভিভাবকের নাম', _guardianNameCtl),
-              _input('অভিভাবকের ফোন', _guardianPhoneCtl, type: TextInputType.phone),
+              _input(
+                'অভিভাবকের ফোন',
+                _guardianPhoneCtl,
+                type: TextInputType.phone,
+              ),
               _input('পিতার নাম', _fatherNameCtl),
               _input('মাতার নাম', _motherNameCtl),
-              _input('জন্ম নিবন্ধন নং', _birthCertCtl, type: TextInputType.number),
-              _input('ঐচ্ছিক বিষয়', _optionalCtl),
+              _input(
+                'জন্ম নিবন্ধন নং *',
+                _birthCertCtl,
+                type: TextInputType.number,
+              ),
+              ..._curriculumFields(),
               _input('ঠিকানা', _addressCtl),
               if (_error != null)
                 Padding(
@@ -763,7 +1017,10 @@ Address: [ঠিকানা]
               ? const SizedBox(
                   width: 16,
                   height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
                 )
               : const Icon(Icons.person_add, size: 18),
           label: Text(_busy ? 'Saving...' : 'ভর্তি করুন'),

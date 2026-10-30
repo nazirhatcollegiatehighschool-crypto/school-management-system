@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 
-import 'dart:async';
-
 import '../api.dart';
 import '../nctb_grading.dart';
 import '../pdf/app_pdf.dart';
@@ -33,13 +31,10 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
   List _components = const [];
   bool _componentMode = false;
   Set<int> _lockedIds = {};
-  Map<int, int> _markIds = {};
   Map<int, num> _existingTotals = {};
   int _enteredCount = 0;
-  // Workflow state (Q3/Q5): entry_status drives the actions shown, and the
-  // auto-save timer writes drafts silently while the teacher types.
+  // Draft marks change only when the teacher explicitly saves.
   String _entryStatus = 'draft';
-  Timer? _autoSaveTimer;
   String _saveState = ''; // '', 'saving', 'saved', 'error'
 
   num get _fullMarks =>
@@ -70,7 +65,6 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
 
   @override
   void dispose() {
-    _autoSaveTimer?.cancel();
     for (final c in _controllers.values) {
       c.dispose();
     }
@@ -119,7 +113,6 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
       _commentControllers = {};
       _partCtls.clear();
       _lockedIds = {};
-      _markIds = {};
       _existingTotals = {};
       _published = r['exam']['status'] == 'published';
       _entryStatus = '${r['exam']['entry_status'] ?? 'draft'}';
@@ -136,7 +129,6 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
         _commentControllers[m['student_id']] = TextEditingController(
           text: (m['comment'] ?? '').toString(),
         );
-        _markIds[m['student_id']] = m['id'];
         _existingTotals[m['student_id']] = num.tryParse('${m['marks']}') ?? 0;
         if (_componentMode) {
           final map = <String, TextEditingController>{};
@@ -151,8 +143,9 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
             text: m['marks'].toString(),
           );
         }
-        if (m['editable'] == 0 || m['editable'] == false)
+        if (m['editable'] == 0 || m['editable'] == false) {
           _lockedIds.add(m['student_id']);
+        }
       }
       _enteredCount = (r['marks'] as List).length;
       for (final s in (r['students'] as List)) {
@@ -197,37 +190,6 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
     return any ? sum : (_existingTotals[studentId] ?? 0);
   }
 
-  /// Q5: debounce typing into a silent draft POST. Partial data is allowed
-  /// here (soft mode) — the hard validation only runs on submit.
-  void _scheduleAutoSave() {
-    if (_published || _entryStatus == 'approved' || _entryStatus == 'submitted')
-      return;
-    _autoSaveTimer?.cancel();
-    _autoSaveTimer = Timer(
-      const Duration(milliseconds: 2500),
-      () => _autoSave(),
-    );
-  }
-
-  Future<void> _autoSave() async {
-    final records = _collectRecords();
-    if (records.isEmpty) return;
-    setState(() => _saveState = 'saving');
-    try {
-      await Api.post('/teacher/exams/${widget.examId}/marks', {
-        'records': records,
-      });
-      if (!mounted) return;
-      setState(() => _saveState = 'saved');
-      Timer(const Duration(seconds: 4), () {
-        if (mounted && _saveState == 'saved') setState(() => _saveState = '');
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => _saveState = 'error');
-    }
-  }
-
   List<Map<String, dynamic>> _collectRecords() {
     final records = <Map<String, dynamic>>[];
     final defaultTotal = _fullMarks;
@@ -262,15 +224,30 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
   /// server hard-blocks on missing/out-of-range data and returns a list.
   Future<void> _submitForApproval() async {
     final messenger = ScaffoldMessenger.of(context);
-    // Save the current sheet first so the server validates what's on screen.
-    try {
-      await Api.post('/teacher/exams/${widget.examId}/marks', {
-        'records': _collectRecords(),
-      });
-    } catch (_) {
-      /* submit will surface the real error */
+    final records = _collectRecords();
+    if (records.isEmpty) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('Submit করার আগে marks দিন এবং Save করুন।'),
+        ),
+      );
+      return;
     }
     try {
+      final saved = await Api.post('/teacher/exams/${widget.examId}/marks', {
+        'records': records,
+      });
+      if (Api.isQueued(saved)) {
+        messenger.showSnackBar(
+          const SnackBar(
+            backgroundColor: Colors.orange,
+            content: Text(
+              'Internet/server সংযোগ ছাড়া marks submit করা যাবে না।',
+            ),
+          ),
+        );
+        return;
+      }
       final r = await Api.post('/teacher/exams/${widget.examId}/submit', {});
       if (!mounted) return;
       messenger.showSnackBar(
@@ -312,12 +289,14 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
       ).showSnackBar(const SnackBar(content: Text('কোনো marks দেওয়া হয়নি')));
       return;
     }
+    setState(() => _saveState = 'saving');
     try {
       final r = await Api.post('/teacher/exams/${widget.examId}/marks', {
         'records': records,
       });
       if (!mounted) return;
       if (Api.isQueued(r)) {
+        setState(() => _saveState = '');
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             backgroundColor: Colors.orange,
@@ -328,6 +307,7 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
         );
         return;
       }
+      setState(() => _saveState = 'saved');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           backgroundColor: Colors.teal,
@@ -337,6 +317,7 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
       _load();
     } catch (e) {
       if (!mounted) return;
+      setState(() => _saveState = 'error');
       messenger.showSnackBar(
         SnackBar(
           backgroundColor: Colors.red,
@@ -497,7 +478,7 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
         content: TextField(
           controller: reasonCtl,
           decoration: const InputDecoration(
-            hintText: 'কারণ (optional)',
+            hintText: 'Reject করার কারণ লিখুন',
             border: OutlineInputBorder(),
           ),
         ),
@@ -514,16 +495,25 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
       ),
     );
     if (ok != true || !mounted) return;
+    final reason = reasonCtl.text.trim();
+    if (reason.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Reject করার কারণ লিখুন।')));
+      return;
+    }
     final messenger = ScaffoldMessenger.of(context);
     try {
       await Api.post('/teacher/exams/${widget.examId}/ct-reject', {
-        'reason': reasonCtl.text.trim(),
+        'reason': reason,
       });
       if (!mounted) return;
       messenger.showSnackBar(
         const SnackBar(
           backgroundColor: Colors.orange,
-          content: Text('Rejected — teacher আবার edit করতে পারবে।'),
+          content: Text(
+            'Rejected — সংশোধনের জন্য Admin re-entry approval চাইতে হবে।',
+          ),
         ),
       );
       _load();
@@ -572,117 +562,10 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Class teacher-এর কাছে re-entry আবেদন পাঠানো হয়েছে।'),
+          content: Text('Admin-এর কাছে re-entry আবেদন পাঠানো হয়েছে।'),
         ),
       );
       _load();
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: Colors.red,
-          content: Text(e.toString().replaceFirst('Exception: ', '')),
-        ),
-      );
-    }
-  }
-
-  Future<void> _approveExamReentry() async {
-    try {
-      await Api.post('/teacher/exams/${widget.examId}/reentry-approve', {});
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          backgroundColor: Colors.green,
-          content: Text('Re-entry খুলে দেওয়া হয়েছে।'),
-        ),
-      );
-      _load();
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: Colors.red,
-          content: Text(e.toString().replaceFirst('Exception: ', '')),
-        ),
-      );
-    }
-  }
-
-  Future<void> _ctUnlock() async {
-    final messenger = ScaffoldMessenger.of(context);
-    try {
-      await Api.post('/teacher/exams/${widget.examId}/unlock', {});
-      if (!mounted) return;
-      messenger.showSnackBar(
-        const SnackBar(
-          backgroundColor: Colors.orange,
-          content: Text('Unlock — teacher আবার edit করতে পারবে।'),
-        ),
-      );
-      _load();
-    } catch (e) {
-      if (!mounted) return;
-      messenger.showSnackBar(
-        SnackBar(
-          backgroundColor: Colors.red,
-          content: Text(e.toString().replaceFirst('Exception: ', '')),
-        ),
-      );
-    }
-  }
-
-  Future<void> _requestUnlock(int studentId) async {
-    final markId = _markIds[studentId];
-    if (markId == null) return;
-    final reasonCtl = TextEditingController();
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Admin অনুমতি চান?'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              '৫ ঘণ্টা পার হয়ে গেছে। re-edit-এর জন্য admin-এর কাছে request যাবে।',
-              style: TextStyle(fontSize: 13),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: reasonCtl,
-              decoration: const InputDecoration(
-                hintText: 'কারণ (optional)',
-                border: OutlineInputBorder(),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('বাতিল'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Request পাঠান'),
-          ),
-        ],
-      ),
-    );
-    if (ok != true || !mounted) return;
-    try {
-      await Api.post('/teacher/marks/$markId/request-unlock', {
-        'reason': reasonCtl.text.trim(),
-      });
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          backgroundColor: Colors.teal,
-          content: Text(
-            'Request পাঠানো হয়েছে। Admin approve করলে edit করা যাবে।',
-          ),
-        ),
-      );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -712,12 +595,15 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
     final reentry = _data?['reentry_request'] is Map
         ? _data!['reentry_request'] as Map
         : null;
+    final rejectReason = (_data?['exam']?['reject_reason'] ?? '')
+        .toString()
+        .trim();
     final dl = (_data?['exam'] ?? {})['entry_deadline']?.toString();
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.examName),
         actions: [
-          // Auto-save state chip (Q5).
+          // Explicit save status.
           if (_saveState.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(right: 4),
@@ -776,6 +662,7 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
       ),
       floatingActionButton:
           (_loading ||
+              _saveState == 'saving' ||
               _published ||
               !canEdit ||
               _entryStatus == 'submitted' ||
@@ -846,7 +733,11 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
                       ),
                     ),
                   ),
-                if (isSupervisor && _entryStatus == 'submitted')
+                if (isSupervisor &&
+                    _entryStatus == 'submitted' &&
+                    ((_data?['exam']?['reject_reason'] ?? '')
+                        .toString()
+                        .isEmpty))
                   Padding(
                     padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
                     child: Card(
@@ -898,6 +789,23 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
                       ),
                     ),
                   ),
+                if (isSupervisor &&
+                    _entryStatus == 'submitted' &&
+                    ((_data?['exam']?['reject_reason'] ?? '')
+                        .toString()
+                        .isNotEmpty))
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+                    child: Card(
+                      color: Colors.orange.shade50,
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Text(
+                          'Marks sheet reject করা হয়েছে। কারণ: ${_data?['exam']?['reject_reason']}\nসংশোধনের জন্য subject teacher-কে Admin re-entry approval চাইতে হবে।',
+                        ),
+                      ),
+                    ),
+                  ),
                 if (isSupervisor && _entryStatus == 'approved')
                   Padding(
                     padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
@@ -914,10 +822,6 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
                                 '✅ Approved — admin publish করলে guardian-রা result দেখতে পাবে।',
                                 style: TextStyle(fontSize: 13),
                               ),
-                            ),
-                            TextButton(
-                              onPressed: _ctUnlock,
-                              child: const Text('Unlock'),
                             ),
                           ],
                         ),
@@ -952,30 +856,19 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
                       ),
                     ),
                   ),
-                Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Card(
-                    color: Colors.amber.shade50,
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.timer, color: Colors.amber),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              'Marks সেভ করার পর ৫ ঘণ্টা edit করা যাবে। এরপর admin permission লাগবে।',
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: Colors.brown.shade700,
-                              ),
-                            ),
-                          ),
-                        ],
+                if (_entryStatus == 'draft')
+                  Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Card(
+                      color: Colors.blue.shade50,
+                      child: const Padding(
+                        padding: EdgeInsets.all(12),
+                        child: Text(
+                          'Draft হিসেবে Save করলে submit না করা পর্যন্ত নম্বর edit করা যাবে।',
+                        ),
                       ),
                     ),
                   ),
-                ),
                 if (canEdit && ['submitted', 'approved'].contains(_entryStatus))
                   Padding(
                     padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
@@ -992,9 +885,11 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
                             const SizedBox(width: 8),
                             Expanded(
                               child: Text(
-                                reentry != null
-                                    ? 'Re-entry আবেদন class teacher-এর approval-এর অপেক্ষায়।'
-                                    : 'Submit-এর পর নম্বর বদলাতে হলে class teacher-এর কাছে re-entry আবেদন করুন.',
+                                rejectReason.isNotEmpty
+                                    ? 'Reject-এর কারণ: $rejectReason\nAdmin re-entry approval চাইলে নম্বর edit করা যাবে।'
+                                    : reentry != null
+                                    ? 'Re-entry আবেদন Admin-এর approval-এর অপেক্ষায়।'
+                                    : 'Submit-এর পর নম্বর edit করতে Admin-এর অনুমোদনের আবেদন করুন.',
                               ),
                             ),
                             if (reentry == null)
@@ -1002,38 +897,6 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
                                 onPressed: _requestExamReentry,
                                 child: const Text('Re-entry চান'),
                               ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                if (isSupervisor && reentry != null)
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-                    child: Card(
-                      color: Colors.orange.shade50,
-                      child: Padding(
-                        padding: const EdgeInsets.all(12),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              '${reentry['teacher_name'] ?? 'Subject teacher'}-এর re-entry আবেদন',
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w800,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text('${reentry['reason'] ?? ''}'),
-                            const SizedBox(height: 8),
-                            SizedBox(
-                              width: double.infinity,
-                              child: FilledButton.icon(
-                                icon: const Icon(Icons.lock_open_rounded),
-                                label: const Text('অনুমোদন করে re-entry খুলুন'),
-                                onPressed: _approveExamReentry,
-                              ),
-                            ),
                           ],
                         ),
                       ),
@@ -1161,7 +1024,6 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
                                                 textAlign: TextAlign.center,
                                                 onChanged: (_) {
                                                   setState(() {});
-                                                  _scheduleAutoSave();
                                                 },
                                                 decoration:
                                                     const InputDecoration(
@@ -1197,7 +1059,6 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
                                       textAlign: TextAlign.center,
                                       onChanged: (_) {
                                         setState(() {});
-                                        _scheduleAutoSave();
                                       },
                                       decoration: InputDecoration(
                                         hintText:
@@ -1228,23 +1089,6 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
                                           fontSize: 11,
                                         ),
                                       ),
-                                      if (!_published &&
-                                          _markIds.containsKey(sid))
-                                        TextButton(
-                                          style: TextButton.styleFrom(
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 6,
-                                            ),
-                                            minimumSize: Size.zero,
-                                            tapTargetSize: MaterialTapTargetSize
-                                                .shrinkWrap,
-                                          ),
-                                          onPressed: () => _requestUnlock(sid),
-                                          child: const Text(
-                                            'Admin অনুমতি চান',
-                                            style: TextStyle(fontSize: 11),
-                                          ),
-                                        ),
                                     ],
                                   ),
                                 )

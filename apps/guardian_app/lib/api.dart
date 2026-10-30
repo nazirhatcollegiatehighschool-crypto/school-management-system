@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+
 import 'config.dart';
 import 'sync_store.dart';
 
@@ -46,10 +48,14 @@ class Api {
 
   static bool isNetworkError(Object e) {
     final s = e.toString();
-    return e is SocketException || e is TimeoutException ||
-        s.contains('SocketException') || s.contains('TimeoutException') ||
-        s.contains('Connection refused') || s.contains('HandshakeException') ||
-        s.contains('ClientException') || s.contains('connect failed');
+    return e is SocketException ||
+        e is TimeoutException ||
+        s.contains('SocketException') ||
+        s.contains('TimeoutException') ||
+        s.contains('Connection refused') ||
+        s.contains('HandshakeException') ||
+        s.contains('ClientException') ||
+        s.contains('connect failed');
   }
 
   /// True when a mutation was stored on-device (offline) instead of sent.
@@ -73,20 +79,35 @@ class Api {
   }
 
   static Map<String, String> get _headers => {
-        'Content-Type': 'application/json',
-        if (token != null) 'Authorization': 'Bearer $token',
-      };
+    'Content-Type': 'application/json',
+    if (token != null) 'Authorization': 'Bearer $token',
+  };
 
   /// Connectivity probe for the Server-URL setting: raw GET, no auth/cache.
-  static Future<bool> testHealth(String base) async {
+  static Future<bool> testHealth(
+    String base, {
+    Duration timeout = const Duration(seconds: 20),
+  }) async {
     try {
       final res = await http
           .get(Uri.parse('${base.replaceAll(RegExp(r'/+$'), '')}/api/health'))
-          .timeout(const Duration(seconds: 20));
+          .timeout(timeout);
       return res.statusCode == 200;
     } catch (_) {
       return false;
     }
+  }
+
+  static Future<http.Response> _getWithFallback(
+    String path, {
+    bool conditional = true,
+  }) async {
+    final hadOverride = Config.hasOverride;
+    final headers = conditional ? _conditionalHeaders(path) : _headers;
+    Future<http.Response> request(Duration timeout) => http
+        .get(Uri.parse(Config.api + path), headers: headers)
+        .timeout(timeout);
+    return request(hadOverride ? const Duration(seconds: 4) : _timeout);
   }
 
   static Future<dynamic> get(String path) async {
@@ -105,23 +126,20 @@ class Api {
     try {
       http.Response res;
       try {
-        res = await http
-            .get(Uri.parse(Config.api + path), headers: _conditionalHeaders(path))
-            .timeout(_timeout);
+        res = await _getWithFallback(path);
       } catch (e) {
         if (!isNetworkError(e)) rethrow;
         // transient: wait ~1.2s (+jitter) then retry exactly once
-        await Future.delayed(Duration(
-            milliseconds: 1000 + (DateTime.now().microsecond % 400)));
-        res = await http
-            .get(Uri.parse(Config.api + path), headers: _conditionalHeaders(path))
-            .timeout(_timeout);
+        await Future.delayed(
+          Duration(milliseconds: 1000 + (DateTime.now().microsecond % 400)),
+        );
+        res = await _getWithFallback(path);
       }
       if (res.statusCode == 304) {
         sync.markRequestOk();
         final cached = sync.cacheGet(path);
         if (cached != null) return jsOne(cached);
-        res = await http.get(Uri.parse(Config.api + path), headers: _headers).timeout(_timeout);
+        res = await _getWithFallback(path, conditional: false);
       }
       final data = _handle(res);
       sync.markRequestOk();
@@ -156,7 +174,11 @@ class Api {
   static Future<dynamic> post(String path, [Map<String, dynamic>? body]) async {
     try {
       final res = await http
-          .post(Uri.parse(Config.api + path), headers: _headers, body: jsonEncode(body ?? {}))
+          .post(
+            Uri.parse(Config.api + path),
+            headers: _headers,
+            body: jsonEncode(body ?? {}),
+          )
           .timeout(_timeout);
       final data = _handle(res);
       sync.markRequestOk();
@@ -174,7 +196,11 @@ class Api {
   static Future<dynamic> put(String path, [Map<String, dynamic>? body]) async {
     try {
       final res = await http
-          .put(Uri.parse(Config.api + path), headers: _headers, body: jsonEncode(body ?? {}))
+          .put(
+            Uri.parse(Config.api + path),
+            headers: _headers,
+            body: jsonEncode(body ?? {}),
+          )
           .timeout(_timeout);
       final data = _handle(res);
       sync.markRequestOk();
@@ -224,7 +250,8 @@ class Api {
     _preloading = true;
     try {
       final profile = await get('/guardian/profile').catchError((_) {});
-      final students = (profile != null && profile is Map && profile['students'] is List)
+      final students =
+          (profile != null && profile is Map && profile['students'] is List)
           ? (profile['students'] as List)
           : const <dynamic>[];
       for (final st in students.take(4)) {
@@ -234,8 +261,14 @@ class Api {
           final events = await get('/guardian/student/$id/exam-events');
           if (events is List && events.isNotEmpty) {
             final eid = events.first['id'].toString();
-            unawaited(get('/guardian/student/$id/marksheet?event_id=$eid').catchError((_) {}));
-            unawaited(get('/guardian/student/$id/result-card?event_id=$eid').catchError((_) {}));
+            unawaited(
+              get('/guardian/student/$id/marksheet?event_id=$eid')
+                  .catchError((_) {}),
+            );
+            unawaited(
+              get('/guardian/student/$id/result-card?event_id=$eid')
+                  .catchError((_) {}),
+            );
           }
         } catch (_) {}
       }
@@ -281,8 +314,13 @@ dynamic jsOne(dynamic v) {
 
 String friendlyError(Object e) {
   final s = e.toString();
-  if (e is SocketException || e is TimeoutException || s.contains('SocketException') || s.contains('TimeoutException')) {
+  if (e is SocketException ||
+      e is TimeoutException ||
+      s.contains('SocketException') ||
+      s.contains('TimeoutException')) {
     return 'কানেকশন পাওয়া যায়নি। ইন্টারনেট চেক করে আবার চেষ্টা করুন।';
   }
-  return s.replaceFirst('Exception: ', '').replaceFirst('HandshakeException', 'নিরাপদ কানেকশন ব্যর্থ');
+  return s
+      .replaceFirst('Exception: ', '')
+      .replaceFirst('HandshakeException', 'নিরাপদ কানেকশন ব্যর্থ');
 }

@@ -110,8 +110,11 @@ class AppPdf {
         );
 
   /// Reference-inspired A4 paper: fine double rule and a quiet school-seal watermark.
-  static pw.PageTheme paperTheme({double margin = 36}) => pw.PageTheme(
-    pageFormat: PdfPageFormat.a4,
+  static pw.PageTheme paperTheme({
+    double margin = 36,
+    PdfPageFormat? pageFormat,
+  }) => pw.PageTheme(
+    pageFormat: pageFormat ?? PdfPageFormat.a4,
     margin: pw.EdgeInsets.all(margin),
     buildBackground: (ctx) => pw.FullPage(
       ignoreMargins: true,

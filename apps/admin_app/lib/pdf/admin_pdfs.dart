@@ -4,6 +4,7 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
 import 'app_pdf.dart';
+import 'marksheet_template.dart';
 
 /// PDFs rendered **on the phone** from JSON the admin app already has.
 ///
@@ -23,6 +24,115 @@ class AdminPdfs {
   static String _addr(Map settings) =>
       _s(settings['school_address'] ?? settings['address'] ?? '');
 
+  static Future<Uint8List> teacherRoster(
+    List<Map> teachers, {
+    required Map settings,
+  }) async {
+    final bn = await AppPdf.banglaFont();
+    final active = teachers
+        .where((teacher) => teacher['active'] == true || teacher['active'] == 1)
+        .toList();
+    final doc = pw.Document();
+    pw.Widget cell(
+      String text, {
+      bool bold = false,
+      pw.Alignment alignment = pw.Alignment.centerLeft,
+    }) => pw.Container(
+      height: 34,
+      alignment: alignment,
+      padding: const pw.EdgeInsets.symmetric(horizontal: 5, vertical: 4),
+      child: pw.Text(
+        text,
+        maxLines: 2,
+        style: AppPdf.bn(bn, size: 8, weight: bold ? pw.FontWeight.bold : null),
+      ),
+    );
+    doc.addPage(
+      pw.MultiPage(
+        pageTheme: AppPdf.paperTheme(
+          margin: 28,
+          pageFormat: PdfPageFormat.a4.landscape,
+        ),
+        header: (_) => AppPdf.header(
+          bn,
+          _school(settings),
+          _addr(settings),
+          title: 'শিক্ষক তথ্য ও স্বাক্ষর তালিকা',
+          subtitle:
+              'EIIN: ${_s(settings['school_eiin']).trim().isEmpty ? '104417' : settings['school_eiin']}   •   প্রতিষ্ঠিত: ১৯৫৪',
+        ),
+        build: (_) => [
+          pw.SizedBox(height: 10),
+          pw.Table(
+            border: pw.TableBorder.all(color: PdfColors.grey700, width: .6),
+            columnWidths: {
+              0: const pw.FixedColumnWidth(28),
+              1: const pw.FlexColumnWidth(2.1),
+              2: const pw.FlexColumnWidth(1.6),
+              3: const pw.FlexColumnWidth(1.25),
+              4: const pw.FlexColumnWidth(1.3),
+              5: const pw.FlexColumnWidth(1.8),
+            },
+            children: [
+              pw.TableRow(
+                decoration: const pw.BoxDecoration(color: PdfColors.indigo800),
+                children: [
+                  cell('নং', bold: true, alignment: pw.Alignment.center),
+                  cell('শিক্ষকের নাম', bold: true),
+                  cell('ডিগ্রি', bold: true),
+                  cell('ফোন নম্বর', bold: true),
+                  cell('স্বাক্ষর', bold: true),
+                  cell('মন্তব্য', bold: true),
+                ],
+              ),
+              for (var i = 0; i < active.length; i++)
+                pw.TableRow(
+                  children: [
+                    cell('${i + 1}', alignment: pw.Alignment.center),
+                    cell(_s(active[i]['name'])),
+                    cell(_s(active[i]['teacher_degree'])),
+                    cell(_s(active[i]['phone'])),
+                    cell(''),
+                    cell(''),
+                  ],
+                ),
+            ],
+          ),
+          pw.SizedBox(height: 42),
+          pw.Row(
+            children: [
+              pw.Expanded(
+                child: pw.Column(
+                  children: [
+                    pw.Container(width: 190, height: 1, color: PdfColors.black),
+                    pw.SizedBox(height: 5),
+                    pw.Text(
+                      'প্রধান শিক্ষক',
+                      style: AppPdf.bn(bn, size: 9, weight: pw.FontWeight.bold),
+                    ),
+                  ],
+                ),
+              ),
+              pw.Expanded(
+                child: pw.Column(
+                  children: [
+                    pw.Container(width: 190, height: 1, color: PdfColors.black),
+                    pw.SizedBox(height: 5),
+                    pw.Text(
+                      'সহকারী প্রধান শিক্ষক',
+                      style: AppPdf.bn(bn, size: 9, weight: pw.FontWeight.bold),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+    return doc.save();
+  }
+
   static String _clsLabel(Map cls) {
     final base = _s(cls['name']);
     final extra = _s(cls['group_name']).isNotEmpty
@@ -39,131 +149,91 @@ class AdminPdfs {
   // ------------------------------------------------------------- ONE RESULT CARD
   /// `/results/marksheet/:studentId/:eventId` payload -> one-page result card.
   static Future<Uint8List> resultCard(Map data) async {
-    final pw.Font bn = await AppPdf.banglaFont();
+    final bn = await AppPdf.banglaFont();
+    final script = await MarksheetTemplate.loadScriptFont();
+    final logo = await MarksheetTemplate.loadLogo();
+    final watermark = await MarksheetTemplate.loadWatermark();
     final student = _asMap(data['student']);
     final event = _asMap(data['event']);
     final result = _asMap(data['result']);
     final settings = _asMap(data['settings']);
     final signatures = _asMap(data['signatures']);
     final families = _asList(result['families']);
+    final attendance = _attendanceLabel(data['attendance']);
+    final position = _positionLabel(data['dual_position'], data['position']);
 
     final doc = pw.Document();
     doc.addPage(
       pw.Page(
-        pageTheme: AppPdf.paperTheme(margin: 40),
-        build: (_) => pw.Column(
-          crossAxisAlignment: pw.CrossAxisAlignment.start,
-          children: [
-            AppPdf.header(
-              bn,
-              _school(settings),
-              _addr(settings),
-              title: 'ACADEMIC MARKSHEET',
-              subtitle: _s(event['name']),
-            ),
-            pw.SizedBox(height: 10),
-            _kv(bn, 'নাম / Name', _s(student['name'])),
-            pw.Row(
-              children: [
-                pw.Expanded(
-                  child: _kv(bn, 'শ্রেণি / Class', _clsLabel(student)),
-                ),
-                pw.Expanded(child: _kv(bn, 'রোল / Roll', _s(student['roll']))),
-                pw.Expanded(
-                  child: _kv(bn, 'আইডি / ID', _s(student['student_code'])),
-                ),
-              ],
-            ),
-            pw.SizedBox(height: 10),
-            pw.TableHelper.fromTextArray(
-              headers: ['বিষয়', 'নম্বর', 'সর্বোচ্চ', 'গ্রেড', 'GPA'],
-              data: [
-                for (final f in families)
-                  [
-                    _s(_asMap(f)['subject']),
-                    '${_s(_asMap(f)['total'] ?? 0)}/${_s(_asMap(f)['full'] ?? 0)}',
-                    _s(_asMap(f)['highest'] ?? '—'),
-                    _s(_asMap(f)['letter_grade']),
-                    _s(_asMap(f)['grade_point']),
-                  ],
-              ],
-              border: pw.TableBorder.all(),
-              cellAlignment: pw.Alignment.centerLeft,
-              headerStyle: AppPdf.bn(
-                bn,
-                size: 9,
-                weight: pw.FontWeight.bold,
-                color: PdfColors.white,
-              ),
-              headerDecoration: const pw.BoxDecoration(
-                color: PdfColors.grey700,
-              ),
-              cellStyle: AppPdf.bn(bn, size: 9),
-              cellPadding: const pw.EdgeInsets.all(6),
-            ),
-            pw.SizedBox(height: 10),
-            pw.Row(
-              children: [
-                pw.Expanded(
-                  child: _kv(bn, 'ফলাফল', _s(result['result_status'])),
-                ),
-                pw.Expanded(child: _kv(bn, 'GPA', _s(result['final_gpa']))),
-                pw.Expanded(
-                  child: _kv(
-                    bn,
-                    'মোট নম্বর',
-                    '${_s(result['total_marks'] ?? 0)}/${_s(result['total_full'] ?? 0)}',
-                  ),
-                ),
-              ],
-            ),
-            if (_s(data['class_highest_gpa']).isNotEmpty)
-              pw.Padding(
-                padding: const pw.EdgeInsets.only(top: 4),
-                child: _kv(
-                  bn,
-                  'শ্রেণির সর্বোচ্চ GPA',
-                  _s(data['class_highest_gpa']),
-                ),
-              ),
-            if (_s(data['remarks']).isNotEmpty) ...[
-              pw.SizedBox(height: 8),
-              pw.Container(
-                width: double.infinity,
-                padding: const pw.EdgeInsets.all(8),
-                decoration: pw.BoxDecoration(
-                  color: PdfColors.grey100,
-                  border: pw.Border.all(color: PdfColors.grey400),
-                  borderRadius: pw.BorderRadius.circular(4),
-                ),
-                child: pw.Text(
-                  'শিক্ষকের মন্তব্য: ${_s(data['remarks'])}',
-                  style: AppPdf.bn(bn, size: 9.5),
-                ),
-              ),
-            ],
-            pw.Spacer(),
-            pw.Row(
-              crossAxisAlignment: pw.CrossAxisAlignment.end,
-              children: [
-                AppPdf.signatoryBlock(
-                  bn,
-                  signatures['class_teacher'] as Map?,
-                  'শ্রেণি শিক্ষক',
-                ),
-                pw.SizedBox(width: 24),
-                AppPdf.signatoryBlock(
-                  bn,
-                  signatures['head_teacher'] as Map?,
-                  'প্রধান শিক্ষক',
-                ),
-              ],
-            ),
-          ],
+        pageTheme: MarksheetTemplate.pageTheme(
+          watermark: watermark,
+          margin: 32,
+        ),
+        build: (_) => MarksheetTemplate.build(
+          banglaFont: bn,
+          scriptFont: script,
+          logo: logo,
+          schoolName: _school(settings),
+          schoolAddress: _addr(settings),
+          eventName: _s(event['name']),
+          student: student,
+          event: event,
+          result: result,
+          families: families,
+          serialNo: _s(data['serial_no']),
+          attendanceText: attendance,
+          positionText: position,
+          classHighestGpa: _s(data['class_highest_gpa']),
+          remarks: _s(data['remarks']),
+          signatures: signatures,
+        ),
+      ),
+    );
+    doc.addPage(
+      pw.MultiPage(
+        maxPages: 200,
+        pageTheme: MarksheetTemplate.pageTheme(
+          watermark: watermark,
+          margin: 32,
+        ),
+        build: (_) => MarksheetTemplate.buildActivitiesPage(
+          banglaFont: bn,
+          schoolName: _school(settings),
+          eventName: _s(event['name']),
+          student: student,
+          activities: _asMap(data['activities']),
+          activityPeriod: _asMap(data['activity_period']),
         ),
       ),
     );
     return doc.save();
+  }
+
+  static String _attendanceLabel(dynamic raw) {
+    if (raw is Map) {
+      if (raw['percentage'] != null) {
+        return '${_s(raw['percentage'])}% (${_s(raw['present_days'])}/${_s(raw['total_days'])} days)';
+      }
+      return '';
+    }
+    if (raw is! List) return '';
+    var present = 0;
+    var total = 0;
+    for (final item in raw) {
+      final row = _asMap(item);
+      final count = int.tryParse(_s(row['c'] ?? row['cnt'])) ?? 0;
+      total += count;
+      if (_s(row['status']) == 'present') present = count;
+    }
+    return total == 0 ? '' : '$present / $total days';
+  }
+
+  static String _positionLabel(dynamic dual, dynamic fallback) {
+    if (dual is Map && (dual['section'] != null || dual['combined'] != null)) {
+      return 'Section ${_s(dual['section'] ?? '-')}/${_s(dual['section_of'] ?? '-')} | All sections ${_s(dual['combined'] ?? '-')}/${_s(dual['combined_of'] ?? '-')}';
+    }
+    if (fallback is Map) return '${_s(fallback['rank'])}/${_s(fallback['of'])}';
+    return _s(fallback);
   }
 
   // ------------------------------------------------- WHOLE-CLASS RESULT CARDS
@@ -174,116 +244,88 @@ class AdminPdfs {
   static Future<Uint8List> classResultCards(
     Map tabulation, {
     required String eventName,
+    Map? event,
     required Map cls,
     required Map settings,
     Map? signatures,
   }) async {
     final pw.Font bn = await AppPdf.banglaFont();
+    final script = await MarksheetTemplate.loadScriptFont();
+    final logo = await MarksheetTemplate.loadLogo();
+    final watermark = await MarksheetTemplate.loadWatermark();
     final subjects = _asList(tabulation['subjects']).map(_s).toList();
     final rows = _asList(tabulation['rows']);
     final clsLabel = _clsLabel(cls);
-
     final doc = pw.Document();
-    for (final r in rows) {
-      final row = _asMap(r);
-      final families = _asMap(row['families']);
+
+    for (final rawRow in rows) {
+      final row = _asMap(rawRow);
+      final familyMap = _asMap(row['families']);
+      final familyRows = <Map>[
+        for (final subject in subjects)
+          if (_asMap(familyMap[subject]).isNotEmpty)
+            {..._asMap(familyMap[subject]), 'subject': subject},
+      ];
+      final student = <String, dynamic>{
+        'name': row['name'],
+        'roll': row['roll'],
+        'student_code': row['student_code'],
+        'birth_cert_no': row['birth_cert_no'],
+        'father_name': row['father_name'],
+        'mother_name': row['mother_name'],
+        'dob': row['dob'],
+        'class_name': cls['name'],
+        'section': cls['section'],
+        'group_name': cls['group_name'],
+      };
+      final result = <String, dynamic>{
+        'result_status': row['result_status'],
+        'final_gpa': row['final_gpa'],
+        'total_marks': row['total_marks'],
+        'total_full': row['total_full'],
+        'total_gpa_without_4th': row['total_gpa_without_4th'],
+      };
+      final positionText =
+          row['section_position'] != null || row['combined_position'] != null
+          ? 'Section ${_s(row['section_position'] ?? '-')}/${_s(row['section_of'] ?? '-')} | All sections ${_s(row['combined_position'] ?? '-')}/${_s(row['combined_of'] ?? '-')}'
+          : _s(row['position']);
       doc.addPage(
         pw.Page(
-          pageTheme: AppPdf.paperTheme(margin: 40),
-          build: (_) => pw.Column(
-            crossAxisAlignment: pw.CrossAxisAlignment.start,
-            children: [
-              AppPdf.header(
-                bn,
-                _school(settings),
-                _addr(settings),
-                title: 'ACADEMIC MARKSHEET',
-                subtitle: '$eventName  •  $clsLabel',
-              ),
-              pw.SizedBox(height: 10),
-              _kv(bn, 'নাম / Name', _s(row['name'])),
-              pw.Row(
-                children: [
-                  pw.Expanded(child: _kv(bn, 'শ্রেণি / Class', clsLabel)),
-                  pw.Expanded(child: _kv(bn, 'রোল / Roll', _s(row['roll']))),
-                  pw.Expanded(
-                    child: _kv(bn, 'আইডি / ID', _s(row['student_code'])),
-                  ),
-                ],
-              ),
-              pw.SizedBox(height: 10),
-              pw.TableHelper.fromTextArray(
-                headers: ['বিষয়', 'নম্বর', 'সর্বোচ্চ', 'গ্রেড', 'GPA'],
-                data: [
-                  for (final sub in subjects)
-                    [
-                      sub,
-                      (() {
-                        final f = _asMap(families[sub]);
-                        if (f.isEmpty) return '—';
-                        return '${_s(f['total'] ?? 0)}/${_s(f['full'] ?? 0)}';
-                      })(),
-                      (() {
-                        final f = _asMap(families[sub]);
-                        return f.isEmpty ? '—' : _s(f['highest'] ?? '—');
-                      })(),
-                      _s(_asMap(families[sub])['letter_grade']),
-                      _s(_asMap(families[sub])['grade_point']),
-                    ],
-                ],
-                border: pw.TableBorder.all(),
-                cellAlignment: pw.Alignment.centerLeft,
-                headerStyle: AppPdf.bn(
-                  bn,
-                  size: 9,
-                  weight: pw.FontWeight.bold,
-                  color: PdfColors.white,
-                ),
-                headerDecoration: const pw.BoxDecoration(
-                  color: PdfColors.grey700,
-                ),
-                cellStyle: AppPdf.bn(bn, size: 9),
-                cellPadding: const pw.EdgeInsets.all(6),
-              ),
-              pw.SizedBox(height: 10),
-              pw.Row(
-                children: [
-                  pw.Expanded(
-                    child: _kv(bn, 'ফলাফল', _s(row['result_status'])),
-                  ),
-                  pw.Expanded(child: _kv(bn, 'GPA', _s(row['final_gpa']))),
-                  pw.Expanded(
-                    child: _kv(
-                      bn,
-                      'মোট নম্বর',
-                      '${_s(row['total_marks'] ?? 0)}/${_s(row['total_full'] ?? 0)}',
-                    ),
-                  ),
-                ],
-              ),
-              if (_s(row['position']).isNotEmpty)
-                pw.Padding(
-                  padding: const pw.EdgeInsets.only(top: 4),
-                  child: _kv(bn, 'মেধা স্থান', _s(row['position'])),
-                ),
-              pw.Spacer(),
-              pw.Row(
-                crossAxisAlignment: pw.CrossAxisAlignment.end,
-                children: [
-                  AppPdf.signatoryBlock(
-                    bn,
-                    signatures?['class_teacher'] as Map?,
-                    'শ্রেণি শিক্ষক',
-                  ),
-                  pw.SizedBox(width: 24),
-                  AppPdf.signatoryBlock(
-                    bn,
-                    signatures?['head_teacher'] as Map?,
-                    'প্রধান শিক্ষক',
-                  ),
-                ],
-              ),
-            ],
+          pageTheme: MarksheetTemplate.pageTheme(
+            watermark: watermark,
+            margin: 32,
+          ),
+          build: (_) => MarksheetTemplate.build(
+            banglaFont: bn,
+            scriptFont: script,
+            logo: logo,
+            schoolName: _school(settings),
+            schoolAddress: _addr(settings),
+            eventName: '$eventName • $clsLabel',
+            student: student,
+            event: event ?? {'name': eventName},
+            result: result,
+            families: familyRows,
+            positionText: positionText,
+            classHighestGpa: _s(row['class_highest_gpa']),
+            signatures: signatures,
+          ),
+        ),
+      );
+      doc.addPage(
+        pw.MultiPage(
+          maxPages: 200,
+          pageTheme: MarksheetTemplate.pageTheme(
+            watermark: watermark,
+            margin: 32,
+          ),
+          build: (_) => MarksheetTemplate.buildActivitiesPage(
+            banglaFont: bn,
+            schoolName: _school(settings),
+            eventName: eventName,
+            student: student,
+            activities: _asMap(row['activities']),
+            activityPeriod: _asMap(row['activity_period']),
           ),
         ),
       );
@@ -417,20 +459,6 @@ class AdminPdfs {
       ),
     );
     return doc.save();
-  }
-
-  static pw.Widget _kv(pw.Font bn, String k, String v) {
-    return pw.RichText(
-      text: pw.TextSpan(
-        children: [
-          pw.TextSpan(
-            text: '$k: ',
-            style: AppPdf.bn(bn, size: 9, weight: pw.FontWeight.bold),
-          ),
-          pw.TextSpan(text: v, style: AppPdf.bn(bn, size: 9)),
-        ],
-      ),
-    );
   }
 
   /// exam_date / result_date come back as ISO strings — show only the day part.

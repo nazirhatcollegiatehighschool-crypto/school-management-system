@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -8,52 +9,12 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
 import 'api.dart';
 
-/// Professional in-app updater (Play-Store-style, no reinstall friction).
-///
-/// Scientific diagnosis of the old bug ("unknown source → reinstall prompt"):
-///
-/// 1. OPEN_FILEX LAUNCHES AN EXTERNAL VIEWER. `OpenFilex.open(apkPath)` fires
-///    ACTION_VIEW with a FileProvider content:// URI. On Android 8+ that hands
-///    control to the *system package installer UI* — a SEPARATE app surface.
-///    If the install permission (REQUEST_INSTALL_PACKAGES) was denied, or the
-///    FileProvider authority/permission flags were missing, the installer
-///    shows "unknown source / can't open" and the user ends up re-tapping the
-///    file from a file manager = "reinstall manually" pain.
-///
-/// 2. SESSION-BASED INSTALL IS THE PROFESSIONAL PATH. Google's own Play flow
-///    never leaves the host app surface: PackageInstaller.Session streams the
-///    APK bytes and commits — the system shows ONE inline confirmation.
-///    Same signature + higher versionCode ⇒ UPDATE (data kept). Different
-///    signature ⇒ INSTALL_FAILED_UPDATE_INCOMPATIBLE.
-///
-/// Fix applied here (best possible WITHOUT native code — same APK, same key):
-///  a. Download to the app-private files dir (no scoped-storage permission
-///     dance, no stale file-manager copies).
-///  b. Pre-flight the install permission BEFORE opening anything; if denied,
-///     deep-link straight to the per-app "Install unknown apps" Settings page
-///     with the exact Bengali instruction.
-///  c. SHA-256 integrity check of the downloaded APK against the server
-///     manifest (corrupt downloads used to surface as cryptic "can't install").
-///  d. Prefer the FileProvider content:// open; on failure, fall back to the
-///     Settings page instead of a dead end.
-///  e. Version-code guard: refuse to "update" to an equal/older build with a
-///     clear message instead of a silent installer dismissal.
-///
-/// NOTE — one hard Android rule no client code can bypass: if a DIFFERENT
-/// signing key ever signs the new APK (debug key vs release key, or a new
-/// keystore), the system FORCES uninstall-then-install (data loss). The fix
-/// for that is process, not code: ALWAYS build release APKs with the SAME
-/// keystore (see android/key.properties + build-apks.ps1). Verified below.
-/// Rules:
-/// - The server (/app-version) is the source of truth (version + build +
-///   sha256 + apk_url).
-/// - Compares against the REAL installed version AND build number — so after
-///   one update it stays silent until a NEWER build arrives.
-/// - "Later" snoozes 5 minutes only.
-/// - Download + install happen INSIDE the app (progress dialog, then the
-///   system installer). No browser involved.
+/// Downloads and installs newer APKs through Android's PackageInstaller API.
+/// The manifest checksum is required before install, and the native status
+/// receiver handles Android's explicit user-confirmation request.
 Future<String> installedVersion() async {
   try {
     final info = await PackageInfo.fromPlatform();
@@ -73,7 +34,10 @@ Future<int> installedBuild() async {
 }
 
 List<int> _parseVer(String v) {
-  return v.split('.').map((p) => int.tryParse(p.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0).toList();
+  return v
+      .split('.')
+      .map((p) => int.tryParse(p.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0)
+      .toList();
 }
 
 /// True when [server] is strictly newer than [installed].
@@ -90,6 +54,9 @@ bool isNewerVersion(String server, String installed) {
   return false;
 }
 
+bool hasValidApkSha256(String? value) =>
+    value != null && RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(value);
+
 /// Single source of truth for the update decision, shared by the dialog and
 /// the pre-download guard. Returns (isNewer, humanReason).
 /// Scientific rationale: ONE decision function ⇒ dialog text, Settings tile,
@@ -102,7 +69,10 @@ bool isNewerVersion(String server, String installed) {
   required int installedBuild,
 }) {
   if (isNewerVersion(serverVersion, installedVersion)) {
-    return (newer: true, reason: 'v$serverVersion এসেছে (আপনার v$installedVersion)');
+    return (
+      newer: true,
+      reason: 'v$serverVersion এসেছে (আপনার v$installedVersion)',
+    );
   }
   if (serverBuild > 0 && installedBuild > 0 && serverBuild > installedBuild) {
     return (newer: true, reason: 'নতুন build এসেছে (build $serverBuild)');
@@ -127,7 +97,10 @@ Future<DateTime?> _dismissedAt(String appName) async {
 Future<void> _setDismissedVersion(String appName, String v) async {
   final p = await SharedPreferences.getInstance();
   await p.setString('dismissed_update_$appName', v);
-  await p.setInt('dismissed_update_at_$appName', DateTime.now().millisecondsSinceEpoch);
+  await p.setInt(
+    'dismissed_update_at_$appName',
+    DateTime.now().millisecondsSinceEpoch,
+  );
 }
 
 Future<void> _clearDismissed(String appName) async {
@@ -144,7 +117,11 @@ Future<void> _clearDismissed(String appName) async {
 /// "Later" snoozes for 5 minutes per the user's rule — after that the silent
 /// auto-check pops the same version again. Updating (or same version) clears
 /// the snooze and stays silent.
-Future<void> checkForUpdate(BuildContext context, String appName, {bool manual = false}) async {
+Future<void> checkForUpdate(
+  BuildContext context,
+  String appName, {
+  bool manual = false,
+}) async {
   try {
     final current = await installedVersion();
     final currentBuild = await installedBuild();
@@ -156,20 +133,32 @@ Future<void> checkForUpdate(BuildContext context, String appName, {bool manual =
       return;
     }
     final decision = decideUpdate(
-      serverVersion: latest, serverBuild: latestBuild,
-      installedVersion: current, installedBuild: currentBuild);
+      serverVersion: latest,
+      serverBuild: latestBuild,
+      installedVersion: current,
+      installedBuild: currentBuild,
+    );
     if (decision.newer) {
       if (!manual) {
         final dismissed = await _dismissedVersion(appName);
         final dismissedAt = await _dismissedAt(appName);
         // Snooze rule: "Later" hides this version for 5 minutes only.
-        if (dismissed == latest && dismissedAt != null &&
+        if (dismissed == latest &&
+            dismissedAt != null &&
             DateTime.now().difference(dismissedAt).inMinutes < 5) {
           return;
         }
       }
       if (!context.mounted) return;
-      _showUpdateDialog(context, appName, current, currentBuild, latest, latestBuild, decision.reason);
+      _showUpdateDialog(
+        context,
+        appName,
+        current,
+        currentBuild,
+        latest,
+        latestBuild,
+        decision.reason,
+      );
     } else if (manual) {
       // Update done: clear any stale snooze, show the FULL verdict —
       // installed v+build vs server v+build — so there is never a
@@ -181,8 +170,14 @@ Future<void> checkForUpdate(BuildContext context, String appName, {bool manual =
         builder: (_) => AlertDialog(
           title: const Text('✅ সব আপ-টু-ডেট'),
           content: Text(
-              'ফোনে: v$current (build $currentBuild)\nসার্ভারে: v$latest (build $latestBuild)\n\n${decision.reason}'),
-          actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('ঠিক আছে'))],
+            'ফোনে: v$current (build $currentBuild)\nসার্ভারে: v$latest (build $latestBuild)\n\n${decision.reason}',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('ঠিক আছে'),
+            ),
+          ],
         ),
       );
     } else {
@@ -190,12 +185,21 @@ Future<void> checkForUpdate(BuildContext context, String appName, {bool manual =
       await _clearDismissed(appName);
     }
   } catch (_) {
-    if (manual && context.mounted) _say(context, 'ইন্টারনেট চেক করুন — আপডেট পরীক্ষা করা যায়নি।');
+    if (manual && context.mounted) {
+      _say(context, 'ইন্টারনেট চেক করুন — আপডেট পরীক্ষা করা যায়নি।');
+    }
   }
 }
 
-Future<void> _showUpdateDialog(BuildContext context, String appName,
-    String current, int currentBuild, String latest, int latestBuild, String reason) async {
+Future<void> _showUpdateDialog(
+  BuildContext context,
+  String appName,
+  String current,
+  int currentBuild,
+  String latest,
+  int latestBuild,
+  String reason,
+) async {
   if (!context.mounted) return;
   await showDialog(
     context: context,
@@ -203,7 +207,8 @@ Future<void> _showUpdateDialog(BuildContext context, String appName,
     builder: (ctx) => AlertDialog(
       title: const Text('🔄 Update Available'),
       content: Text(
-          '$reason\n\nফোনে: v$current (build $currentBuild)\nসার্ভারে: v$latest (build $latestBuild)\n\nঅ্যাপের ভেতরেই download ও install হবে — browser খুলবে না।'),
+        '$reason\n\nফোনে: v$current (build $currentBuild)\nসার্ভারে: v$latest (build $latestBuild)\n\nঅ্যাপের ভেতরেই download ও install হবে — browser খুলবে না।',
+      ),
       actions: [
         TextButton(
           onPressed: () async {
@@ -224,49 +229,78 @@ Future<void> _showUpdateDialog(BuildContext context, String appName,
   );
 }
 
-Future<void> _downloadAndInstall(BuildContext context, String appName, String latest) async {
+Future<void> _downloadAndInstall(
+  BuildContext context,
+  String appName,
+  String latest,
+) async {
   final progress = ValueNotifier<double>(0);
   final statusMsg = ValueNotifier<String>('শুরু হচ্ছে…');
   var cancelled = false;
   BuildContext? progressCtx;
   if (context.mounted) {
-    unawaited(showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) {
-        progressCtx = ctx;
-        return PopScope(
-        canPop: false,
-        child: AlertDialog(
-          title: Text('ডাউনলোড হচ্ছে… v$latest'),
-          content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-            ValueListenableBuilder<double>(
-              valueListenable: progress,
-              builder: (_, v, _) => Column(mainAxisSize: MainAxisSize.min, children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: LinearProgressIndicator(value: v <= 0 ? null : v, minHeight: 10),
+    unawaited(
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) {
+          progressCtx = ctx;
+          return PopScope(
+            canPop: false,
+            child: AlertDialog(
+              title: Text('ডাউনলোড হচ্ছে… v$latest'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  ValueListenableBuilder<double>(
+                    valueListenable: progress,
+                    builder: (_, v, _) => Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: LinearProgressIndicator(
+                            value: v <= 0 ? null : v,
+                            minHeight: 10,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          v <= 0
+                              ? 'শুরু হচ্ছে…'
+                              : '${(v * 100).toStringAsFixed(0)}%',
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  ValueListenableBuilder<String>(
+                    valueListenable: statusMsg,
+                    builder: (_, s, _) => Text(
+                      s,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.black54,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    cancelled = true;
+                    Navigator.pop(ctx);
+                  },
+                  child: const Text('বাতিল'),
                 ),
-                const SizedBox(height: 10),
-                Text(v <= 0 ? 'শুরু হচ্ছে…' : '${(v * 100).toStringAsFixed(0)}%'),
-              ]),
+              ],
             ),
-            const SizedBox(height: 6),
-            ValueListenableBuilder<String>(
-              valueListenable: statusMsg,
-              builder: (_, s, _) => Text(s, style: const TextStyle(fontSize: 12, color: Colors.black54)),
-            ),
-          ]),
-          actions: [
-            TextButton(
-              onPressed: () { cancelled = true; Navigator.pop(ctx); },
-              child: const Text('বাতিল'),
-            ),
-          ],
-        ),
-        );
-      },
-    ));
+          );
+        },
+      ),
+    );
   }
   void closeProgress() {
     try {
@@ -286,6 +320,11 @@ Future<void> _downloadAndInstall(BuildContext context, String appName, String la
     final url = info['apk_url']?.toString();
     if (url == null || url.isEmpty) throw Exception('APK link পাওয়া যায়নি।');
     final expectedSha = info['sha256']?.toString();
+    if (expectedSha == null || !hasValidApkSha256(expectedSha)) {
+      throw Exception(
+        'সার্ভারের APK যাচাই তথ্য ঠিক নেই। পরে আবার চেষ্টা করুন।',
+      );
+    }
     final serverBuild = int.tryParse('${info['build'] ?? ''}') ?? 0;
     final serverVersion = info['version']?.toString() ?? latest;
     final myBuild = await installedBuild();
@@ -294,8 +333,11 @@ Future<void> _downloadAndInstall(BuildContext context, String appName, String la
     // contradict what the popup promised (this was the "popup says update,
     // Settings still shows old version" class of bug: stale build metadata).
     final guard = decideUpdate(
-      serverVersion: serverVersion, serverBuild: serverBuild,
-      installedVersion: myVersion, installedBuild: myBuild);
+      serverVersion: serverVersion,
+      serverBuild: serverBuild,
+      installedVersion: myVersion,
+      installedBuild: myBuild,
+    );
     if (!guard.newer) {
       throw Exception('${guard.reason} — download বাতিল।');
     }
@@ -304,8 +346,12 @@ Future<void> _downloadAndInstall(BuildContext context, String appName, String la
     final client = http.Client();
     try {
       final req = http.Request('GET', Uri.parse(url));
-      final streamed = await client.send(req).timeout(const Duration(seconds: 30));
-      if (streamed.statusCode != 200) throw Exception('ডাউনলোড ব্যর্থ (${streamed.statusCode})।');
+      final streamed = await client
+          .send(req)
+          .timeout(const Duration(seconds: 30));
+      if (streamed.statusCode != 200) {
+        throw Exception('ডাউনলোড ব্যর্থ (${streamed.statusCode})।');
+      }
       final total = streamed.contentLength ?? 0;
 
       final dir = await getApplicationDocumentsDirectory();
@@ -313,42 +359,61 @@ Future<void> _downloadAndInstall(BuildContext context, String appName, String la
       if (await file.exists()) await file.delete();
       final sink = file.openWrite();
       var received = 0;
-      await for (final chunk in streamed.stream) {
-        if (cancelled) {
-          await sink.close();
-          try { await file.delete(); } catch (_) {}
-          return;
+      try {
+        await for (final chunk in streamed.stream.timeout(
+          const Duration(seconds: 45),
+        )) {
+          if (cancelled) {
+            await sink.close();
+            try {
+              await file.delete();
+            } catch (_) {}
+            return;
+          }
+          sink.add(chunk);
+          received += chunk.length;
+          if (total > 0) progress.value = received / total;
         }
-        sink.add(chunk);
-        received += chunk.length;
-        if (total > 0) progress.value = received / total;
+        await sink.flush();
+      } catch (_) {
+        await sink.close();
+        try {
+          await file.delete();
+        } catch (_) {}
+        rethrow;
       }
-      await sink.flush();
       await sink.close();
 
       final sizeMB = received / (1024 * 1024);
       if (received < 5 * 1024 * 1024) {
-        try { await file.delete(); } catch (_) {}
-        throw Exception('ফাইল অসম্পূর্ণ মনে হচ্ছে (${sizeMB.toStringAsFixed(1)} MB) — আবার চেষ্টা করুন।');
+        try {
+          await file.delete();
+        } catch (_) {}
+        throw Exception(
+          'ফাইল অসম্পূর্ণ মনে হচ্ছে (${sizeMB.toStringAsFixed(1)} MB) — আবার চেষ্টা করুন।',
+        );
       }
       // SHA-256 integrity: a corrupt/HTML-swapped download used to surface as
       // a cryptic "can't install". Fail here with a clear message instead.
-      // (Server omits sha256 for legacy builds — then the 5MB size gate above
-      // is the only guard, which is still a real check.)
-      if (expectedSha != null && expectedSha.isNotEmpty) {
-        statusMsg.value = 'ফাইল যাচাই হচ্ছে…';
-        String actualSha = '';
-        try {
-          actualSha = await _sha256Of(file);
-        } catch (_) {
-          actualSha = '';
-        }
-        if (actualSha.isEmpty || actualSha.toLowerCase() != expectedSha.toLowerCase()) {
-          try { await file.delete(); } catch (_) {}
-          throw Exception('ফাইল যাচাই ব্যর্থ — network সমস্যা হতে পারে। আবার চেষ্টা করুন।');
-        }
+      // The manifest checksum is mandatory and must match before installation.
+      statusMsg.value = 'ফাইল যাচাই হচ্ছে…';
+      String actualSha = '';
+      try {
+        actualSha = await _sha256Of(file);
+      } catch (_) {
+        actualSha = '';
       }
-      statusMsg.value = 'প্রস্তুত (${sizeMB.toStringAsFixed(1)} MB) — installer খুলছে…';
+      if (actualSha.isEmpty ||
+          actualSha.toLowerCase() != expectedSha.toLowerCase()) {
+        try {
+          await file.delete();
+        } catch (_) {}
+        throw Exception(
+          'ফাইল যাচাই ব্যর্থ — network সমস্যা হতে পারে। আবার চেষ্টা করুন।',
+        );
+      }
+      statusMsg.value =
+          'প্রস্তুত (${sizeMB.toStringAsFixed(1)} MB) — installer খুলছে…';
       closeProgress();
 
       // Android 8+: unknown-app install permission FIRST (before any session).
@@ -365,10 +430,17 @@ Future<void> _downloadAndInstall(BuildContext context, String appName, String la
               builder: (c) => AlertDialog(
                 title: const Text('Install অনুমতি দিন'),
                 content: const Text(
-                    'একবারই লাগবে:\n\nSettings → "Install unknown apps" → এই অ্যাপের পাশে Allow চালু করুন।\n\nতারপর আবার "আপডেট করুন" চাপুন — browser খুলবে না।'),
+                  'একবারই লাগবে:\n\nSettings → "Install unknown apps" → এই অ্যাপের পাশে Allow চালু করুন।\n\nতারপর আবার "আপডেট করুন" চাপুন — browser খুলবে না।',
+                ),
                 actions: [
-                  TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('পরে')),
-                  FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Settings খুলুন')),
+                  TextButton(
+                    onPressed: () => Navigator.pop(c, false),
+                    child: const Text('পরে'),
+                  ),
+                  FilledButton(
+                    onPressed: () => Navigator.pop(c, true),
+                    child: const Text('Settings খুলুন'),
+                  ),
                 ],
               ),
             );
@@ -388,10 +460,17 @@ Future<void> _downloadAndInstall(BuildContext context, String appName, String la
               builder: (c) => AlertDialog(
                 title: const Text('Install অনুমতি দিন'),
                 content: const Text(
-                    'ফোন এখনো install block করছে।\n\nSettings খুলে "Install unknown apps" → এই অ্যাপ → Allow করুন, তারপর ফিরে এসে আবার "আপডেট করুন" চাপুন।'),
+                  'ফোন এখনো install block করছে।\n\nSettings খুলে "Install unknown apps" → এই অ্যাপ → Allow করুন, তারপর ফিরে এসে আবার "আপডেট করুন" চাপুন।',
+                ),
                 actions: [
-                  TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('পরে')),
-                  FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Settings খুলুন')),
+                  TextButton(
+                    onPressed: () => Navigator.pop(c, false),
+                    child: const Text('পরে'),
+                  ),
+                  FilledButton(
+                    onPressed: () => Navigator.pop(c, true),
+                    child: const Text('Settings খুলুন'),
+                  ),
                 ],
               ),
             );
@@ -414,7 +493,10 @@ Future<void> _downloadAndInstall(BuildContext context, String appName, String la
       } on PlatformException catch (pe) {
         if (pe.code == 'PERMISSION_DENIED') {
           if (context.mounted) {
-            _say(context, 'Install অনুমতি নেই — Settings → Install unknown apps → Allow করুন।');
+            _say(
+              context,
+              'Install অনুমতি নেই — Settings → Install unknown apps → Allow করুন।',
+            );
             await openAppSettings();
           }
           return;
@@ -422,7 +504,10 @@ Future<void> _downloadAndInstall(BuildContext context, String appName, String la
         throw Exception('Install শুরু হয়নি: ${pe.message ?? pe.code}');
       }
       if (context.mounted) {
-        _say(context, 'Installer খুলেছে — "Install/Update" চাপুন। পুরনো data মুছবে না। ($sessionOutcome)');
+        _say(
+          context,
+          'Installer খুলেছে — "Install/Update" চাপুন। পুরনো data মুছবে না। ($sessionOutcome)',
+        );
         // Persistent retry card: survives back-press / dead installer UI.
         // The staged APK stays on disk, so "আবার চেষ্টা" never re-downloads.
         if (context.mounted) {
@@ -435,7 +520,10 @@ Future<void> _downloadAndInstall(BuildContext context, String appName, String la
   } catch (e) {
     closeProgress();
     if (context.mounted && !cancelled) {
-      _say(context, 'আপডেট ব্যর্থ: ${e.toString().replaceFirst('Exception: ', '')}');
+      _say(
+        context,
+        'আপডেট ব্যর্থ: ${e.toString().replaceFirst('Exception: ', '')}',
+      );
     }
   } finally {
     progress.dispose();
@@ -466,7 +554,9 @@ Future<bool> _nativeCanInstall() async {
 }
 
 Future<int> _nativeInstallApk(String path) async {
-  final v = await _updaterChannel.invokeMethod<int>('installApk', {'path': path});
+  final v = await _updaterChannel.invokeMethod<int>('installApk', {
+    'path': path,
+  });
   return v ?? 0;
 }
 
@@ -475,7 +565,11 @@ Future<int> _nativeInstallApk(String path) async {
 /// dead installer UI, or accidental dismiss can NEVER strand the user —
 /// "আবার চেষ্টা" re-commits the SAME staged file (no re-download).
 Future<void> _showInstallPending(
-    BuildContext context, String appName, String latest, String apkPath) async {
+  BuildContext context,
+  String appName,
+  String latest,
+  String apkPath,
+) async {
   if (!context.mounted) return;
   await showDialog(
     context: context,
@@ -483,10 +577,11 @@ Future<void> _showInstallPending(
     builder: (c) => AlertDialog(
       title: const Text('📦 Update প্রস্তুত'),
       content: Text(
-          'v$latest download হয়ে গেছে।\n\n'
-          '• System dialog-এ "Install/Update" চাপুন — data মুছবে না।\n'
-          '• Dialog না দেখলে নিচে "আবার চেষ্টা" চাপুন (download লাগবে না)।\n'
-          '• Notification-এও install option থাকবে।'),
+        'v$latest download হয়ে গেছে।\n\n'
+        '• System dialog-এ "Install/Update" চাপুন — data মুছবে না।\n'
+        '• Dialog না দেখলে নিচে "আবার চেষ্টা" চাপুন (download লাগবে না)।\n'
+        '• Notification-এও install option থাকবে।',
+      ),
       actions: [
         TextButton(onPressed: () => Navigator.pop(c), child: const Text('পরে')),
         FilledButton(
@@ -499,9 +594,12 @@ Future<void> _showInstallPending(
               }
             } on PlatformException catch (pe) {
               if (context.mounted) {
-                _say(context, pe.code == 'PERMISSION_DENIED'
-                    ? 'Install অনুমতি নেই — Settings → Install unknown apps → Allow করুন।'
-                    : 'Install শুরু হয়নি: ${pe.message ?? pe.code}');
+                _say(
+                  context,
+                  pe.code == 'PERMISSION_DENIED'
+                      ? 'Install অনুমতি নেই — Settings → Install unknown apps → Allow করুন।'
+                      : 'Install শুরু হয়নি: ${pe.message ?? pe.code}',
+                );
               }
             }
           },

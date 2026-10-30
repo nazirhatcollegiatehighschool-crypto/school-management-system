@@ -88,6 +88,8 @@ async function addColumn(table, col, def) {
   await addColumn('results', 'total_marks_full', 'NUMERIC(8,2) DEFAULT 0');
   await addColumn('results', 'section_position', 'INTEGER');
   await addColumn('results', 'combined_position', 'INTEGER');
+  await addColumn('results', 'section_size', 'INTEGER');
+  await addColumn('results', 'combined_size', 'INTEGER');
   await addColumn('results', 'pass_all', 'SMALLINT DEFAULT 0');
   await p.query(`CREATE INDEX IF NOT EXISTS ix_results_student_exam ON results (student_id, exam_id)`);
   console.log('results columns ready');

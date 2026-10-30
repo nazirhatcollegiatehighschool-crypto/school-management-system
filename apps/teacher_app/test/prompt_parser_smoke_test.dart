@@ -95,5 +95,21 @@ Birth Certificate No: 20110515001234567
       expect(r['dob'], '2011-05-15');
       expect(r['gender'], 'Female');
     });
+
+    test('rejects impossible dates and malformed birth registration numbers', () {
+      final r = parseStudentPrompt(
+        'Name: T\nDate of Birth: 31-02-2011\n'
+        'Birth Certificate No: 1234567890123456xyz',
+      );
+      expect(r.containsKey('dob'), isFalse);
+      expect(r.containsKey('birth_cert_no'), isFalse);
+    });
+
+    test('accepts Bengali digits and separators for a complete birth number', () {
+      final r = parseStudentPrompt(
+        'Birth Certificate No: ২০১১০৫১৫-০০১২৩৪৫৬৭',
+      );
+      expect(r['birth_cert_no'], '20110515001234567');
+    });
   });
 }

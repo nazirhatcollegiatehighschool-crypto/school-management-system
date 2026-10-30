@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
@@ -22,6 +23,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _hTitle = TextEditingController();
   String? _logoUrl;
   bool _logoLoading = false;
+  List _teachers = [];
+  int? _headTeacherId;
+  int? _assistantHeadTeacherId;
 
   @override
   void initState() {
@@ -32,17 +36,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _load() async {
     try {
       final r = await Api.get('/admin/settings');
-      final holidays = await Api.get('/admin/holidays');
+      final results = await Future.wait([
+        Api.get('/admin/holidays'),
+        Api.get('/admin/teachers'),
+        Api.get('/admin/designation-slots'),
+      ]);
+      final slots = results[2] is Map ? results[2] as Map : const {};
       setState(() {
         _fields = [
           _Field('school_name', 'School Name', r['school_name'] ?? ''),
-          _Field('school_address', 'Address', r['school_address'] ?? ''),
+          _Field('school_address', 'School Address (English only)', r['school_address'] ?? ''),
           _Field('school_eiin', 'EIIN', r['school_eiin'] ?? ''),
-          _Field('headmaster', 'Headmaster Name', r['headmaster'] ?? ''),
           _Field('exam_term_name', 'Default Exam Term Name', r['exam_term_name'] ?? ''),
         ];
+        _teachers = results[1] is List ? results[1] as List : [];
+        _headTeacherId = int.tryParse('${slots['head_teacher']?['id'] ?? ''}');
+        _assistantHeadTeacherId = int.tryParse('${slots['assistant_head']?['id'] ?? ''}');
         _logoUrl = r['school_logo_path'];
-        _holidays = holidays is List ? holidays : [];
+        _holidays = results[0] is List ? results[0] as List : [];
         _loading = false;
       });
     } catch (e) {
@@ -51,10 +62,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _save() async {
+    final address = _fields.firstWhere((f) => f.key == 'school_address').controller.text.trim();
+    if (!RegExp(r"^[A-Za-z0-9 .,/#()'&:-]*$").hasMatch(address)) {
+      setState(() => _error = 'School address ইংরেজি অক্ষর, সংখ্যা ও সাধারণ punctuation দিয়ে লিখুন।');
+      return;
+    }
     final body = <String, String>{};
     for (final f in _fields) { body[f.key] = f.controller.text.trim(); }
     try {
       await Api.put('/admin/settings', body);
+      await Api.put('/admin/leadership-assignments', {
+        'headmaster_id': _headTeacherId,
+        'assistant_headmaster_id': _assistantHeadTeacherId,
+      });
       if (!mounted) return;
       setState(() => _msg = 'Settings saved — documents এখন এই তথ্য ব্যবহার করবে');
     } catch (e) {
@@ -226,7 +246,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     padding: const EdgeInsets.only(bottom: 12),
                     child: TextField(
                       controller: f.controller,
-                      decoration: InputDecoration(labelText: f.label, border: const OutlineInputBorder()),
+                      inputFormatters: f.key == 'school_address'
+                          ? [FilteringTextInputFormatter.allow(RegExp(r"[A-Za-z0-9 .,/#()'&:-]"))]
+                          : null,
+                      decoration: InputDecoration(
+                        labelText: f.label,
+                        helperText: f.key == 'school_address' ? 'Use English letters only' : null,
+                        border: const OutlineInputBorder(),
+                      ),
+                    ),
+                  ),
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        const Text('Leadership Designations', style: TextStyle(fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 12),
+                        _teacherSelector('Head Teacher', _headTeacherId, (v) => setState(() => _headTeacherId = v), excludeId: _assistantHeadTeacherId),
+                        const SizedBox(height: 12),
+                        _teacherSelector('Assistant Head Teacher', _assistantHeadTeacherId, (v) => setState(() => _assistantHeadTeacherId = v), excludeId: _headTeacherId),
+                      ]),
                     ),
                   ),
                   FilledButton(onPressed: _save, child: const Text('Save Settings')),
@@ -282,6 +321,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             _delHoliday(h['date'].toString()), child: const Text('Delete', style: TextStyle(color: Colors.red))),
                       )),
                 ]),
+    );
+  }
+
+  Widget _teacherSelector(String label, int? selected, ValueChanged<int?> onChanged, {int? excludeId}) {
+    final active = _teachers.whereType<Map>().where((t) => t['active'] == 1 || t['active'] == true).toList();
+    final value = active.any((t) => int.tryParse('${t['id']}') == selected) ? selected : 0;
+    return DropdownButtonFormField<int>(
+      value: value,
+      decoration: InputDecoration(labelText: label, border: const OutlineInputBorder()),
+      items: [
+        const DropdownMenuItem(value: 0, child: Text('— নির্বাচন নেই —')),
+        ...active.map((t) {
+          final id = int.parse('${t['id']}');
+          return DropdownMenuItem(value: id, enabled: id == selected || id != excludeId, child: Text('${t['name']}'));
+        }),
+      ],
+      onChanged: (id) => onChanged(id == null || id == 0 ? null : id),
     );
   }
 }

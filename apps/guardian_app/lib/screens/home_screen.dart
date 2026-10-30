@@ -8,6 +8,7 @@ import 'add_sibling_screen.dart';
 import 'login_screen.dart';
 import '../widgets/offline_sync_banner.dart';
 import '../update_check.dart';
+import '../widgets/notification_settings_dialog.dart';
 
 class HomeScreen extends StatefulWidget {
   final List students;
@@ -142,7 +143,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
 
     if (ok == true) {
-      unregisterDeviceToken();
+      await unregisterDeviceToken();
       await Api.clearToken();
       if (!mounted) return;
       Navigator.pushReplacement(
@@ -177,6 +178,11 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.notifications_active_outlined),
+            tooltip: 'Notification সেটিংস',
+            onPressed: () => showNotificationSettings(context),
+          ),
           IconButton(
             icon: const Icon(Icons.person_add_alt_1_rounded),
             tooltip: 'সন্তান যোগ করুন',

@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+
 import 'config.dart';
 import 'sync_store.dart';
 
@@ -50,31 +52,40 @@ class Api {
 
   static bool isNetworkError(Object e) {
     final s = e.toString();
-    return e is SocketException || e is TimeoutException ||
-        s.contains('SocketException') || s.contains('TimeoutException') ||
-        s.contains('Connection refused') || s.contains('HandshakeException') ||
-        s.contains('ClientException') || s.contains('connect failed');
+    return e is SocketException ||
+        e is TimeoutException ||
+        s.contains('SocketException') ||
+        s.contains('TimeoutException') ||
+        s.contains('Connection refused') ||
+        s.contains('HandshakeException') ||
+        s.contains('ClientException') ||
+        s.contains('connect failed');
   }
 
   static Map<String, String> get _headers => {
-        'Content-Type': 'application/json',
-        if (token != null) 'Authorization': 'Bearer $token',
-      };
+    'Content-Type': 'application/json',
+    if (token != null) 'Authorization': 'Bearer $token',
+  };
 
   /// Connectivity probe for the Server-URL setting: raw GET, no auth/cache.
-  static Future<bool> testHealth(String base) async {
+  static Future<bool> testHealth(
+    String base, {
+    Duration timeout = const Duration(seconds: 20),
+  }) async {
     try {
       final res = await http
           .get(Uri.parse('${base.replaceAll(RegExp(r'/+$'), '')}/api/health'))
-          .timeout(const Duration(seconds: 20));
+          .timeout(timeout);
       return res.statusCode == 200;
     } catch (_) {
       return false;
     }
   }
 
-  static Future<dynamic> get(String path, {Map<String, String>? queryParams}) async {
-    final uri = Uri.parse(Config.api + path).replace(queryParameters: queryParams);
+  static Future<dynamic> get(
+    String path, {
+    Map<String, String>? queryParams,
+  }) async {
     final cachePath = queryParams == null || queryParams.isEmpty
         ? path
         : '$path?${(queryParams.keys.toList()..sort()).map((k) => '${Uri.encodeQueryComponent(k)}=${Uri.encodeQueryComponent(queryParams[k]!)}').join('&')}';
@@ -93,17 +104,14 @@ class Api {
     try {
       http.Response res;
       try {
-        res = await http
-            .get(uri, headers: _conditionalHeaders(cachePath))
-            .timeout(_timeout);
+        res = await _getWithFallback(path, cachePath, queryParams: queryParams);
       } catch (e) {
         if (!isNetworkError(e)) rethrow;
         // transient: wait ~1.2s (+jitter) then retry exactly once
-        await Future.delayed(Duration(
-            milliseconds: 1000 + (DateTime.now().microsecond % 400)));
-        res = await http
-            .get(uri, headers: _conditionalHeaders(cachePath))
-            .timeout(_timeout);
+        await Future.delayed(
+          Duration(milliseconds: 1000 + (DateTime.now().microsecond % 400)),
+        );
+        res = await _getWithFallback(path, cachePath, queryParams: queryParams);
       }
       if (res.statusCode == 304) {
         sync.markRequestOk();
@@ -111,12 +119,19 @@ class Api {
         if (cached != null) return jsOne(cached);
         // A validator without its payload can occur after storage cleanup;
         // retry once unconditionally so the UI never receives an empty 304.
-        res = await http.get(uri, headers: _headers).timeout(_timeout);
+        res = await _getWithFallback(
+          path,
+          cachePath,
+          queryParams: queryParams,
+          conditional: false,
+        );
       }
       final data = _handle(res);
       sync.markRequestOk();
       // keep a copy for offline reads
-      unawaited(sync.cachePut(cachePath, jsOne(data), etag: res.headers['etag']));
+      unawaited(
+        sync.cachePut(cachePath, jsOne(data), etag: res.headers['etag']),
+      );
       return data;
     } catch (e) {
       if (isNetworkError(e)) {
@@ -133,6 +148,21 @@ class Api {
     return etag == null ? _headers : {..._headers, 'If-None-Match': etag};
   }
 
+  static Uri _apiUri(String path, Map<String, String>? queryParams) =>
+      Uri.parse(Config.api + path).replace(queryParameters: queryParams);
+
+  static Future<http.Response> _getWithFallback(
+    String path,
+    String cachePath, {
+    Map<String, String>? queryParams,
+    bool conditional = true,
+  }) async {
+    final headers = conditional ? _conditionalHeaders(cachePath) : _headers;
+    Future<http.Response> request(Duration timeout) =>
+        http.get(_apiUri(path, queryParams), headers: headers).timeout(timeout);
+    return request(Config.hasOverride ? const Duration(seconds: 4) : _timeout);
+  }
+
   /// Accurate user-facing message for a failed mutation: distinguishes
   /// "no internet on the phone" from "internet OK but school server
   /// unreachable (laptop off / URL changed)".
@@ -146,7 +176,11 @@ class Api {
   static Future<dynamic> post(String path, [Map<String, dynamic>? body]) async {
     try {
       final res = await http
-          .post(Uri.parse(Config.api + path), headers: _headers, body: jsonEncode(body ?? {}))
+          .post(
+            Uri.parse(Config.api + path),
+            headers: _headers,
+            body: jsonEncode(body ?? {}),
+          )
           .timeout(_timeout);
       final data = _handle(res);
       sync.markRequestOk();
@@ -164,7 +198,11 @@ class Api {
   static Future<dynamic> put(String path, [Map<String, dynamic>? body]) async {
     try {
       final res = await http
-          .put(Uri.parse(Config.api + path), headers: _headers, body: jsonEncode(body ?? {}))
+          .put(
+            Uri.parse(Config.api + path),
+            headers: _headers,
+            body: jsonEncode(body ?? {}),
+          )
           .timeout(_timeout);
       final data = _handle(res);
       sync.markRequestOk();
@@ -179,11 +217,17 @@ class Api {
     }
   }
 
-  static Future<dynamic> delete(String path, {Map<String, dynamic>? body}) async {
+  static Future<dynamic> delete(
+    String path, {
+    Map<String, dynamic>? body,
+  }) async {
     try {
       final res = await http
-          .delete(Uri.parse(Config.api + path), headers: _headers,
-              body: body == null ? null : jsonEncode(body))
+          .delete(
+            Uri.parse(Config.api + path),
+            headers: _headers,
+            body: body == null ? null : jsonEncode(body),
+          )
           .timeout(_timeout);
       final data = _handle(res);
       sync.markRequestOk();
@@ -263,8 +307,13 @@ dynamic jsOne(dynamic v) {
 
 String friendlyError(Object e) {
   final s = e.toString();
-  if (e is SocketException || e is TimeoutException || s.contains('SocketException') || s.contains('TimeoutException')) {
+  if (e is SocketException ||
+      e is TimeoutException ||
+      s.contains('SocketException') ||
+      s.contains('TimeoutException')) {
     return 'কানেকশন পাওয়া যায়নি। ইন্টারনেট চেক করে আবার চেষ্টা করুন।';
   }
-  return s.replaceFirst('Exception: ', '').replaceFirst('HandshakeException', 'নিরাপদ কানেকশন ব্যর্থ');
+  return s
+      .replaceFirst('Exception: ', '')
+      .replaceFirst('HandshakeException', 'নিরাপদ কানেকশন ব্যর্থ');
 }

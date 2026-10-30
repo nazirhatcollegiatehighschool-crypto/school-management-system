@@ -78,10 +78,39 @@ class MainActivity : FlutterActivity() {
             return
         }
         try {
+            val candidate = packageManager.getPackageArchiveInfo(apkFile.absolutePath, 0)
+            if (candidate == null) {
+                result.error("INVALID_APK", "Downloaded file is not a valid Android package", null)
+                return
+            }
+            if (candidate.packageName != packageName) {
+                result.error("PACKAGE_MISMATCH", "This update belongs to ${candidate.packageName}", null)
+                return
+            }
+            val installed = packageManager.getPackageInfo(packageName, 0)
+            val candidateVersion = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                candidate.longVersionCode
+            } else {
+                @Suppress("DEPRECATION")
+                candidate.versionCode.toLong()
+            }
+            val installedVersion = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                installed.longVersionCode
+            } else {
+                @Suppress("DEPRECATION")
+                installed.versionCode.toLong()
+            }
+            if (candidateVersion <= installedVersion) {
+                result.error("VERSION_NOT_NEWER", "Downloaded version is not newer than the installed app", null)
+                return
+            }
+
             val installer = packageManager.packageInstaller
             val params = PackageInstaller.SessionParams(
                 PackageInstaller.SessionParams.MODE_FULL_INSTALL
             )
+            params.setAppPackageName(packageName)
+            params.setSize(apkFile.length())
             // App-private dir read: installer reads via our stream, URI perms unneeded.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_REQUIRED)
@@ -100,6 +129,7 @@ class MainActivity : FlutterActivity() {
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
                 else PendingIntent.FLAG_UPDATE_CURRENT
                 val intent = Intent(this, InstallStatusReceiver::class.java).apply {
+                    action = InstallStatusReceiver.ACTION_STATUS
                     putExtra("sessionId", sessionId)
                     putExtra("apkPath", apkFile.absolutePath)
                 }

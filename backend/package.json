@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "lint": "node lint.js",
+    "test:db-transforms": "node --test test/db-transforms.test.js",
     "postinstall": "prisma generate",
     "build": "prisma generate && node api/index.js"
   },

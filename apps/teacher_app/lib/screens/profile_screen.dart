@@ -352,17 +352,20 @@ class _ProfileScreenState extends State<ProfileScreen> {
       );
       final fresh = await Api.refreshCache('/teacher/profile');
       if (!mounted) return;
-      if (fresh is Map) setState(() => _profile = fresh);
+      if (fresh is Map) {
+        setState(() => _profile = fresh);
+      }
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('স্বাক্ষর আপলোড হয়েছে')));
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             backgroundColor: Colors.red,
             content: Text(e.toString().replaceFirst('Exception: ', '')),
           ),
         );
+      }
     } finally {
       if (mounted) setState(() => _signatureBusy = false);
     }
@@ -374,18 +377,21 @@ class _ProfileScreenState extends State<ProfileScreen> {
       await Api.delete('/teacher/signature');
       final fresh = await Api.refreshCache('/teacher/profile');
       if (!mounted) return;
-      if (fresh is Map) setState(() => _profile = fresh);
+      if (fresh is Map) {
+        setState(() => _profile = fresh);
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('স্বাক্ষর মুছে ফেলা হয়েছে')),
       );
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             backgroundColor: Colors.red,
             content: Text(e.toString().replaceFirst('Exception: ', '')),
           ),
         );
+      }
     } finally {
       if (mounted) setState(() => _signatureBusy = false);
     }
@@ -397,33 +403,102 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final phone = tv['phone']?.toString() ?? '';
     final nameCtl = TextEditingController(text: '$name');
     final phoneCtl = TextEditingController(text: phone);
+    String fieldDate(dynamic value) =>
+        value == null ? '' : value.toString().split('T').first;
+    final dobCtl = TextEditingController(text: fieldDate(tv['teacher_dob']));
+    final addressCtl = TextEditingController(
+      text: '${tv['teacher_address'] ?? ''}',
+    );
+    final bloodCtl = TextEditingController(
+      text: '${tv['teacher_blood_group'] ?? ''}',
+    );
+    final indexCtl = TextEditingController(
+      text: '${tv['teacher_index_number'] ?? ''}',
+    );
+    final pnsCtl = TextEditingController(
+      text: '${tv['teacher_pns_number'] ?? ''}',
+    );
+    final degreeCtl = TextEditingController(
+      text: '${tv['teacher_degree'] ?? ''}',
+    );
+    final joiningCtl = TextEditingController(
+      text: fieldDate(tv['teacher_joining_date']),
+    );
     final saved = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Edit Info'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: nameCtl,
-              decoration: const InputDecoration(labelText: 'Name'),
-              textCapitalization: TextCapitalization.words,
-            ),
-            const SizedBox(height: 10),
-            const Text(
-              'পদবি Admin নির্ধারণ করেন। পরিবর্তনের জন্য Admin-এর সঙ্গে যোগাযোগ করুন।',
-              style: TextStyle(fontSize: 12),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: phoneCtl,
-              decoration: const InputDecoration(
-                labelText: 'Phone (01XXXXXXXXX)',
-                hintText: '01XXXXXXXXX',
+        title: const Text('শিক্ষকের তথ্য'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameCtl,
+                decoration: const InputDecoration(labelText: 'Name'),
+                textCapitalization: TextCapitalization.words,
               ),
-              keyboardType: TextInputType.phone,
-            ),
-          ],
+              const SizedBox(height: 10),
+              const Text(
+                'পদবি Admin নির্ধারণ করেন। পরিবর্তনের জন্য Admin-এর সঙ্গে যোগাযোগ করুন।',
+                style: TextStyle(fontSize: 12),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: phoneCtl,
+                decoration: const InputDecoration(
+                  labelText: 'Phone (01XXXXXXXXX)',
+                  hintText: '01XXXXXXXXX',
+                ),
+                keyboardType: TextInputType.phone,
+              ),
+              const SizedBox(height: 8),
+              const Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'নিচের তথ্যগুলো ঐচ্ছিক; Guardian app-এ শুধু নাম ও ফোন দেখানো হয়।',
+                  style: TextStyle(fontSize: 12),
+                ),
+              ),
+              TextField(
+                controller: dobCtl,
+                keyboardType: TextInputType.datetime,
+                decoration: const InputDecoration(
+                  labelText: 'জন্মতারিখ (YYYY-MM-DD)',
+                ),
+              ),
+              TextField(
+                controller: addressCtl,
+                maxLines: 2,
+                decoration: const InputDecoration(labelText: 'ঠিকানা'),
+              ),
+              TextField(
+                controller: bloodCtl,
+                textCapitalization: TextCapitalization.characters,
+                decoration: const InputDecoration(labelText: 'রক্তের গ্রুপ'),
+              ),
+              TextField(
+                controller: indexCtl,
+                decoration: const InputDecoration(labelText: 'Index number'),
+              ),
+              TextField(
+                controller: pnsCtl,
+                decoration: const InputDecoration(labelText: 'PNS number'),
+              ),
+              TextField(
+                controller: degreeCtl,
+                decoration: const InputDecoration(
+                  labelText: 'শিক্ষাগত যোগ্যতা / Degree',
+                ),
+              ),
+              TextField(
+                controller: joiningCtl,
+                keyboardType: TextInputType.datetime,
+                decoration: const InputDecoration(
+                  labelText: 'যোগদানের তারিখ (YYYY-MM-DD)',
+                ),
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -454,6 +529,25 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final r = await Api.put('/teacher/profile', {
       'name': nameCtl.text.trim(),
       'phone': phoneV.isEmpty ? null : phoneV,
+      'teacher_dob': dobCtl.text.trim().isEmpty ? null : dobCtl.text.trim(),
+      'teacher_address': addressCtl.text.trim().isEmpty
+          ? null
+          : addressCtl.text.trim(),
+      'teacher_blood_group': bloodCtl.text.trim().isEmpty
+          ? null
+          : bloodCtl.text.trim(),
+      'teacher_index_number': indexCtl.text.trim().isEmpty
+          ? null
+          : indexCtl.text.trim(),
+      'teacher_pns_number': pnsCtl.text.trim().isEmpty
+          ? null
+          : pnsCtl.text.trim(),
+      'teacher_degree': degreeCtl.text.trim().isEmpty
+          ? null
+          : degreeCtl.text.trim(),
+      'teacher_joining_date': joiningCtl.text.trim().isEmpty
+          ? null
+          : joiningCtl.text.trim(),
     });
     if (!mounted) return;
     if (Api.isQueued(r)) {
@@ -497,7 +591,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final classes = _profile?['classes'] as List? ?? [];
     final teacher = _profile?['teacher'] as Map? ?? widget.teacher;
     final designation = teacher['designation'] ?? '';
+    final teacherName = '${teacher['name'] ?? 'Teacher'}';
     return Scaffold(
+      backgroundColor: const Color(0xFFF2F5FA),
       appBar: AppBar(
         title: const Text('Profile'),
         actions: [
@@ -509,9 +605,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
           IconButton(
             icon: const Icon(Icons.logout),
             onPressed: () async {
-              unregisterDeviceToken();
               final messenger = ScaffoldMessenger.of(context);
               final nav = Navigator.of(context);
+              await unregisterDeviceToken();
               await Api.clearToken();
               if (!mounted) return;
               nav.pushReplacement(
@@ -523,56 +619,122 @@ class _ProfileScreenState extends State<ProfileScreen> {
         ],
       ),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 28),
         children: [
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Row(
-                children: [
-                  CircleAvatar(
-                    radius: 30,
-                    backgroundColor: Colors.teal.shade100,
-                    child: Text(
-                      '${teacher['name']}'.characters.first,
-                      style: const TextStyle(fontSize: 24),
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [
+                  Color(0xFF1E3A5F),
+                  Color(0xFF356D86),
+                  Color(0xFF258A7A),
+                ],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              borderRadius: BorderRadius.circular(24),
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFF1E3A5F).withValues(alpha: .18),
+                  blurRadius: 20,
+                  offset: const Offset(0, 8),
+                ),
+              ],
+            ),
+            child: Row(
+              children: [
+                CircleAvatar(
+                  radius: 34,
+                  backgroundColor: Colors.white.withValues(alpha: .18),
+                  foregroundColor: Colors.white,
+                  child: Text(
+                    teacherName.trim().isEmpty
+                        ? 'T'
+                        : teacherName.trim().characters.first.toUpperCase(),
+                    style: const TextStyle(
+                      fontSize: 25,
+                      fontWeight: FontWeight.w800,
                     ),
                   ),
-                  const SizedBox(width: 14),
-                  Column(
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        '${teacher['name']}',
+                        teacherName,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                          fontSize: 20,
+                          fontWeight: FontWeight.w800,
                         ),
                       ),
-                      if (designation != null &&
-                          '$designation'.trim().isNotEmpty)
+                      if ('$designation'.trim().isNotEmpty) ...[
+                        const SizedBox(height: 3),
                         Text(
                           '$designation',
-                          style: TextStyle(
-                            color: Colors.teal.shade700,
+                          style: const TextStyle(
+                            color: Colors.white70,
                             fontWeight: FontWeight.w600,
                           ),
                         ),
-                      Text(
-                        'ID: ${_teacherId()}',
-                        style: const TextStyle(
-                          color: Colors.grey,
-                          fontWeight: FontWeight.w600,
+                      ],
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 5,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: .15),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Text(
+                          'শিক্ষক ID  ${_teacherId()}',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
                         ),
                       ),
                     ],
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: _ProfileStat(
+                  icon: Icons.menu_book_rounded,
+                  value: '${subjects.length}',
+                  label: 'বিষয়',
+                  color: const Color(0xFF635BDB),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _ProfileStat(
+                  icon: Icons.class_rounded,
+                  value: '${classes.length}',
+                  label: 'Class teacher class',
+                  color: const Color(0xFF0C8B78),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
           Card(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(18),
+            ),
             child: ListTile(
               leading: Icon(
                 Icons.draw_outlined,
@@ -612,6 +774,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
           ),
           const SizedBox(height: 12),
           Card(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(18),
+            ),
             child: ListTile(
               leading: const Icon(Icons.menu_book),
               title: Text('আমার Subjects (${subjects.length})'),
@@ -626,6 +791,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ),
           ),
           Card(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(18),
+            ),
             child: ListTile(
               leading: const Icon(Icons.class_),
               title: Text('Class Teacher of (${classes.length})'),
@@ -720,12 +888,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ),
           ),
           const SizedBox(height: 12),
-          const Card(
+          Card(
             color: Color(0xFFE0F2F1),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(18),
+            ),
             child: Padding(
               padding: EdgeInsets.all(14),
               child: Text(
-                'ℹ️ Exam-এ marks দেওয়ার পর ৫ ঘণ্টা edit করা যায়। এরপর admin unlock ছাড়া সম্ভব নয়।',
+                'ℹ️ Draft marks Save করে submit না করা পর্যন্ত edit করা যায়। Submit-এর পর re-entry আবেদন Admin অনুমোদন করলে আবার edit করা যাবে।',
                 style: TextStyle(fontSize: 13),
               ),
             ),
@@ -774,4 +945,59 @@ class _ProfileScreenState extends State<ProfileScreen> {
       ),
     );
   }
+}
+
+class _ProfileStat extends StatelessWidget {
+  final IconData icon;
+  final String value;
+  final String label;
+  final Color color;
+
+  const _ProfileStat({
+    required this.icon,
+    required this.value,
+    required this.label,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+    decoration: BoxDecoration(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(18),
+      border: Border.all(color: color.withValues(alpha: .12)),
+    ),
+    child: Row(
+      children: [
+        CircleAvatar(
+          radius: 20,
+          backgroundColor: color.withValues(alpha: .1),
+          child: Icon(icon, color: color, size: 20),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                value,
+                style: TextStyle(
+                  color: color,
+                  fontSize: 19,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: Colors.blueGrey.shade600, fontSize: 11),
+              ),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
 }

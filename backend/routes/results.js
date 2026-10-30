@@ -2,14 +2,48 @@ const router = require('express').Router();
 const pool = require('../db');
 const { getClassSignatories } = require('../lib/teacher_signatures');
 const { dhakaToday } = require('../dates');
+const {
+  eventIsPublished,
+  advanceActiveYear,
+} = require('../lib/academic_session');
 const { auth } = require('../middleware/auth');
 const { computeResult } = require('../grading');
 const { queuePush, getGuardianTokens } = require('../fcm');
-const { balanceRun, executeRun } = require('../promotion_engine');
 const PDFDocument = require('pdfkit');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { loadSchoolLogo } = require('../lib/school_logo');
+const { loadStudentActivities } = require('../lib/student_activities');
+const {
+  decidePromotionByGrace,
+  normalizeSubjectFamily,
+} = require('../lib/promotion_grace');
+const promotionEngine = require('../promotion_engine');
+
+function resultGradeRank(gpa) {
+  const n = Number(gpa || 0);
+  return n >= 5 ? 7 : n >= 4 ? 6 : n >= 3.5 ? 5 : n >= 3 ? 4 : n >= 2 ? 3 : n >= 1 ? 2 : 1;
+}
+
+async function resultPositionSnapshot(studentId, classId, eventId) {
+  const [[cls]] = await pool.query('SELECT name, group_name FROM classes WHERE id=?', [classId]);
+  if (!cls) return null;
+  const [[rank]] = await pool.query(
+    'SELECT section_position, combined_position, section_size, combined_size FROM results WHERE student_id=? AND exam_id=?', [studentId, eventId]);
+  const [[sectionCount]] = await pool.query(
+    `SELECT COUNT(*) AS c FROM results r JOIN students s ON s.id=r.student_id
+      WHERE r.exam_id=? AND s.class_id=?`, [eventId, classId]);
+  const [[combinedCount]] = await pool.query(
+    `SELECT COUNT(*) AS c FROM results r JOIN students s ON s.id=r.student_id JOIN classes c ON c.id=s.class_id
+      WHERE r.exam_id=? AND c.name=? AND COALESCE(c.group_name,'')=COALESCE(?,'')`,
+    [eventId, cls.name, cls.group_name]);
+  if (!rank || (rank.section_position == null && rank.combined_position == null)) return null;
+  return {
+    section: rank.section_position, section_of: Number(rank.section_size || sectionCount?.c || 0),
+    combined: rank.combined_position, combined_of: Number(rank.combined_size || combinedCount?.c || 0),
+  };
+}
 
 // Result computation, tabulation and marksheets are school-wide admin operations.
 // Teachers enter marks through /api/teacher — they must NOT compute/tabulate
@@ -94,6 +128,15 @@ const CANON = {
   special_model_test: { label: 'Special Model Test', promotion_linked: 0 },
 };
 const CANON_KINDS = Object.keys(CANON);
+
+// Model-test rosters are limited to students promoted by the previous year's
+// Class 10 Test into this exact academic session.
+function modelTestPromotionExists(studentAlias = 's') {
+  return `EXISTS (SELECT 1 FROM promotions mp
+    JOIN exam_events source_test ON source_test.id=mp.event_id
+    WHERE mp.student_id=${studentAlias}.id AND mp.decision='promoted'
+      AND mp.destination_session_id=? AND source_test.exam_kind='test' AND source_test.year=?)`;
+}
 const isCanon = k => CANON_KINDS.indexOf(k) !== -1;
 
 function sessionYear(name) {
@@ -108,6 +151,12 @@ async function ensureSessionExams(sessionId, db = pool) {
   const [[sess]] = await db.query('SELECT id, name FROM sessions WHERE id=?', [sessionId]);
   if (!sess) throw Object.assign(new Error('Session not found'), { status: 404 });
   const year = sessionYear(sess.name);
+  if (!(await isAcademicSessionOpen(year, db))) {
+    throw Object.assign(new Error(`আগের session ${year - 1}-এর Class 10 Test exam publish হয়নি।`), {
+      status: 409,
+      code: 'PREVIOUS_TEST_NOT_PUBLISHED',
+    });
+  }
   const created = [], adopted = [], skipped = [];
   // Class mapping per exam kind
   const kindClasses = {
@@ -135,8 +184,13 @@ async function ensureSessionExams(sessionId, db = pool) {
     const classNames = kindClasses[kind] || [];
     let classIdsArr = [];
     if (classNames.length) {
+      // `name IN (?)` is rewritten by the PostgreSQL compatibility layer as
+      // `name = ANY(?)`; here the one name is a scalar, not a SQL array.
+      const classFilter = classNames.length === 1
+        ? 'name=?'
+        : `name IN (${classNames.map(() => '?').join(',')})`;
       const [classes] = await db.query(
-        `SELECT id FROM classes WHERE name IN (${classNames.map(()=>'?').join(',')})`,
+        `SELECT id FROM classes WHERE ${classFilter}`,
         classNames
       );
       classIdsArr = classes.map(c => Number(c.id));
@@ -162,7 +216,121 @@ async function ensureSessionExams(sessionId, db = pool) {
       else throw e;
     }
   }
+  // Provision each canonical event's subject rows with the academic session.
+  // They remain locked until the admin unlocks the event banner.
+  await ensureCanonicalSubjectExams(sessionId, db);
   return { session: sess, year, created, adopted, skipped };
+}
+
+async function ensureCanonicalSubjectExams(sessionId, db = pool) {
+  const [[admin]] = await db.query("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1");
+  if (!admin) return { created: 0 };
+  const [events] = await db.query(
+    `SELECT id, name, exam_kind, class_ids FROM exam_events
+     WHERE session_id=? AND exam_kind IN ('half_yearly','annual','pretest','test','special_model_test')`,
+    [sessionId]);
+  let created = 0;
+  for (const ev of events) {
+    const allowed = ev.exam_kind === 'special_model_test' ? /ssc\s*batch/i
+      : ['pretest','test'].includes(ev.exam_kind) ? /class\s*10\b/i : /class\s*[6-9]\b/i;
+    const [classes] = await db.query('SELECT id,name FROM classes');
+    let ids = ev.class_ids;
+    if (typeof ids === 'string') { try { ids = JSON.parse(ids); } catch (_) { ids = null; } }
+    if (!Array.isArray(ids) || ids.length === 0) {
+      ids = classes.filter(c => allowed.test(String(c.name || ''))).map(c => Number(c.id));
+      await db.query('UPDATE exam_events SET class_ids=? WHERE id=?', [JSON.stringify(ids), ev.id]);
+      if (ids.length) {
+        const values = ids.map(() => '(?,?)').join(',');
+        await db.query(`INSERT IGNORE INTO exam_event_classes (event_id,class_id) VALUES ${values}`,
+          ids.flatMap(id => [ev.id, id])).catch(() => {});
+      }
+    }
+    const selected = classes.filter(c => Array.isArray(ids) && ids.length
+      ? ids.map(Number).includes(Number(c.id)) : allowed.test(String(c.name || '')));
+    for (const cls of selected) {
+      const [subjects] = await db.query('SELECT id,name FROM subjects WHERE class_id=? ORDER BY name', [cls.id]);
+      for (const subject of subjects) {
+        const [[existing]] = await db.query(
+          'SELECT id FROM exams WHERE event_id=? AND class_id=? AND subject_id=?', [ev.id, cls.id, subject.id]);
+        if (existing) continue;
+        await db.query(
+          `INSERT INTO exams (name,exam_type,class_id,subject_id,source,created_by,event_id,status,entry_open)
+           VALUES (?,'class_test',?,?, 'admin', ?,?,'draft',0)`,
+          [`${ev.name} - ${subject.name}`, cls.id, subject.id, admin.id, ev.id]);
+        created++;
+      }
+    }
+  }
+  return { created };
+}
+
+async function firstAcademicSessionYear(db = pool) {
+  const [active] = await db.query('SELECT name FROM sessions WHERE is_active=1 ORDER BY name LIMIT 1');
+  if (active.length) return sessionYear(active[0].name);
+  const [withEvents] = await db.query(
+    `SELECT s.name FROM sessions s JOIN exam_events e ON e.session_id=s.id
+     ORDER BY s.name LIMIT 1`);
+  if (withEvents.length) return sessionYear(withEvents[0].name);
+  return Number(dhakaToday().slice(0, 4));
+}
+
+async function isAcademicSessionOpen(year, db = pool) {
+  const requestedYear = Number(year);
+  if (!requestedYear) return false;
+  const firstYear = await firstAcademicSessionYear(db);
+  if (requestedYear <= firstYear) return requestedYear === firstYear;
+  const [rows] = await db.query(
+    `SELECT e.year, e.exam_kind, e.is_published FROM exam_events e
+     JOIN sessions s ON s.id=e.session_id
+     WHERE e.year=? AND s.name=? AND e.exam_kind='test'`,
+    [requestedYear - 1, String(requestedYear - 1)]
+  );
+  return eventIsPublished(rows, requestedYear - 1, 'test');
+}
+
+// A new session opens and becomes active as soon as the previous year's
+// Class 10 Test is published. Calendar rollover alone never promotes or moves
+// students; promotion decisions remain a separate admin workflow.
+async function syncCurrentAcademicSession(db = pool) {
+  let firstYear = await firstAcademicSessionYear(db);
+  let [[anchor]] = await db.query('SELECT id, name FROM sessions WHERE name=?', [String(firstYear)]);
+  if (!anchor) {
+    await db.query(
+      'INSERT INTO sessions (name, is_active) VALUES (?,0) ON CONFLICT (name) DO NOTHING',
+      [String(firstYear)]
+    );
+    [[anchor]] = await db.query('SELECT id, name FROM sessions WHERE name=?', [String(firstYear)]);
+    if (!anchor) throw new Error(`Could not ensure academic session ${firstYear}`);
+  }
+
+  await ensureSessionHorizon(db, firstYear, 2050);
+  const [eventRows] = await db.query(
+    `SELECT e.year, e.exam_kind, e.is_published, s.name AS session_name
+     FROM exam_events e JOIN sessions s ON s.id=e.session_id
+     WHERE e.exam_kind IN ('half_yearly','annual','pretest','test','special_model_test')`
+  );
+  const events = eventRows.map(event => ({
+    ...event,
+    year: Number(event.year) || sessionYear(event.session_name),
+  }));
+
+  const activeYear = advanceActiveYear(firstYear, 2050, events);
+  let [[session]] = await db.query('SELECT id, name FROM sessions WHERE name=?', [String(activeYear)]);
+  if (!session) {
+    await db.query(
+      'INSERT INTO sessions (name, is_active) VALUES (?,0) ON CONFLICT (name) DO NOTHING',
+      [String(activeYear)]
+    );
+    [[session]] = await db.query('SELECT id, name FROM sessions WHERE name=?', [String(activeYear)]);
+  }
+  if (!session) throw new Error(`Could not ensure academic session ${activeYear}`);
+
+  await db.query(
+    'UPDATE sessions SET is_active=CASE WHEN name=? THEN 1 ELSE 0 END',
+    [String(activeYear)]
+  );
+  await ensureSessionExams(session.id, db);
+  return { ...session, is_active: 1, current_year: activeYear };
 }
 
 // Provision the requested planning horizon once, using the same canonical
@@ -184,29 +352,22 @@ async function ensureCanonicalEventIndex(db = pool) {
   return canonicalIndexReady;
 }
 
-async function ensureSessionHorizon(db = pool, firstYear = 2027, lastYear = 2050) {
-  await ensureCanonicalEventIndex(db);
+async function ensureSessionHorizon(db = pool, firstYear = null, lastYear = 2050) {
+  firstYear = Number(firstYear) || await firstAcademicSessionYear(db);
+  const endYear = Math.max(Number(lastYear), firstYear);
+  const [existingRows] = await db.query('SELECT name FROM sessions WHERE name>=? AND name<=?', [String(firstYear), String(endYear)]);
+  const existing = new Set(existingRows.map(row => String(row.name)));
   const created = [];
-  for (let year = firstYear; year <= lastYear; year++) {
-    let [[session]] = await db.query('SELECT id, name FROM sessions WHERE name=?', [String(year)]);
-    if (!session) {
-      await db.query(
-        'INSERT INTO sessions (name, is_active) VALUES (?,0) ON CONFLICT (name) DO NOTHING',
-        [String(year)]
-      );
-      [[session]] = await db.query('SELECT id, name FROM sessions WHERE name=?', [String(year)]);
-      if (!session) throw new Error(`Could not ensure academic session ${year}`);
-      created.push(year);
-    }
-    const [existingKinds] = await db.query(
-      `SELECT DISTINCT exam_kind FROM exam_events
-       WHERE session_id=? AND exam_kind IN ('half_yearly','annual','pretest','test','special_model_test')`,
-      [session.id]
-    );
-    const present = new Set(existingKinds.map(row => row.exam_kind));
-    if (!CANON_KINDS.every(kind => present.has(kind))) await ensureSessionExams(session.id, db);
+  for (let year = firstYear; year <= endYear; year++) {
+    if (!existing.has(String(year))) created.push(year);
   }
-  await syncCanonicalEventClasses(db);
+  if (created.length) {
+    const values = created.map(() => '(?,0)').join(',');
+    await db.query(
+      `INSERT INTO sessions (name, is_active) VALUES ${values} ON CONFLICT (name) DO NOTHING`,
+      created.map(String)
+    );
+  }
   return { first_year: firstYear, last_year: lastYear, created };
 }
 
@@ -227,8 +388,16 @@ async function syncCanonicalEventClasses(db = pool) {
     special_model_test: c => /ssc\s*batch/i.test(String(c.name || '')),
   };
   for (const event of events) {
+    const [[snapshot]] = await db.query('SELECT class_ids FROM exam_events WHERE id=?', [event.id]);
+    // The first mapping is this year's roster snapshot; preserve historical scope.
+    if (snapshot && snapshot.class_ids != null) continue;
     const classIds = classes.filter(allowed[event.exam_kind] || (() => false)).map(c => Number(c.id));
     await db.query('UPDATE exam_events SET class_ids=? WHERE id=?', [JSON.stringify(classIds), event.id]);
+    if (classIds.length) {
+      const values = classIds.map(() => '(?,?)').join(',');
+      await db.query(`INSERT IGNORE INTO exam_event_classes (event_id,class_id) VALUES ${values}`,
+        classIds.flatMap(id => [event.id, id])).catch(() => {});
+    }
   }
   return { events: events.length };
 }
@@ -236,8 +405,27 @@ async function syncCanonicalEventClasses(db = pool) {
 async function findOrCreateSessionByYear(year) {
   const [rows] = await pool.query('SELECT id, name FROM sessions WHERE name=?', [String(year)]);
   if (rows.length) return rows[0];
-  const [r] = await pool.query('INSERT INTO sessions (name, is_active) VALUES (?,0)', [String(year)]);
-  return { id: r.insertId, name: String(year) };
+  await pool.query('INSERT INTO sessions (name, is_active) VALUES (?,0) ON CONFLICT (name) DO NOTHING', [String(year)]);
+  const [[session]] = await pool.query('SELECT id, name FROM sessions WHERE name=?', [String(year)]);
+  if (!session) throw new Error(`Could not ensure academic session ${year}`);
+  return session;
+}
+
+async function openNextSessionAfterTest(event, actorId) {
+  if (!event || event.exam_kind !== 'test' || !event.year) return null;
+  const [[class10]] = await pool.query(
+    `SELECT 1 AS ok FROM exams x JOIN classes c ON c.id=x.class_id
+     WHERE x.event_id=? AND c.name ~* 'class[[:space:]]*10([[:space:]]|$)' LIMIT 1`,
+    [event.id]
+  );
+  if (!class10) throw new Error('Published Test event is not assigned to Class 10.');
+  const session = await findOrCreateSessionByYear(Number(event.year) + 1);
+  await ensureSessionExams(session.id);
+  await pool.query(
+    'INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)',
+    [actorId, 'session_open', `Opened academic session ${session.name} after publishing ${event.name}`]
+  ).catch(() => {});
+  return session.name;
 }
 
 router.get('/events', async (req, res) => {
@@ -278,6 +466,12 @@ router.post('/events', async (req, res) => {
       if (!session || yr !== sessionYearValue) {
         return res.status(400).json({
           error: `পরীক্ষার বছর শিক্ষাবর্ষের সঙ্গে মিলতে হবে (${session?.name || 'সেশন নেই'} → ${sessionYearValue || '—'})।`,
+        });
+      }
+      if (!(await isAcademicSessionOpen(yr))) {
+        return res.status(409).json({
+          error: `আগের session ${yr - 1}-এর Class 10 Test exam publish হয়নি।`,
+          code: 'PREVIOUS_TEST_NOT_PUBLISHED',
         });
       }
     }
@@ -380,13 +574,25 @@ router.put('/events/:id', async (req, res) => {
   const { name, session_id, start_date, exam_date, result_date, exam_kind, year, promotion_linked, class_ids, entry_open } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name required' });
   try {
-    const [[ev]] = await pool.query('SELECT id FROM exam_events WHERE id=?', [req.params.id]);
+    const [[ev]] = await pool.query('SELECT id, session_id, year, exam_kind FROM exam_events WHERE id=?', [req.params.id]);
     if (!ev) return res.status(404).json({ error: 'Event not found' });
     const kind = exam_kind !== undefined ? (exam_kind || 'other') : undefined;
     const yr = year !== undefined ? (year === '' || year == null ? null : Number(year)) : undefined;
-    if (kind !== undefined && isCanon(kind) && (yr === undefined || yr == null)) {
-      const [[cur]] = await pool.query('SELECT year FROM exam_events WHERE id=?', [req.params.id]);
-      if (!cur.year) return res.status(400).json({ error: 'year required for ' + kind });
+    const nextKind = kind === undefined ? ev.exam_kind : kind;
+    const nextYear = yr === undefined ? Number(ev.year) : yr;
+    const nextSessionId = session_id === undefined ? ev.session_id : Number(session_id || 1);
+    if (isCanon(nextKind)) {
+      if (nextYear == null) return res.status(400).json({ error: 'year required for ' + nextKind });
+      const [[targetSession]] = await pool.query('SELECT name FROM sessions WHERE id=?', [nextSessionId]);
+      if (!targetSession || Number(sessionYear(targetSession.name)) !== Number(nextYear)) {
+        return res.status(400).json({ error: 'পরীক্ষার বছর শিক্ষাবর্ষের সঙ্গে মিলতে হবে।' });
+      }
+      if (!(await isAcademicSessionOpen(nextYear))) {
+        return res.status(409).json({
+          error: `আগের session ${nextYear - 1}-এর Class 10 Test exam publish হয়নি।`,
+          code: 'PREVIOUS_TEST_NOT_PUBLISHED',
+        });
+      }
     }
     const effKind = kind !== undefined ? kind : null;
     const effYear = yr !== undefined ? yr : null;
@@ -443,9 +649,50 @@ router.post('/events/:id/entry-open', async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
+// Before publishing Annual/Test results, let Admin choose the exact mandatory
+// subjects that receive grace. The list is class-specific and never includes
+// subjects configured as optional/fourth subjects.
+router.get('/events/:id/promotion-grace-options', async (req, res) => {
+  try {
+    const [[event]] = await pool.query(
+      'SELECT id, name, exam_kind, year, is_published FROM exam_events WHERE id=?', [req.params.id]);
+    if (!event) return res.status(404).json({ error: 'Event not found' });
+    if (!['annual', 'test'].includes(String(event.exam_kind))) {
+      return res.status(400).json({ error: 'শুধু Annual অথবা Test পরীক্ষায় subject grace বাছাই করা যাবে।' });
+    }
+    const [classes] = await pool.query(
+      `SELECT DISTINCT c.id AS class_id, c.name AS class_name, c.section, c.group_name
+         FROM exams x JOIN classes c ON c.id=x.class_id
+        WHERE x.event_id=? ORDER BY c.name, c.section, c.group_name`, [req.params.id]);
+    const [subjects] = await pool.query(
+      `SELECT DISTINCT x.class_id, sub.id AS subject_id, sub.name AS subject_name
+         FROM exams x JOIN subjects sub ON sub.id=x.subject_id
+        WHERE x.event_id=? AND COALESCE(sub.is_optional,FALSE)=FALSE
+        ORDER BY x.class_id, sub.name`, [req.params.id]);
+    const groupedSubjects = new Map();
+    for (const subject of subjects) {
+      const familyKey = normalizeSubjectFamily(subject.subject_name);
+      const groupedKey = `${Number(subject.class_id)}:${familyKey}`;
+      const existing = groupedSubjects.get(groupedKey) || {
+        class_id: Number(subject.class_id), subject_name: String(subject.subject_name).replace(/\s+(1st|2nd|first|second)$/i, ''), subject_ids: [],
+      };
+      existing.subject_ids.push(Number(subject.subject_id));
+      groupedSubjects.set(groupedKey, existing);
+    }
+    const subjectOptions = [...groupedSubjects.values()];
+    const [selected] = await pool.query(
+      `SELECT class_id, subject_id FROM event_promotion_grace WHERE event_id=?`, [req.params.id]);
+    res.json({ event, classes: classes.filter(cls => promotionYearForClass(cls.class_name, event.exam_kind)).map(cls => ({
+      ...cls,
+      subjects: subjectOptions.filter(subject => Number(subject.class_id) === Number(cls.class_id)),
+      selected_subject_ids: selected.filter(row => Number(row.class_id) === Number(cls.class_id)).map(row => Number(row.subject_id)),
+    })) });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
 // Publish an event: marks it published (Published Exams list), publishes all
 // its subject exams (guardian gating), optionally notifies guardians (ADMIN
-// decides), and auto-creates the next year's same-kind shell.
+// decides), and opens the next session only for a published Class 10 Test.
 // Running-vs-Published rule (scientific single-gate):
 // - teacher mark entry is open ONLY while the EVENT is unpublished AND at
 //   least one of its subject exams has entry_open=1 AND (no deadline OR now
@@ -456,26 +703,28 @@ router.post('/events/:id/entry-open', async (req, res) => {
 //   enrolled student with at least one mark row. Otherwise 422 + missing list.
 async function eventPublishGate(eventId) {
   const missing = [];
-  const [[event]] = await pool.query('SELECT exam_kind, session_id FROM exam_events WHERE id=?', [eventId]);
+  const [[event]] = await pool.query('SELECT exam_kind, session_id, year FROM exam_events WHERE id=?', [eventId]);
   const model = event && event.exam_kind === 'special_model_test';
-  const studentScope = model ? ' AND s.session_id=?' : '';
-  const markStudentJoin = model ? ' JOIN students s ON s.id=m.student_id AND s.session_id=?' : '';
+  const studentScope = model ? ` AND s.session_id=? AND ${modelTestPromotionExists('s')}` : '';
+  const markStudentJoin = model ? ` JOIN students s ON s.id=m.student_id AND s.session_id=? AND ${modelTestPromotionExists('s')}` : '';
   const params = [];
   const [classes] = await pool.query(
     `SELECT c.id, c.name, c.section,
       (SELECT COUNT(*) FROM students s WHERE s.class_id=c.id${studentScope}) AS students,
       (SELECT COUNT(DISTINCT m.student_id) FROM marks m${markStudentJoin} JOIN exams x ON x.id=m.exam_id
-        WHERE x.event_id=? AND x.class_id=c.id) AS students_done,
-      (SELECT COUNT(*) FROM subjects sub WHERE sub.class_id=c.id) AS subjects,
+        WHERE x.event_id=? AND x.class_id=c.id AND x.status<>'published') AS students_done,
+      (SELECT COUNT(*) FROM exams x WHERE x.event_id=? AND x.class_id=c.id AND x.status<>'published') AS subjects,
       (SELECT COUNT(DISTINCT x.subject_id) FROM exams x JOIN marks m ON m.exam_id=x.id
-        WHERE x.event_id=? AND x.class_id=c.id) AS subjects_done,
+        WHERE x.event_id=? AND x.class_id=c.id AND x.status<>'published') AS subjects_done,
       (SELECT COUNT(*) FROM exams x WHERE x.event_id=? AND x.class_id=c.id
-        AND x.entry_status <> 'approved') AS not_approved
-     FROM classes c WHERE c.id IN (SELECT DISTINCT class_id FROM exams WHERE event_id=?)
-       AND (NOT ? OR EXISTS (SELECT 1 FROM students eligible WHERE eligible.class_id=c.id AND eligible.session_id=?))`,
+        AND x.status<>'published' AND x.entry_status <> 'approved') AS not_approved
+     FROM classes c WHERE c.id IN (SELECT DISTINCT class_id FROM exams WHERE event_id=? AND status<>'published')
+       AND (NOT ? OR EXISTS (SELECT 1 FROM students eligible WHERE eligible.class_id=c.id AND eligible.session_id=? AND ${model ? modelTestPromotionExists('eligible') : '1=1'}))`,
     model
-      ? [event.session_id, event.session_id, eventId, eventId, eventId, eventId, true, event.session_id]
-      : [eventId, eventId, eventId, eventId, false, 0]);
+      ? [event.session_id, event.session_id, Number(event.year) - 1,
+         event.session_id, event.session_id, Number(event.year) - 1,
+         eventId, eventId, eventId, eventId, eventId, true, event.session_id, event.session_id, Number(event.year) - 1]
+      : [eventId, eventId, eventId, eventId, eventId, false, 0]);
   for (const c of classes) {
     const gaps = [];
     if (Number(c.subjects_done || 0) < Number(c.subjects || 0)) {
@@ -492,13 +741,114 @@ async function eventPublishGate(eventId) {
   return missing;
 }
 
+function promotionYearForClass(className, eventKind) {
+  const isClass10 = /class\s*10/i.test(String(className || ''));
+  if (isClass10) return eventKind === 'test';
+  return /class\s*[6-9]\b/i.test(String(className || '')) && eventKind === 'annual';
+}
+
+async function prepareEventPromotionReview(event, adminId) {
+  if (!event || !['annual', 'test'].includes(String(event.exam_kind)) || !event.year) return null;
+  const targetYear = Number(event.year) + 1;
+  let [[targetSession]] = await pool.query('SELECT id FROM sessions WHERE name=?', [String(targetYear)]);
+  if (!targetSession) {
+    await pool.query('INSERT INTO sessions (name,is_active) VALUES (?,0) ON CONFLICT (name) DO NOTHING', [String(targetYear)]);
+    [[targetSession]] = await pool.query('SELECT id FROM sessions WHERE name=?', [String(targetYear)]);
+  }
+  if (!targetSession) return null;
+
+  const [classes] = await pool.query(
+    `SELECT DISTINCT c.id,c.name,c.section,c.group_name FROM exams x
+      JOIN classes c ON c.id=x.class_id WHERE x.event_id=? ORDER BY c.name,c.section,c.id`, [event.id]);
+  let autoApproved = 0;
+  for (const cls of classes) {
+    if (!promotionYearForClass(cls.name, event.exam_kind)) continue;
+    const [graceSubjects] = await pool.query(
+      `SELECT sub.name FROM event_promotion_grace g JOIN subjects sub ON sub.id=g.subject_id
+        WHERE g.event_id=? AND g.class_id=?`, [event.id, cls.id]);
+    const selectedNames = graceSubjects.map(subject => subject.name);
+    let destination;
+    if (/class\s*8\b/i.test(cls.name)) destination = await promotionEngine.getPendingGroupClass9();
+    else destination = await promotionEngine.promotionDestination(pool, cls);
+    const [students] = await pool.query(
+      `SELECT id,name,roll FROM students WHERE class_id=? AND (status IS NULL OR status IN ('active','irregular')) ORDER BY roll`, [cls.id]);
+    for (const student of students) {
+      const result = await computeResult(student.id, event.id);
+      const outcome = result
+        ? decidePromotionByGrace({
+          families: result.families,
+          selectedSubjectNames: selectedNames,
+          resultStatus: result.result_status,
+        })
+        : { status: 'pending_results', decision: null, eligible: false, failed: [], graceFailed: [], ungracedFailed: [], autoGrace: false };
+      const note = outcome.autoGrace
+        ? `Auto-approved at publish; grace subjects: ${outcome.graceFailed.join(', ')}`
+        : outcome.status === 'not_eligible'
+          ? `Un-graced mandatory failures: ${outcome.ungracedFailed.join(', ')}`
+          : null;
+      await pool.query(
+        `INSERT INTO student_promotion_status
+          (student_id,from_class_id,target_class_id,target_session_id,source_event_id,status,decision,eligible,
+           final_gpa,failed_subjects,mandatory_failed_subjects,grace_used,admin_note,approved_by,approved_at,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CASE WHEN ? THEN NOW() ELSE NULL END,NOW(),NOW())
+         ON CONFLICT (student_id,target_session_id) DO UPDATE SET
+          from_class_id=EXCLUDED.from_class_id,target_class_id=EXCLUDED.target_class_id,source_event_id=EXCLUDED.source_event_id,
+          status=CASE WHEN student_promotion_status.status IN ('promoted','retained') THEN student_promotion_status.status ELSE EXCLUDED.status END,
+          decision=CASE WHEN student_promotion_status.status IN ('promoted','retained') THEN student_promotion_status.decision ELSE EXCLUDED.decision END,
+          eligible=EXCLUDED.eligible,final_gpa=EXCLUDED.final_gpa,failed_subjects=EXCLUDED.failed_subjects,
+          mandatory_failed_subjects=EXCLUDED.mandatory_failed_subjects,grace_used=EXCLUDED.grace_used,
+          admin_note=EXCLUDED.admin_note,approved_by=COALESCE(student_promotion_status.approved_by,EXCLUDED.approved_by),
+          approved_at=COALESCE(student_promotion_status.approved_at,EXCLUDED.approved_at),updated_at=NOW()`,
+        [student.id, cls.id, destination?.id || null, targetSession.id, event.id, outcome.status, outcome.decision,
+          outcome.eligible, result?.final_gpa ?? null, outcome.failed, outcome.ungracedFailed,
+          outcome.autoGrace ? 1 : 0, note, outcome.autoGrace ? adminId : null, outcome.autoGrace]);
+      if (outcome.autoGrace) {
+        autoApproved++;
+        await pool.query(
+          `INSERT INTO promotion_audit_log (student_id,action,to_status,from_class_id,to_class_id,target_session_id,admin_id,reason,metadata,created_at)
+           VALUES (?,'publish_grace_auto_approved','approved',?,?,?,?,?,?,NOW())`,
+          [student.id, cls.id, destination?.id || null, targetSession.id, adminId, note,
+            JSON.stringify({ event_id: event.id, grace_subjects: outcome.graceFailed })]);
+      }
+    }
+  }
+  return { target_session_id: Number(targetSession.id), auto_approved: autoApproved };
+}
+
 router.post('/events/:id/publish', async (req, res) => {
   const notify = req.body ? !!req.body.notify_guardians : false;
   try {
     const [[ev]] = await pool.query('SELECT * FROM exam_events WHERE id=?', [req.params.id]);
     if (!ev) return res.status(404).json({ error: 'Event not found' });
+    const graceSelections = Array.isArray(req.body?.grace_subjects) ? req.body.grace_subjects : [];
+    if (!Number(ev.is_published) && ['annual', 'test'].includes(String(ev.exam_kind))) {
+      const [allowed] = await pool.query(
+        `SELECT DISTINCT x.class_id,sub.id AS subject_id FROM exams x
+          JOIN subjects sub ON sub.id=x.subject_id
+         WHERE x.event_id=? AND COALESCE(sub.is_optional,FALSE)=FALSE`, [ev.id]);
+      const allowedPairs = new Set(allowed.map(row => `${Number(row.class_id)}:${Number(row.subject_id)}`));
+      for (const row of graceSelections) {
+        const classId = Number(row.class_id);
+        for (const subjectId of (Array.isArray(row.subject_ids) ? row.subject_ids : []).map(Number)) {
+          if (!Number.isInteger(classId) || !Number.isInteger(subjectId) ||
+              !allowedPairs.has(`${classId}:${subjectId}`)) {
+            return res.status(400).json({ error: 'শুধু এই পরীক্ষার সংশ্লিষ্ট class-এর mandatory subject grace করা যাবে।' });
+          }
+        }
+      }
+    }
     if (Number(ev.is_published) === 1) {
-      return res.status(409).json({ error: 'Event already published — unpublish করে আবার publish করা যাবে।' });
+      const nextYear = await openNextSessionAfterTest(ev, req.user.id);
+      if (isCanon(ev.exam_kind)) await syncCurrentAcademicSession();
+      const promotionReview = await prepareEventPromotionReview(ev, req.user.id).catch(err => {
+        console.error('grace promotion review failed:', err.message); return null;
+      });
+      return res.json({ ok: true, already_published: true, next_year_session: nextYear, promotion_review: promotionReview });
+    }
+    const [[activeScope]] = await pool.query(
+      `SELECT COUNT(*) AS n FROM exams WHERE event_id=? AND entry_open=1 AND status<>'published'`, [req.params.id]);
+    if (!Number(activeScope && activeScope.n)) {
+      return res.status(409).json({ error: 'ফল প্রকাশের জন্য অন্তত একটি active subject খুলতে হবে।' });
     }
     const missing = await eventPublishGate(req.params.id);
     if (missing.length) {
@@ -507,19 +857,60 @@ router.post('/events/:id/publish', async (req, res) => {
         missing,
       });
     }
-    await pool.query(
-      `UPDATE exam_events SET is_published=1, published_at=NOW(), notify_guardians=?, notified_at=CASE WHEN ?=1 THEN NOW() ELSE notified_at END WHERE id=?`,
-      [notify ? 1 : 0, notify ? 1 : 0, req.params.id]);
-    await pool.query(`UPDATE exams SET status='published', entry_open=0 WHERE event_id=?`, [req.params.id]);
+    const publishConn = await pool.getConnection();
+    try {
+      await publishConn.beginTransaction();
+      const [[lockedEvent]] = await publishConn.query(
+        'SELECT is_published FROM exam_events WHERE id=? FOR UPDATE', [req.params.id]);
+      if (!lockedEvent) {
+        await publishConn.rollback();
+        return res.status(404).json({ error: 'Event not found' });
+      }
+      if (Number(lockedEvent.is_published) === 1) {
+        await publishConn.rollback();
+        const nextYear = await openNextSessionAfterTest(ev, req.user.id);
+        if (isCanon(ev.exam_kind)) await syncCurrentAcademicSession();
+        const promotionReview = await prepareEventPromotionReview(ev, req.user.id).catch(err => {
+          console.error('grace promotion review failed:', err.message); return null;
+        });
+        return res.json({ ok: true, already_published: true, next_year_session: nextYear, promotion_review: promotionReview });
+      }
+      await publishConn.query(
+        `UPDATE exam_events SET is_published=1, published_at=NOW(), notify_guardians=? WHERE id=?`,
+        [notify ? 1 : 0, req.params.id]);
+      await publishConn.query(
+        `UPDATE exams SET status='published', entry_open=0 WHERE event_id=? AND entry_open=1 AND status<>'published'`,
+        [req.params.id]);
+      if (['annual', 'test'].includes(String(ev.exam_kind))) {
+        await publishConn.query('DELETE FROM event_promotion_grace WHERE event_id=?', [ev.id]);
+        for (const row of graceSelections) {
+          const classId = Number(row.class_id);
+          for (const subjectId of [...new Set((Array.isArray(row.subject_ids) ? row.subject_ids : []).map(Number))]) {
+            await publishConn.query(
+              `INSERT INTO event_promotion_grace (event_id,class_id,subject_id,granted_by) VALUES (?,?,?,?)
+               ON CONFLICT (event_id,class_id,subject_id) DO NOTHING`, [ev.id, classId, subjectId, req.user.id]);
+          }
+        }
+      }
+      await publishConn.commit();
+    } catch (publishErr) {
+      try { await publishConn.rollback(); } catch (_) {}
+      throw publishErr;
+    } finally {
+      publishConn.release();
+    }
     // Auto result generation
     let autoComputed = [];
     try {
-      const [clsRows] = await pool.query('SELECT DISTINCT class_id FROM exams WHERE event_id=?', [req.params.id]);
+      const [clsRows] = await pool.query("SELECT DISTINCT class_id FROM exams WHERE event_id=? AND status='published'", [req.params.id]);
       for (const c of clsRows) {
         const r = await computeEventResults(req.params.id, c.class_id);
         autoComputed.push({ class_id: c.class_id, ...r });
       }
     } catch (e) { console.error('auto-compute on publish failed:', e.message); }
+    let promotionReview = null;
+    try { promotionReview = await prepareEventPromotionReview(ev, req.user.id); }
+    catch (e) { console.error('grace promotion review failed:', e.message); }
     let notified = 0, push = null, already_notified = false;
     if (notify) {
       const [[sent]] = await pool.query(
@@ -549,61 +940,21 @@ router.post('/events/:id/publish', async (req, res) => {
             `SELECT COUNT(*) AS c FROM notifications WHERE dedup_key LIKE ?`, [`result:${ev.id}:%`]);
           notified = cnt ? Number(cnt.c) : studentIds.length;
         }
+        await pool.query('UPDATE exam_events SET notified_at=NOW() WHERE id=? AND notify_guardians=1', [req.params.id]);
       }
     }
-    // Next-year shell: same kind for year+1 (creates the Y+1 session if missing) - AUTO CREATE when publishing/running
+    // Only publishing the Class 10 Test opens the next academic session.
     let nextYear = null;
-    let autoPromotions = [];
-    if (isCanon(ev.exam_kind) && ev.year) {
-      try {
-        const sess = await findOrCreateSessionByYear(Number(ev.year) + 1);
-        await ensureSessionExams(sess.id);
-        nextYear = sess.name;
-        // Also create a hidden copy linked to this one if not exists
-        const [[exists]] = await pool.query('SELECT id FROM exam_events WHERE exam_kind=? AND year=? AND session_id=?', [ev.exam_kind, Number(ev.year)+1, sess.id]);
-        if (!exists) {
-          const classIdsArr = ev.class_ids ? (typeof ev.class_ids === 'string' ? JSON.parse(ev.class_ids) : ev.class_ids) : null;
-          const [nr] = await pool.query(
-            'INSERT INTO exam_events (name, session_id, created_by, exam_kind, year, promotion_linked, class_ids, entry_open, auto_created_from) VALUES (?,?,?,?,?,?,?,?,?)',
-            [`${CANON[ev.exam_kind].label} ${Number(ev.year)+1}`, sess.id, req.user.id, ev.exam_kind, Number(ev.year)+1, CANON[ev.exam_kind].promotion_linked, classIdsArr ? JSON.stringify(classIdsArr) : null, 0, ev.id]
-          );
-          if (classIdsArr && classIdsArr.length) {
-            try {
-              const vals = classIdsArr.map(()=>'(?,?)').join(',');
-              const params = [];
-              for (const cid of classIdsArr) { params.push(nr.insertId, cid); }
-              await pool.query(`INSERT IGNORE INTO exam_event_classes (event_id, class_id) VALUES ${vals}`, params);
-            } catch(e){}
-          }
-        }
-      } catch(e) { console.error('auto-create next year err', e.message); }
+    const autoPromotions = [];
+    if (ev.exam_kind === 'test' && ev.year) {
+      nextYear = await openNextSessionAfterTest(ev, req.user.id);
     }
-    // A published Class 10 Test is the promotion decision. Move eligible
-    // students into next year's SSC Batch using the configured promotion rules.
-    if (ev.exam_kind === 'test' && ev.year && nextYear) {
-      try {
-        const [classes] = await pool.query(
-          `SELECT DISTINCT c.id, c.name FROM exams e JOIN classes c ON c.id=e.class_id
-           WHERE e.event_id=? AND LOWER(c.name) LIKE 'class 10%'`, [ev.id]);
-        for (const cls of classes) {
-          const [[priorRun]] = await pool.query(
-            `SELECT id, status FROM promotion_runs WHERE event_id=? AND from_class_id=?`, [ev.id, cls.id]);
-          if (priorRun && priorRun.status === 'executed') {
-            autoPromotions.push({ class_id: cls.id, status: 'already_promoted', moved: 0 });
-            continue;
-          }
-          const run = await balanceRun(ev.id, cls.id);
-          const executed = await executeRun(run.run_id, req.user.id);
-          autoPromotions.push({ class_id: cls.id, status: 'promoted', moved: executed.moved, run_id: run.run_id });
-        }
-      } catch (e) {
-        console.error('automatic test promotion failed:', e.message);
-        autoPromotions.push({ error: e.message });
-      }
-    }
+    if (isCanon(ev.exam_kind)) await syncCurrentAcademicSession();
+    // Opening the next session does not decide student promotion. Admin
+    // reviews and executes approved promotion decisions separately.
     await pool.query('INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)',
       [req.user.id, 'event_publish', `Published event ${ev.name} (notify=${notify ? 1 : 0}, notified=${notified}, already=${already_notified ? 1 : 0})`]).catch(() => {});
-    res.json({ ok: true, notified, already_notified, push, next_year_session: nextYear, auto_computed: autoComputed, auto_promotions: autoPromotions });
+    res.json({ ok: true, notified, already_notified, push, next_year_session: nextYear, auto_computed: autoComputed, auto_promotions: autoPromotions, promotion_review: promotionReview });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -611,6 +962,12 @@ router.post('/events/:id/unpublish', async (req, res) => {
   try {
     const [[ev]] = await pool.query('SELECT id FROM exam_events WHERE id=?', [req.params.id]);
     if (!ev) return res.status(404).json({ error: 'Event not found' });
+    const [[graceMoves]] = await pool.query(
+      `SELECT COUNT(*) AS count FROM student_promotion_status
+        WHERE source_event_id=? AND status='promoted' AND grace_used=1`, [req.params.id]);
+    if (Number(graceMoves?.count || 0) > 0) {
+      return res.status(409).json({ error: 'Grace promotion সম্পন্ন হয়েছে; আগে promotion reversal করুন, তারপর ফল unpublish করা যাবে।' });
+    }
     await pool.query(`UPDATE exam_events SET is_published=0 WHERE id=?`, [req.params.id]);
     await pool.query(`UPDATE exams SET status='draft' WHERE event_id=?`, [req.params.id]);
     await pool.query('INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)',
@@ -625,41 +982,42 @@ router.post('/events/:id/unpublish', async (req, res) => {
 // review & publish (auto-publish only happens inside the publish flow).
 router.get('/events/:id/coverage', async (req, res) => {
   try {
-    const [[scope]] = await pool.query('SELECT exam_kind, session_id FROM exam_events WHERE id=?', [req.params.id]);
+    const [[scope]] = await pool.query('SELECT exam_kind, session_id, year FROM exam_events WHERE id=?', [req.params.id]);
     const model = scope && scope.exam_kind === 'special_model_test';
-    const studentScope = model ? ' AND s.session_id=?' : '';
-    const studentScopeParams = model ? [scope.session_id] : [];
+    const studentScope = model ? ` AND s.session_id=? AND ${modelTestPromotionExists('s')}` : '';
+    const studentScopeParams = model ? [scope.session_id, scope.session_id, Number(scope.year) - 1] : [];
     const [classes] = await pool.query(
       `SELECT c.id AS class_id, c.name AS class_name, c.section, c.group_name,
         (SELECT COUNT(*) FROM students s WHERE s.class_id=c.id${studentScope}) AS student_count,
         (SELECT COUNT(DISTINCT m.student_id) FROM marks m JOIN exams x ON x.id=m.exam_id
-          JOIN students s ON s.id=m.student_id${model ? ' AND s.session_id=?' : ''}
-          WHERE x.event_id=? AND x.class_id=c.id) AS students_with_marks,
-        (SELECT COUNT(*) FROM marks m JOIN exams x ON x.id=m.exam_id WHERE x.event_id=? AND x.class_id=c.id) AS marks_count,
-        (SELECT COUNT(*) FROM exams x WHERE x.event_id=? AND x.class_id=c.id) AS subject_count,
-        (SELECT COUNT(DISTINCT x.subject_id) FROM exams x JOIN marks m ON m.exam_id=x.id WHERE x.event_id=? AND x.class_id=c.id) AS subjects_with_marks,
-        (SELECT COUNT(*) FROM subjects sub WHERE sub.class_id=c.id) AS assigned_subjects,
+          JOIN students s ON s.id=m.student_id${model ? ` AND s.session_id=? AND ${modelTestPromotionExists('s')}` : ''}
+          WHERE x.event_id=? AND x.class_id=c.id AND x.entry_open=1 AND x.status<>'published') AS students_with_marks,
+        (SELECT COUNT(*) FROM marks m JOIN exams x ON x.id=m.exam_id WHERE x.event_id=? AND x.class_id=c.id AND x.entry_open=1 AND x.status<>'published') AS marks_count,
+        (SELECT COUNT(*) FROM exams x WHERE x.event_id=? AND x.class_id=c.id AND x.entry_open=1 AND x.status<>'published') AS subject_count,
+        (SELECT COUNT(DISTINCT x.subject_id) FROM exams x JOIN marks m ON m.exam_id=x.id WHERE x.event_id=? AND x.class_id=c.id AND x.entry_open=1 AND x.status<>'published') AS subjects_with_marks,
+        (SELECT COUNT(*) FROM exams x WHERE x.event_id=? AND x.class_id=c.id AND x.entry_open=1 AND x.status<>'published') AS assigned_subjects,
         (SELECT COUNT(*) FROM subjects sub WHERE sub.class_id=c.id
            AND NOT EXISTS (SELECT 1 FROM exams x JOIN marks m ON m.exam_id=x.id
-                           WHERE x.event_id=? AND x.class_id=c.id AND x.subject_id=sub.id)) AS pending_subjects
+                           WHERE x.event_id=? AND x.class_id=c.id AND x.subject_id=sub.id AND x.entry_open=1 AND x.status<>'published')) AS pending_subjects
        FROM classes c
-       WHERE EXISTS (SELECT 1 FROM exams ex WHERE ex.event_id=? AND ex.class_id=c.id)
-         AND (NOT ? OR EXISTS (SELECT 1 FROM students eligible WHERE eligible.class_id=c.id AND eligible.session_id=?))
+       WHERE EXISTS (SELECT 1 FROM exams ex WHERE ex.event_id=? AND ex.class_id=c.id AND ex.entry_open=1 AND ex.status<>'published')
+         AND (NOT ? OR EXISTS (SELECT 1 FROM students eligible WHERE eligible.class_id=c.id AND eligible.session_id=? AND ${model ? modelTestPromotionExists('eligible') : '1=1'}))
        ORDER BY c.name, c.section, c.group_name`,
       [
         ...studentScopeParams,
-        ...(model ? [scope.session_id] : []), req.params.id,
-        req.params.id, req.params.id, req.params.id, req.params.id,
+        ...(model ? [scope.session_id, scope.session_id, Number(scope.year) - 1] : []), req.params.id,
+        req.params.id, req.params.id, req.params.id, req.params.id, req.params.id,
         req.params.id, model, model ? scope.session_id : 0,
+        ...(model ? [scope.session_id, Number(scope.year) - 1] : []),
       ]
     );
     const [subjects] = await pool.query(
       `SELECT x.class_id, x.id AS exam_id, sub.name AS subject_name, x.status,
-        (SELECT COUNT(*) FROM marks m JOIN students s ON s.id=m.student_id${model ? ' AND s.session_id=?' : ''} WHERE m.exam_id=x.id) AS entered_count,
+        (SELECT COUNT(*) FROM marks m JOIN students s ON s.id=m.student_id${model ? ` AND s.session_id=? AND ${modelTestPromotionExists('s')}` : ''} WHERE m.exam_id=x.id) AS entered_count,
         (SELECT COUNT(*) FROM students s WHERE s.class_id=x.class_id${studentScope}) AS student_count
        FROM exams x JOIN subjects sub ON sub.id=x.subject_id
-       WHERE x.event_id=? ORDER BY x.class_id, sub.name`,
-      [...(model ? [scope.session_id] : []), ...studentScopeParams, req.params.id]
+       WHERE x.event_id=? AND x.entry_open=1 AND x.status<>'published' ORDER BY x.class_id, sub.name`,
+      [...(model ? [scope.session_id, scope.session_id, Number(scope.year) - 1] : []), ...studentScopeParams, req.params.id]
     );
     classes.forEach(c => {
       const subjTotal = Math.max(Number(c.assigned_subjects || 0), Number(c.subject_count || 0));
@@ -704,12 +1062,22 @@ router.post('/results/compute', async (req, res) => {
 // grades per student, cached into `results`. Used by manual compute,
 // publish flow (auto for every class in the event) and permission changes.
 async function computeEventResults(event_id, class_id) {
-  const [[eventScope]] = await pool.query('SELECT exam_kind, session_id FROM exam_events WHERE id=?', [event_id]);
+  const [[eventScope]] = await pool.query('SELECT exam_kind, session_id, year FROM exam_events WHERE id=?', [event_id]);
+  const [[selectedClass]] = await pool.query('SELECT id, name, group_name FROM classes WHERE id=?', [class_id]);
+  if (!selectedClass) throw Object.assign(new Error('Class not found'), { status: 404 });
   const modelSession = eventScope && eventScope.exam_kind === 'special_model_test';
+  // A class row is one section. Calculate merit across every section of the
+  // same class/group that participates in this event, while preserving each
+  // student's within-section position separately.
   const [students] = await pool.query(
-    `SELECT s.id, s.section, c.group_name, c.section AS class_section
-       FROM students s JOIN classes c ON c.id = s.class_id WHERE s.class_id=?${modelSession ? ' AND s.session_id=?' : ''}`,
-    modelSession ? [class_id, eventScope.session_id] : [class_id]);
+    `SELECT s.id, s.section, c.id AS class_id, c.group_name, c.section AS class_section
+       FROM students s JOIN classes c ON c.id = s.class_id
+      WHERE c.name=? AND COALESCE(c.group_name,'')=COALESCE(?,'')
+        AND EXISTS (SELECT 1 FROM exams event_exam WHERE event_exam.event_id=? AND event_exam.class_id=c.id)
+        ${modelSession ? `AND s.session_id=? AND ${modelTestPromotionExists('s')}` : ''}`,
+    modelSession
+      ? [selectedClass.name, selectedClass.group_name, event_id, eventScope.session_id, eventScope.session_id, Number(eventScope.year) - 1]
+      : [selectedClass.name, selectedClass.group_name, event_id]);
   let computed = 0, withMarks = 0;
   const scored = [];
   for (const s of students) {
@@ -729,7 +1097,7 @@ async function computeEventResults(event_id, class_id) {
     );
     computed++;
     scored.push({
-      id: s.id, sec: String(s.group_name || s.section || s.class_section || ''),
+      id: s.id, class_id: s.class_id, sec: String(s.class_section || s.section || ''),
       gpa: Number(r.final_gpa), bonus: Number(r.gpa_4th_bonus || 0),
       total: Number(r.total_marks || 0), fourth: Number(r.fourth_score || 0),
       passed: r.result_status === 'PASSED' ? 1 : 0,
@@ -737,16 +1105,21 @@ async function computeEventResults(event_id, class_id) {
   }
   // Materialize positions (Q9): combined across all sections, plus section-local.
   scored.sort((a, b) =>
-    (b.total - a.total) || (b.gpa - a.gpa) || (b.passed - a.passed) || (a.id - b.id));
+    resultGradeRank(b.gpa) - resultGradeRank(a.gpa) ||
+    (b.total - a.total) ||
+    crypto.createHash('sha256').update(`merit:${event_id}:${a.id}`).digest('hex')
+      .localeCompare(crypto.createHash('sha256').update(`merit:${event_id}:${b.id}`).digest('hex')));
   const secCounters = {};
+  const sectionSizes = {};
+  for (const row of scored) sectionSizes[row.sec] = (sectionSizes[row.sec] || 0) + 1;
   for (let i = 0; i < scored.length; i++) {
     const row = scored[i];
     const combined = i + 1;
     secCounters[row.sec] = (secCounters[row.sec] || 0) + 1;
     await pool.query(
-      `UPDATE results SET combined_position=?, section_position=?
+      `UPDATE results SET combined_position=?, section_position=?, combined_size=?, section_size=?
         WHERE student_id=? AND exam_id=?`,
-      [combined, secCounters[row.sec], row.id, event_id]);
+      [combined, secCounters[row.sec], scored.length, sectionSizes[row.sec], row.id, event_id]);
   }
   return { ok: true, students: students.length, computed, with_marks: withMarks };
 }
@@ -755,15 +1128,24 @@ router.get('/tabulation', async (req, res) => {
   const { event_id, class_id } = req.query;
   if (!event_id || !class_id) return res.status(400).json({ error: 'event_id and class_id required' });
   try {
-    const [[scope]] = await pool.query('SELECT exam_kind, session_id FROM exam_events WHERE id=?', [event_id]);
+    const [[scope]] = await pool.query('SELECT exam_kind, session_id, year FROM exam_events WHERE id=?', [event_id]);
     const modelSession = scope && scope.exam_kind === 'special_model_test';
+    const [[selectedClass]] = await pool.query('SELECT name, group_name FROM classes WHERE id=?', [class_id]);
+    const [[sectionCount]] = await pool.query(
+      `SELECT COUNT(*) AS c FROM results r JOIN students s ON s.id=r.student_id
+        WHERE r.exam_id=? AND s.class_id=?`, [event_id, class_id]);
+    const [[combinedCount]] = await pool.query(
+      `SELECT COUNT(*) AS c FROM results r JOIN students s ON s.id=r.student_id JOIN classes c ON c.id=s.class_id
+        WHERE r.exam_id=? AND c.name=? AND COALESCE(c.group_name,'')=COALESCE(?,'')`,
+      [event_id, selectedClass?.name, selectedClass?.group_name]);
     const [students] = await pool.query(
-      `SELECT s.id, s.name, s.roll, s.student_code, r.final_gpa, r.total_gpa_without_4th,
-              r.gpa_4th_bonus, r.result_status
+      `SELECT s.id, s.name, s.roll, s.student_code, s.birth_cert_no, s.father_name, s.mother_name, s.dob, r.final_gpa, r.total_gpa_without_4th,
+              r.gpa_4th_bonus, r.result_status, r.section_position, r.combined_position,
+              r.section_size, r.combined_size
        FROM students s
        LEFT JOIN results r ON r.student_id = s.id AND r.exam_id = ?
-       WHERE s.class_id = ?${modelSession ? ' AND s.session_id=?' : ''} ORDER BY s.roll`,
-      modelSession ? [event_id, class_id, scope.session_id] : [event_id, class_id]
+        WHERE s.class_id = ?${modelSession ? ` AND s.session_id=? AND ${modelTestPromotionExists('s')}` : ''} ORDER BY s.roll`,
+      modelSession ? [event_id, class_id, scope.session_id, scope.session_id, Number(scope.year) - 1] : [event_id, class_id]
     );
     const famSet = new Set();
     const rows = [];
@@ -773,8 +1155,12 @@ router.get('/tabulation', async (req, res) => {
       if (r) {
         r.families.forEach(f => { famSet.add(f.subject); famMap[f.subject] = f; });
       }
+      const activities = await loadStudentActivities(pool, {
+        studentId: stu.id, classId, eventId, year: scope?.year, to: scope?.result_date || dhakaToday(),
+      });
       rows.push({
         ...stu,
+        activities, activity_period: { from: activities.from, to: activities.to },
         families: famMap,
         total_marks: r ? r.total_marks : null,
         total_full: r ? r.total_full : null,
@@ -785,17 +1171,20 @@ router.get('/tabulation', async (req, res) => {
     }
     const subjects = Array.from(famSet);
     rows.forEach((row, i) => { row._families = subjects.map(s => row.families[s] || null); });
-    // Merit ranking with NCTB tie-breakers: GPA desc -> 4th-subject bonus desc
-    // -> total marks desc -> 4th-subject scaled score desc -> roll asc.
+    // Merit ranking: result grade, then total marks. Equal grade+marks get a
+    // stable random-looking order keyed by event/student, never by roll/name.
     rows.forEach(row => { row.position = null; });
     const sortedForRank = [...rows].filter(r => r.final_gpa != null && r.result_status === 'PASSED')
       .sort((a, b) =>
-        (Number(b.final_gpa) - Number(a.final_gpa)) ||
-        (Number(b.gpa_4th_bonus || 0) - Number(a.gpa_4th_bonus || 0)) ||
+        resultGradeRank(b.final_gpa) - resultGradeRank(a.final_gpa) ||
         (Number(b.total_marks || 0) - Number(a.total_marks || 0)) ||
-        (Number(b.fourth_score || 0) - Number(a.fourth_score || 0)) ||
-        (Number(a.roll) - Number(b.roll)));
-    sortedForRank.forEach((r, i) => { r.position = i + 1; });
+        crypto.createHash('sha256').update(`merit:${event_id}:${a.id}`).digest('hex')
+          .localeCompare(crypto.createHash('sha256').update(`merit:${event_id}:${b.id}`).digest('hex')));
+    sortedForRank.forEach((r, i) => {
+      r.position = r.section_position ?? (i + 1);
+      r.section_of = Number(r.section_size || sectionCount?.c || 0);
+      r.combined_of = Number(r.combined_size || combinedCount?.c || 0);
+    });
     res.json({ subjects, rows });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
@@ -834,6 +1223,7 @@ router.get('/class-pdf', async (req, res) => {
 
     for (const st of students) {
       const result = await computeResult(st.id, eventId);
+      const dualPosition = await resultPositionSnapshot(st.id, classId, eventId);
       doc.addPage();
       let y = 50;
       const schoolName = settings.school_name || settings.school || settings.school_name_en || 'School';
@@ -857,6 +1247,11 @@ router.get('/class-pdf', async (req, res) => {
         doc.font('Helvetica-Bold').text(String(v), 175, y, { width: CW - 135 });
         y += 13;
       });
+      if (dualPosition) {
+        doc.font('Helvetica').fontSize(9.5).fillColor('#111111')
+          .text(`মেধা স্থান: শাখা ${dualPosition.section || '—'}/${dualPosition.section_of} • সব শাখা ${dualPosition.combined || '—'}/${dualPosition.combined_of}`, 40, y, { width: CW });
+        y += 15;
+      }
       y += 10;
       if (!result) {
         doc.font('Helvetica').fontSize(10).fillColor('#888').text('No result data', 40, y);
@@ -913,6 +1308,11 @@ router.get('/marksheet/:studentId/:eventId', async (req, res) => {
     const [[hi]] = await pool.query(
       `SELECT MAX(r.final_gpa) AS gpa FROM results r JOIN students s ON s.id=r.student_id
        WHERE r.exam_id=? AND s.class_id=?`, [req.params.eventId, student.class_id]);
+    const dualPosition = await resultPositionSnapshot(student.id, student.class_id, Number(req.params.eventId));
+    const activities = await loadStudentActivities(pool, {
+      studentId: student.id, classId: student.class_id, eventId: Number(req.params.eventId),
+      year: event?.year, to: event?.result_date || event?.exam_date || dhakaToday(),
+    });
     const [att] = await pool.query(
       `SELECT status, COUNT(*) AS c FROM attendance WHERE student_id=? GROUP BY status`,
       [student.id]);
@@ -923,7 +1323,8 @@ router.get('/marksheet/:studentId/:eventId', async (req, res) => {
       signatures: await getClassSignatories(student.class_id),
       serial_no: saved ? 'MS-' + req.params.eventId + '-' + String(saved.id).padStart(4, '0') : '—',
       class_highest_gpa: hi && hi.gpa != null ? Number(hi.gpa) : null,
-      attendance: att });
+      dual_position: dualPosition,
+      attendance: att, activities, activity_period: { from: activities.from, to: activities.to } });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -944,9 +1345,10 @@ router.get('/marksheet/:studentId/:eventId', async (req, res) => {
         const result = await computeResult(student.id, Number(req.params.eventId));
         if (!result) return res.status(404).json({ error: 'No marksheet available for this student/event' });
         const [[saved]] = await pool.query(
-          'SELECT teacher_remarks FROM results WHERE student_id=? AND exam_id=?',
+          'SELECT teacher_remarks, section_position, combined_position FROM results WHERE student_id=? AND exam_id=?',
           [student.id, req.params.eventId]
         );
+        const dualPosition = await resultPositionSnapshot(student.id, student.class_id, Number(req.params.eventId));
         const [settingsRows] = await pool.query('SELECT setting_key, setting_value FROM app_settings');
         const settings = {};
         settingsRows.forEach(s => { settings[s.setting_key] = s.setting_value; });
@@ -1015,7 +1417,9 @@ router.get('/marksheet/:studentId/:eventId', async (req, res) => {
           ['Academic Session', settings.exam_term_name || '—'],
           ['Date of Birth', student.dob ? String(student.dob).slice(0, 10) : '—'],
           ['Class', `${student.class_name}${student.group_name ? ' (' + student.group_name + ')' : ' (' + student.section + ')'}`],
-          ['Religion', student.religion || '—']
+          ['Religion', student.religion || '—'],
+          ['Section Merit', dualPosition ? `${dualPosition.section || '—'} / ${dualPosition.section_of}` : '—'],
+          ['All Sections Merit', dualPosition ? `${dualPosition.combined || '—'} / ${dualPosition.combined_of}` : '—']
         ];
 
         const col1W = 140, col2W = CW - col1W - 10;
@@ -1186,7 +1590,11 @@ router.put('/results/remarks', async (req, res) => {
 
 module.exports = router;
 module.exports.ensureSessionExams = ensureSessionExams;
+module.exports.ensureCanonicalSubjectExams = ensureCanonicalSubjectExams;
+module.exports.syncCurrentAcademicSession = syncCurrentAcademicSession;
 module.exports.ensureSessionHorizon = ensureSessionHorizon;
 module.exports.syncCanonicalEventClasses = syncCanonicalEventClasses;
 module.exports.findOrCreateSessionByYear = findOrCreateSessionByYear;
+module.exports.isAcademicSessionOpen = isAcademicSessionOpen;
+module.exports.eventPublishGate = eventPublishGate;
 module.exports.CANON = CANON;

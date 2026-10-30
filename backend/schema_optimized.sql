@@ -19,6 +19,13 @@ CREATE TABLE IF NOT EXISTS `users` (
   `active` TINYINT(1) NOT NULL DEFAULT 1,
   `is_class_teacher` JSON DEFAULT NULL,
   `designation` VARCHAR(100) DEFAULT NULL,
+  `teacher_dob` DATE DEFAULT NULL,
+  `teacher_address` VARCHAR(255) DEFAULT NULL,
+  `teacher_blood_group` VARCHAR(5) DEFAULT NULL,
+  `teacher_index_number` VARCHAR(40) DEFAULT NULL,
+  `teacher_pns_number` VARCHAR(40) DEFAULT NULL,
+  `teacher_degree` VARCHAR(150) DEFAULT NULL,
+  `teacher_joining_date` DATE DEFAULT NULL,
   `sort_order` INT DEFAULT 99,
   `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY `uq_username` (`username`),
@@ -104,6 +111,9 @@ CREATE TABLE IF NOT EXISTS `students` (
   `status` VARCHAR(20) NOT NULL DEFAULT 'active',
   `session_id` INT DEFAULT NULL,
   `receives_scholarship` TINYINT(1) NOT NULL DEFAULT 0,
+  `guardian_profile_locked_at` TIMESTAMP NULL DEFAULT NULL,
+  `class10_start_year` SMALLINT DEFAULT NULL,
+  `is_irregular` TINYINT(1) NOT NULL DEFAULT 0,
   `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY `uq_student_code` (`student_code`),
   UNIQUE KEY `uq_roll` (`class_id`,`roll`),
@@ -258,12 +268,35 @@ CREATE TABLE IF NOT EXISTS `results` (
   `gpa_4th_bonus` DECIMAL(4,2) DEFAULT 0,
   `final_gpa` DECIMAL(4,2) DEFAULT 0,
   `result_status` ENUM('PASSED','FAILED','ABSENT') DEFAULT 'ABSENT',
+  `total_marks_obtained` DECIMAL(8,2) DEFAULT 0,
+  `total_marks_full` DECIMAL(8,2) DEFAULT 0,
+  `pass_all` TINYINT(1) DEFAULT 0,
   `teacher_remarks` TEXT,
   `computed_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `section_position` INT DEFAULT NULL,
+  `combined_position` INT DEFAULT NULL,
+  `section_size` INT DEFAULT NULL,
+  `combined_size` INT DEFAULT NULL,
   UNIQUE KEY `uq_result` (`student_id`,`exam_id`),
   KEY `idx_result_exam` (`exam_id`),
   KEY `idx_result_gpa` (`final_gpa`),
   CONSTRAINT `fk_results_student` FOREIGN KEY (`student_id`) REFERENCES `students`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- attendance delegation
+CREATE TABLE IF NOT EXISTS `attendance_delegation` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `class_id` INT NOT NULL,
+  `date` DATE NOT NULL,
+  `session` VARCHAR(20) NOT NULL,
+  `granted_by` INT NOT NULL,
+  `granted_to` INT NOT NULL,
+  `used` TINYINT(1) NOT NULL DEFAULT 0,
+  `revoked` TINYINT(1) NOT NULL DEFAULT 0,
+  `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  `used_at` TIMESTAMP NULL DEFAULT NULL,
+  `expires_at_epoch` BIGINT DEFAULT NULL,
+  KEY `idx_attendance_delegation_scope` (`class_id`,`date`,`session`,`granted_to`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- notifications
@@ -273,18 +306,93 @@ CREATE TABLE IF NOT EXISTS `notifications` (
   `class_id` INT DEFAULT NULL,
   `title` VARCHAR(150) NOT NULL,
   `body` TEXT NOT NULL,
-  `type` ENUM('attendance','result','general','notice','class_test_result','homework','complaint','special','promotion') NOT NULL DEFAULT 'general',
+  `type` ENUM('attendance','result','general','notice','class_test_result','homework','complaint','special','promotion','daily_report') NOT NULL DEFAULT 'general',
   `target_type` ENUM('all','class','section','students','guardians','teacher') NOT NULL DEFAULT 'all',
+  `target_user_id` INT DEFAULT NULL,
   `related_id` INT DEFAULT NULL,
   `is_read` TINYINT(1) NOT NULL DEFAULT 0,
   `created_by` INT DEFAULT NULL,
   `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  `dedup_key` VARCHAR(255) DEFAULT NULL,
   KEY `idx_notif_student` (`student_id`),
   KEY `idx_notif_class` (`class_id`),
   KEY `idx_notif_type` (`type`),
   KEY `idx_notif_created_at` (`created_at`),
+  KEY `idx_notifications_target_user` (`target_user_id`),
+  UNIQUE KEY `uq_notifications_dedup` (`dedup_key`),
   CONSTRAINT `fk_notif_student` FOREIGN KEY (`student_id`) REFERENCES `students`(`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_notif_class` FOREIGN KEY (`class_id`) REFERENCES `classes`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `attendance_access_requests` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  `class_id` INT NOT NULL,
+  `class_teacher_id` INT NOT NULL,
+  `requested_by` INT NOT NULL,
+  `attendance_date` DATE NOT NULL,
+  `session` VARCHAR(20) NOT NULL,
+  `routine_slot_id` INT DEFAULT NULL,
+  `status` VARCHAR(20) NOT NULL DEFAULT 'pending',
+  `expires_at_epoch` BIGINT NOT NULL,
+  `decided_by` INT DEFAULT NULL,
+  `decided_at` TIMESTAMP NULL DEFAULT NULL,
+  `delegation_id` INT DEFAULT NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY `idx_att_access_inbox` (`class_teacher_id`,`status`,`expires_at_epoch`),
+  KEY `idx_att_access_requester` (`requested_by`,`created_at`),
+  CONSTRAINT `fk_att_access_class` FOREIGN KEY (`class_id`) REFERENCES `classes`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_att_access_class_teacher` FOREIGN KEY (`class_teacher_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_att_access_requester` FOREIGN KEY (`requested_by`) REFERENCES `users`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_att_access_decider` FOREIGN KEY (`decided_by`) REFERENCES `users`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `student_profile_edit_requests` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  `student_id` INT NOT NULL,
+  `guardian_id` INT NOT NULL,
+  `class_id` INT NOT NULL,
+  `class_teacher_id` INT DEFAULT NULL,
+  `reason` VARCHAR(1000) NOT NULL,
+  `proposed_changes` JSON DEFAULT NULL,
+  `status` VARCHAR(20) NOT NULL DEFAULT 'pending',
+  `reviewed_by` INT DEFAULT NULL,
+  `reviewer_role` VARCHAR(20) DEFAULT NULL,
+  `admin_note` VARCHAR(1000) DEFAULT NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `reviewed_at` TIMESTAMP NULL DEFAULT NULL,
+  KEY `idx_student_profile_request_student` (`student_id`,`status`,`created_at`),
+  KEY `idx_student_profile_request_teacher` (`class_teacher_id`,`status`,`created_at`),
+  CONSTRAINT `fk_profile_request_student` FOREIGN KEY (`student_id`) REFERENCES `students`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_profile_request_guardian` FOREIGN KEY (`guardian_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_profile_request_class` FOREIGN KEY (`class_id`) REFERENCES `classes`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_profile_request_class_teacher` FOREIGN KEY (`class_teacher_id`) REFERENCES `users`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_profile_request_reviewer` FOREIGN KEY (`reviewed_by`) REFERENCES `users`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `student_uniform_reports` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  `student_id` INT NOT NULL,
+  `class_id` INT NOT NULL,
+  `teacher_id` INT NOT NULL,
+  `report_date` DATE NOT NULL,
+  `uniform_brought` TINYINT(1) NOT NULL,
+  `note` VARCHAR(500) DEFAULT NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY `uq_student_uniform_report` (`student_id`,`report_date`),
+  KEY `idx_student_uniform_reports_class_date` (`class_id`,`report_date`),
+  CONSTRAINT `fk_uniform_student` FOREIGN KEY (`student_id`) REFERENCES `students`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_uniform_class` FOREIGN KEY (`class_id`) REFERENCES `classes`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_uniform_teacher` FOREIGN KEY (`teacher_id`) REFERENCES `users`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `teacher_notification_reads` (
+  `notification_id` INT NOT NULL,
+  `user_id` INT NOT NULL,
+  `read_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`notification_id`,`user_id`),
+  CONSTRAINT `fk_teacher_notification_read_notification` FOREIGN KEY (`notification_id`) REFERENCES `notifications`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_teacher_notification_read_user` FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- homework
@@ -422,6 +530,13 @@ CREATE TABLE IF NOT EXISTS `routines` (
   CONSTRAINT `fk_routine_class` FOREIGN KEY (`class_id`) REFERENCES `classes`(`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_routine_subject` FOREIGN KEY (`subject_id`) REFERENCES `subjects`(`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_routine_slot` FOREIGN KEY (`time_slot_id`) REFERENCES `time_slots`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `routine_religions` (
+  `routine_id` INT NOT NULL,
+  `religion` VARCHAR(20) NOT NULL,
+  PRIMARY KEY (`routine_id`, `religion`),
+  CONSTRAINT `fk_routine_religions_routine` FOREIGN KEY (`routine_id`) REFERENCES `routines`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `routine_entries` (

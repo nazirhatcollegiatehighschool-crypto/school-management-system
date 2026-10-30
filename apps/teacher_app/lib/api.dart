@@ -2,8 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+
 import 'config.dart';
 import 'sync_store.dart';
 
@@ -48,39 +50,54 @@ class Api {
 
   static bool isNetworkError(Object e) {
     final s = e.toString();
-    return e is SocketException || e is TimeoutException ||
-        s.contains('SocketException') || s.contains('TimeoutException') ||
-        s.contains('Connection refused') || s.contains('HandshakeException') ||
-        s.contains('ClientException') || s.contains('connect failed');
+    return e is SocketException ||
+        e is TimeoutException ||
+        s.contains('SocketException') ||
+        s.contains('TimeoutException') ||
+        s.contains('Connection refused') ||
+        s.contains('HandshakeException') ||
+        s.contains('ClientException') ||
+        s.contains('connect failed');
   }
 
   static Map<String, String> get _headers => {
-        'Content-Type': 'application/json',
-        if (token != null) 'Authorization': 'Bearer $token',
-      };
+    'Content-Type': 'application/json',
+    if (token != null) 'Authorization': 'Bearer $token',
+  };
 
   /// Connectivity probe for the Server-URL setting: raw GET, no auth/cache.
   static Map<String, String> get _probeHeaders => const {};
 
-  static Future<bool> testHealth(String base) async {
+  static Future<bool> testHealth(
+    String base, {
+    Duration timeout = const Duration(seconds: 20),
+  }) async {
     try {
       final res = await http
-          .get(Uri.parse('${base.replaceAll(RegExp(r'/+$'), '')}/api/health'),
-              headers: _probeHeaders)
-          .timeout(const Duration(seconds: 20));
+          .get(
+            Uri.parse('${base.replaceAll(RegExp(r'/+$'), '')}/api/health'),
+            headers: _probeHeaders,
+          )
+          .timeout(timeout);
       return res.statusCode == 200;
     } catch (_) {
       return false;
     }
   }
 
-  /// One bounded retry for safe (idempotent) reads when the first attempt hit
-  /// a transient network error. Never retries 4xx/5xx responses — only real
-  /// transport failures — so we can't duplicate work or hammer the server.
-  static Future<http.Response> _getOnce(String path) {
+  static Future<http.Response> _getOnce(
+    String path, {
+    bool conditional = true,
+  }) async {
     final etag = sync.etagFor(path);
-    final headers = etag == null ? _headers : {..._headers, 'If-None-Match': etag};
-    return http.get(Uri.parse(Config.api + path), headers: headers).timeout(_timeout);
+    final headers = !conditional || etag == null
+        ? _headers
+        : {..._headers, 'If-None-Match': etag};
+    final hadOverride = Config.hasOverride;
+    Future<http.Response> request(Duration timeout) => http
+        .get(Uri.parse(Config.api + path), headers: headers)
+        .timeout(timeout);
+    return request(hadOverride ? const Duration(seconds: 4) : _timeout);
   }
 
   static Future<dynamic> get(String path) async {
@@ -103,15 +120,16 @@ class Api {
       } catch (e) {
         if (!isNetworkError(e)) rethrow;
         // transient: wait ~1.2s (+jitter) then retry exactly once
-        await Future.delayed(Duration(
-            milliseconds: 1000 + (DateTime.now().microsecond % 400)));
+        await Future.delayed(
+          Duration(milliseconds: 1000 + (DateTime.now().microsecond % 400)),
+        );
         res = await _getOnce(path);
       }
       if (res.statusCode == 304) {
         sync.markRequestOk();
         final cached = sync.cacheGet(path);
         if (cached != null) return jsOne(cached);
-        res = await http.get(Uri.parse(Config.api + path), headers: _headers).timeout(_timeout);
+        res = await _getOnce(path, conditional: false);
       }
       final data = _handle(res);
       sync.markRequestOk();
@@ -158,23 +176,37 @@ class Api {
   /// an offline add/edit is visible in the UI immediately (tagged pending),
   /// then replaced by the real server row once it syncs. See SyncStore.enqueue.
   static Future<dynamic> postOptimistic(
-          String path, Map<String, dynamic>? body, Map<String, dynamic> optimistic) =>
-      _mutate('POST', path, body, optimistic: optimistic);
+    String path,
+    Map<String, dynamic>? body,
+    Map<String, dynamic> optimistic,
+  ) => _mutate('POST', path, body, optimistic: optimistic);
   static Future<dynamic> putOptimistic(
-          String path, Map<String, dynamic>? body, Map<String, dynamic> optimistic) =>
-      _mutate('PUT', path, body, optimistic: optimistic);
-  static Future<dynamic> deleteOptimistic(String path, Map<String, dynamic> optimistic) =>
-      _mutate('DELETE', path, null, optimistic: optimistic);
+    String path,
+    Map<String, dynamic>? body,
+    Map<String, dynamic> optimistic,
+  ) => _mutate('PUT', path, body, optimistic: optimistic);
+  static Future<dynamic> deleteOptimistic(
+    String path,
+    Map<String, dynamic> optimistic,
+  ) => _mutate('DELETE', path, null, optimistic: optimistic);
 
-  static Future<dynamic> _mutate(String method, String path, Map<String, dynamic>? body,
-      {Map<String, dynamic>? optimistic}) async {
+  static Future<dynamic> _mutate(
+    String method,
+    String path,
+    Map<String, dynamic>? body, {
+    Map<String, dynamic>? optimistic,
+  }) async {
     try {
       final uri = Uri.parse(Config.api + path);
       final http.Response res;
       if (method == 'POST') {
-        res = await http.post(uri, headers: _headers, body: jsonEncode(body ?? {})).timeout(_timeout);
+        res = await http
+            .post(uri, headers: _headers, body: jsonEncode(body ?? {}))
+            .timeout(_timeout);
       } else if (method == 'PUT') {
-        res = await http.put(uri, headers: _headers, body: jsonEncode(body ?? {})).timeout(_timeout);
+        res = await http
+            .put(uri, headers: _headers, body: jsonEncode(body ?? {}))
+            .timeout(_timeout);
       } else {
         res = await http.delete(uri, headers: _headers).timeout(_timeout);
       }
@@ -199,7 +231,9 @@ class Api {
   /// image bytes client-side. This keeps the deployed Google-Vision endpoint
   /// reachable without adding any backend upload dependency.
   static Future<dynamic> postMultipart(
-      String path, Map<String, dynamic> body) async {
+    String path,
+    Map<String, dynamic> body,
+  ) async {
     Map<String, dynamic> out = {};
     for (final e in body.entries) {
       if (e.key == 'image' && e.value != null) {
@@ -213,7 +247,11 @@ class Api {
   }
 
   /// Real multipart file upload (images, PDFs) with auth. Returns decoded JSON.
-  static Future<dynamic> uploadFile(String path, String filePath, {String field = 'file'}) async {
+  static Future<dynamic> uploadFile(
+    String path,
+    String filePath, {
+    String field = 'file',
+  }) async {
     try {
       final rq = http.MultipartRequest('POST', Uri.parse(Config.api + path));
       if (token != null) rq.headers['Authorization'] = 'Bearer $token';
@@ -222,7 +260,11 @@ class Api {
       final body = await streamed.stream.bytesToString();
       final data = body.isEmpty ? {} : jsonDecode(body);
       if (streamed.statusCode < 200 || streamed.statusCode >= 300) {
-        throw Exception((data is Map && data['error'] != null) ? data['error'] : 'Upload failed (${streamed.statusCode})');
+        throw Exception(
+          (data is Map && data['error'] != null)
+              ? data['error']
+              : 'Upload failed (${streamed.statusCode})',
+        );
       }
       sync.markRequestOk();
       return data;
@@ -278,7 +320,9 @@ class Api {
         get('/routine/slots').catchError((_) {}),
         get('/teacher/class-teacher-requests').catchError((_) {}),
         get('/teacher/directory').catchError((_) {}),
-        get('/teacher/attendance?date=${DateTime.now().toIso8601String().substring(0, 10)}').catchError((_) {}),
+        get(
+          '/teacher/attendance?date=${DateTime.now().toIso8601String().substring(0, 10)}',
+        ).catchError((_) {}),
       ]);
     } finally {
       _preloading = false;
@@ -316,9 +360,7 @@ class Api {
   /// Never throws — callers paint cache first, then call this to revalidate.
   static Future<dynamic> refreshCache(String path) async {
     try {
-      final res = await http
-          .get(Uri.parse(Config.api + path), headers: _headers)
-          .timeout(_timeout);
+      final res = await _getOnce(path, conditional: false);
       final data = _handle(res);
       sync.markRequestOk();
       await sync.cachePut(path, jsOne(data));
@@ -335,9 +377,7 @@ class Api {
   /// Unlike offline-first [get], this never falls back to an old cached value.
   static Future<dynamic> getFresh(String path) async {
     try {
-      final res = await http
-          .get(Uri.parse(Config.api + path), headers: _headers)
-          .timeout(_timeout);
+      final res = await _getOnce(path, conditional: false);
       final data = _handle(res);
       sync.markRequestOk();
       await sync.cachePut(path, jsOne(data));
@@ -352,17 +392,26 @@ class Api {
   /// then silently refreshes from network. Calls [onData] with cached data
   /// first (if any), then with fresh data. Throws only when there is neither
   /// cache nor network — so screens show error UI only when truly empty.
-  static Future<void> loadCachedFirst(String path, void Function(dynamic data) onData) async {
+  static Future<void> loadCachedFirst(
+    String path,
+    void Function(dynamic data) onData,
+  ) async {
     final c = peekCache(path);
     if (c != null) {
-      try { onData(c); } catch (_) {}
+      try {
+        onData(c);
+      } catch (_) {}
     }
     final fresh = await refreshCache(path);
     if (fresh != null) {
-      try { onData(fresh); } catch (_) {}
+      try {
+        onData(fresh);
+      } catch (_) {}
     } else if (c == null) {
       final data = await get(path); // throws the real error
-      try { onData(data); } catch (_) {}
+      try {
+        onData(data);
+      } catch (_) {}
     }
   }
 }
@@ -380,10 +429,15 @@ dynamic jsOne(dynamic v) {
 
 String friendlyError(Object e) {
   final s = e.toString();
-  if (e is SocketException || e is TimeoutException || s.contains('SocketException') || s.contains('TimeoutException')) {
+  if (e is SocketException ||
+      e is TimeoutException ||
+      s.contains('SocketException') ||
+      s.contains('TimeoutException')) {
     return 'কানেকশন পাওয়া যায়নি। ইন্টারনেট চেক করে আবার চেষ্টা করুন।';
   }
-  return s.replaceFirst('Exception: ', '').replaceFirst('HandshakeException', 'নিরাপদ কানেকশন ব্যর্থ');
+  return s
+      .replaceFirst('Exception: ', '')
+      .replaceFirst('HandshakeException', 'নিরাপদ কানেকশন ব্যর্থ');
 }
 
 /// Thrown when the server rejects the token (HTTP 401/403).

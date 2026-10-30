@@ -19,6 +19,7 @@ const { auth } = require('../middleware/auth');
 const { queuePush, getGuardianTokens } = require('../fcm');
 const { ymd } = require('../dates');
 const H = require('../attendance_v2');
+const AttendanceAccess = require('../lib/attendance_access');
 
 const STATUSES = ['present', 'absent', 'late', 'leave', 'early_departure_with_leave', 'early_departure_no_leave'];
 
@@ -42,7 +43,8 @@ async function delegationFor(classId, date, session, userId) {
   const [[d]] = await pool.query(
     `SELECT * FROM attendance_delegation
      WHERE class_id=? AND date=? AND session=? AND granted_to=? AND revoked=0 AND used=0
-     ORDER BY id DESC LIMIT 1`, [classId, date, session, userId]);
+       AND (expires_at_epoch IS NULL OR expires_at_epoch>?)
+     ORDER BY id DESC LIMIT 1`, [classId, date, session, userId, Date.now()]);
   return d || null;
 }
 async function fifthTeacherIds(classId, date) {
@@ -52,23 +54,24 @@ async function fifthTeacherIds(classId, date) {
 
 /** Effective open/closed state of a class+session at `now`. */
 async function openState(classId, date, session, now = new Date()) {
-  const [day, lock, windows] = await Promise.all([
-    getDay(classId, date), getLock(classId, date, session), H.sessionWindows(),
+  const [day, lock, windows, globalHoliday] = await Promise.all([
+    getDay(classId, date), getLock(classId, date, session), H.sessionWindows(), H.getGlobalHoliday(date),
   ]);
   const slot = session === 'p5' ? windows.afternoon : windows.morning;
   const reopened = !!(lock && lock.reopen_until && new Date(lock.reopen_until) > now);
   if (lock && lock.locked && !reopened) {
-    return { open: false, reason: 'locked', locked: true, slot, holiday: !!(day && day.is_holiday), occasion: day && day.occasion };
+    return { open: false, reason: 'locked', locked: true, slot, holiday: !!(day && day.is_holiday) || globalHoliday.holiday, occasion: day && day.occasion || globalHoliday.title };
   }
   if (!slot) {
     return { open: false, reason: session === 'p5' ? 'no_p5' : 'no_slot', slot };
   }
   const weekend = H.isWeekend(date);
-  const holiday = !!(day && day.is_holiday);
+  const holiday = !!(day && day.is_holiday) || globalHoliday.holiday;
+  const occasion = day && day.occasion || globalHoliday.title;
   const override = !!(day && day.open_override);
   if (reopened) return { open: true, reason: 'reopened', slot, reopen_until: lock.reopen_until };
   if (weekend && !override) return { open: false, reason: 'weekend', slot, weekend: true };
-  if (holiday && !override) return { open: false, reason: 'holiday', slot, holiday: true, occasion: day.occasion };
+  if (holiday && !override) return { open: false, reason: 'holiday', slot, holiday: true, occasion };
   if (override) return { open: true, reason: 'opened', slot };
   // No time limit before submission: on a valid school day the session stays
   // open from the start of the day until the teacher submits (which locks it).
@@ -104,12 +107,185 @@ async function canView(classId, date, user, session = 'morning') {
   const ids = await fifthTeacherIds(classId, date);
   const isP5 = ids.includes(user.id);
   if (session === 'p5') {
-    // afternoon roster is only for the 5th-period teacher (or admin)
-    return isP5;
+    // The 5th-period teacher records departures; the class teacher may review
+    // the completed same-day departure roster from their attendance screen.
+    return isP5 || Number(c.teacher_id) === Number(user.id);
   }
   // morning: class teacher or 5th-period teacher (to see their own class)
   return c.teacher_id === user.id || isP5;
 }
+
+function validAttendanceDate(date) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(date || '')) && String(date) === H.dhakaDate();
+}
+
+router.get('/access/options', auth(['teacher']), async (req, res) => {
+  try {
+    const [classes] = await pool.query(
+      `SELECT c.id, c.name, c.section, c.group_name, c.teacher_id, u.name AS class_teacher_name
+       FROM classes c LEFT JOIN users u ON u.id=c.teacher_id ORDER BY c.name,c.section`);
+    const [teachers] = await pool.query(
+      "SELECT id,name,phone FROM users WHERE role='teacher' AND active=1 AND id<>? ORDER BY name", [req.user.id]);
+    res.json({ classes, teachers, date: H.dhakaDate() });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+router.post('/access-requests', auth(['teacher']), async (req, res) => {
+  const classId = Number(req.body?.class_id);
+  const date = String(req.body?.date || '');
+  const session = req.body?.session === 'p5' ? 'p5' : req.body?.session === 'morning' ? 'morning' : null;
+  if (!classId || !validAttendanceDate(date) || !session) {
+    return res.status(400).json({ error: 'আজকের class এবং daily বা ৫ম পিরিয়ড বেছে নিন।' });
+  }
+  try {
+    const [[cls]] = await pool.query('SELECT id,name,section,teacher_id FROM classes WHERE id=?', [classId]);
+    if (!cls) return res.status(404).json({ error: 'Class not found' });
+    if (!cls.teacher_id || Number(cls.teacher_id) === Number(req.user.id)) {
+      return res.status(400).json({ error: 'এই class-এর আলাদা class teacher নেই বা আপনি নিজেই class teacher।' });
+    }
+    const [[assigned]] = await pool.query("SELECT id FROM users WHERE id=? AND role='teacher' AND active=1", [cls.teacher_id]);
+    if (!assigned) return res.status(409).json({ error: 'এই class-এর class teacher বর্তমানে সক্রিয় নন।' });
+    const expiresAt = await AttendanceAccess.requestExpiry(date, session);
+    if (!expiresAt || expiresAt <= Date.now()) return res.status(409).json({ error: 'এই হাজিরার সময়সীমা শেষ।' });
+    const [[open]] = await pool.query(
+      `SELECT id,expires_at_epoch FROM attendance_access_requests
+       WHERE class_id=? AND attendance_date=? AND session=? AND requested_by=? AND status='pending'
+       ORDER BY id DESC LIMIT 1`, [classId, date, session, req.user.id]);
+    if (open && Number(open.expires_at_epoch) > Date.now()) {
+      return res.status(409).json({ error: 'এই class ও period-এর একটি request এখনও pending আছে।', request_id: open.id });
+    }
+    if (open) await pool.query("UPDATE attendance_access_requests SET status='expired',decided_at=NOW() WHERE id=? AND status='pending'", [open.id]);
+    const [inserted] = await pool.query(
+      `INSERT INTO attendance_access_requests
+       (class_id,class_teacher_id,requested_by,attendance_date,session,status,expires_at_epoch)
+       VALUES (?,?,?,?,?,'pending',?)`,
+      [classId, cls.teacher_id, req.user.id, date, session, expiresAt]);
+    const id = inserted.insertId;
+    const title = 'হাজিরার access অনুরোধ';
+    const body = `${req.user.name} ${cls.name} ${cls.section || ''} — ${session === 'p5' ? '৫ম পিরিয়ড' : 'দৈনিক'} হাজিরা নেওয়ার অনুমতি চেয়েছেন।`;
+    await pool.query(
+      `INSERT INTO notifications (class_id,title,body,type,target_type,target_user_id,related_id,created_by)
+       VALUES (?,?,?,'attendance','teacher',?,?,?)`, [classId, title, body, cls.teacher_id, id, req.user.id]);
+    const tokens = await H.getTeacherTokens([cls.teacher_id]);
+    queuePush(tokens, title, body, { type: 'attendance', kind: 'attendance_access_request', request_id: id, class_id: classId });
+    await audit(classId, date, session, 'access_request', `request ${id} from teacher ${req.user.id}`, req.user.id);
+    res.status(201).json({ ok: true, id, status: 'pending', expires_at_epoch: expiresAt });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+router.get('/access-requests', auth(['teacher']), async (req, res) => {
+  const box = req.query.box === 'sent' ? 'sent' : 'inbox';
+  try {
+    await AttendanceAccess.expirePendingRequests();
+    const column = box === 'sent' ? 'r.requested_by' : 'r.class_teacher_id';
+    const [rows] = await pool.query(
+      `SELECT r.*, c.name AS class_name,c.section,
+              requester.name AS requester_name, ct.name AS class_teacher_name
+       FROM attendance_access_requests r JOIN classes c ON c.id=r.class_id
+       JOIN users requester ON requester.id=r.requested_by
+       JOIN users ct ON ct.id=r.class_teacher_id
+       WHERE ${column}=? ORDER BY r.id DESC LIMIT 100`, [req.user.id]);
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+router.post('/access-requests/:id/decision', auth(['teacher']), async (req, res) => {
+  const approve = req.body?.decision === 'accept';
+  if (!approve && req.body?.decision !== 'reject') return res.status(400).json({ error: 'decision must be accept or reject' });
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [[request]] = await conn.query('SELECT * FROM attendance_access_requests WHERE id=? FOR UPDATE', [req.params.id]);
+    if (!request || Number(request.class_teacher_id) !== Number(req.user.id)) {
+      await conn.rollback(); return res.status(404).json({ error: 'Pending request not found.' });
+    }
+    const [[cls]] = await conn.query('SELECT teacher_id FROM classes WHERE id=?', [request.class_id]);
+    if (!cls || Number(cls.teacher_id) !== Number(req.user.id)) {
+      await conn.rollback(); return res.status(403).json({ error: 'বর্তমান class teacher ছাড়া সিদ্ধান্ত নেওয়া যাবে না।' });
+    }
+    if (request.status !== 'pending') {
+      await conn.rollback(); return res.status(409).json({ error: `Request ${request.status}.` });
+    }
+    if (Number(request.expires_at_epoch) <= Date.now()) {
+      await conn.query("UPDATE attendance_access_requests SET status='expired',decided_at=NOW() WHERE id=?", [request.id]);
+      await conn.commit();
+      await AttendanceAccess.notifyTeacher(request.requested_by, 'হাজিরার অনুরোধের সময় শেষ', 'অনুরোধটি মেয়াদোত্তীর্ণ হয়েছে।', request.id, 'attendance_access_expired');
+      return res.status(409).json({ error: 'সময় শেষ—এই request আর অনুমোদন করা যাবে না।', status: 'expired' });
+    }
+    let delegationId = null;
+    if (approve) {
+      const [delegation] = await conn.query(
+        `INSERT INTO attendance_delegation (class_id,date,session,granted_by,granted_to,expires_at_epoch)
+         VALUES (?,?,?,?,?,?)`, [request.class_id, request.attendance_date, request.session, req.user.id, request.requested_by, request.expires_at_epoch]);
+      delegationId = delegation.insertId;
+    }
+    const status = approve ? 'accepted' : 'rejected';
+    await conn.query(
+      `UPDATE attendance_access_requests SET status=?,decided_by=?,decided_at=NOW(),delegation_id=?
+       WHERE id=? AND status='pending'`, [status, req.user.id, delegationId, request.id]);
+    await conn.commit();
+    const title = approve ? 'হাজিরার অনুরোধ অনুমোদিত' : 'হাজিরার অনুরোধ প্রত্যাখ্যাত';
+    const body = approve ? 'আপনি নির্বাচিত class ও period-এর হাজিরা নিতে পারবেন।' : 'Class teacher আপনার হাজিরার অনুরোধ গ্রহণ করেননি।';
+    await AttendanceAccess.notifyTeacher(request.requested_by, title, body, request.id, `attendance_access_${status}`);
+    await audit(request.class_id, request.attendance_date, request.session, `access_${status}`, `request ${request.id}`, req.user.id);
+    res.json({ ok: true, status, delegation_id: delegationId });
+  } catch (err) {
+    try { await conn.rollback(); } catch (_) {}
+    console.error(err); res.status(500).json({ error: 'Server error' });
+  } finally { conn.release(); }
+});
+
+router.post('/delegations', auth(['teacher']), async (req, res) => {
+  const classId = Number(req.body?.class_id), teacherId = Number(req.body?.teacher_id);
+  const date = String(req.body?.date || ''), session = req.body?.session === 'p5' ? 'p5' : req.body?.session === 'morning' ? 'morning' : null;
+  if (!classId || !teacherId || !validAttendanceDate(date) || !session) return res.status(400).json({ error: 'আজকের class, teacher এবং attendance period দিন।' });
+  try {
+    const [[cls]] = await pool.query('SELECT id,name,teacher_id FROM classes WHERE id=?', [classId]);
+    if (!cls) return res.status(404).json({ error: 'Class not found' });
+    if (Number(cls.teacher_id) !== Number(req.user.id)) return res.status(403).json({ error: 'শুধু class teacher delegation দিতে পারবেন।' });
+    if (teacherId === Number(req.user.id)) return res.status(400).json({ error: 'নিজেকে delegate করা যাবে না।' });
+    const [[teacher]] = await pool.query("SELECT id,name FROM users WHERE id=? AND role='teacher' AND active=1", [teacherId]);
+    if (!teacher) return res.status(404).json({ error: 'সক্রিয় teacher পাওয়া যায়নি।' });
+    const expiresAt = await AttendanceAccess.requestExpiry(date, session);
+    if (!expiresAt || expiresAt <= Date.now()) return res.status(409).json({ error: 'এই হাজিরার সময়সীমা শেষ।' });
+    const [created] = await pool.query(
+      `INSERT INTO attendance_delegation (class_id,date,session,granted_by,granted_to,expires_at_epoch) VALUES (?,?,?,?,?,?)`,
+      [classId, date, session, req.user.id, teacherId, expiresAt]);
+    const title = 'হাজিরার দায়িত্ব দেওয়া হয়েছে';
+    const body = `${cls.name} — ${session === 'p5' ? '৫ম পিরিয়ড' : 'দৈনিক'} হাজিরার জন্য আপনাকে delegate করা হয়েছে।`;
+    await pool.query(`INSERT INTO notifications (class_id,title,body,type,target_type,target_user_id,related_id,created_by)
+      VALUES (?,?,?,'attendance','teacher',?,?,?)`, [classId,title,body,teacherId,created.insertId,req.user.id]);
+    queuePush(await H.getTeacherTokens([teacherId]), title, body, { type: 'attendance', kind: 'delegate', class_id: classId });
+    await audit(classId,date,session,'delegate',`to user ${teacherId}`,req.user.id);
+    res.status(201).json({ ok: true, delegation_id: created.insertId, expires_at_epoch: expiresAt });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+router.get('/delegated-history', auth(['teacher']), async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT a.id,a.date,a.session,a.recorded_at,a.status,a.student_id,s.name AS student_name,s.roll,
+              c.id AS class_id,c.name AS class_name,c.section,u.name AS class_teacher_name
+       FROM attendance a JOIN students s ON s.id=a.student_id JOIN classes c ON c.id=s.class_id
+       LEFT JOIN users u ON u.id=c.teacher_id
+       WHERE a.recorded_by=? AND c.teacher_id<>? ORDER BY a.date DESC,a.session,a.id DESC LIMIT 300`,
+      [req.user.id,req.user.id]);
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+router.get('/delegated-history/:id', auth(['teacher']), async (req, res) => {
+  try {
+    const [[row]] = await pool.query(
+      `SELECT a.id,a.date,a.session,a.recorded_at,a.status,a.remark,s.id AS student_id,s.name AS student_name,s.roll,
+              c.id AS class_id,c.name AS class_name,c.section,u.name AS class_teacher_name
+       FROM attendance a JOIN students s ON s.id=a.student_id JOIN classes c ON c.id=s.class_id
+       LEFT JOIN users u ON u.id=c.teacher_id
+       WHERE a.id=? AND a.recorded_by=? AND c.teacher_id<>?`, [req.params.id,req.user.id,req.user.id]);
+    if (!row) return res.status(404).json({ error: 'এই attendance record আপনার history-তে নেই।' });
+    res.json(row);
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
 
 async function audit(classId, date, session, action, detail, actorId) {
   try {
@@ -136,6 +312,7 @@ router.get('/today', auth(['teacher']), async (req, res) => {
     const date = req.query.date || H.dhakaDate();
     const now = new Date();
     const d = H.dow(date);
+    const globalHoliday = await H.getGlobalHoliday(date);
 
     const rows = [];
     // class teacher classes
@@ -167,7 +344,8 @@ router.get('/today', auth(['teacher']), async (req, res) => {
     const [dels] = await pool.query(
       `SELECT d.*, c.name, c.section, c.group_name FROM attendance_delegation d
        JOIN classes c ON c.id=d.class_id
-       WHERE d.granted_to=? AND d.date=? AND d.revoked=0 AND d.used=0`, [req.user.id, date]);
+       WHERE d.granted_to=? AND d.date=? AND d.revoked=0 AND d.used=0
+         AND (d.expires_at_epoch IS NULL OR d.expires_at_epoch>?)`, [req.user.id, date, Date.now()]);
     for (const r of dels) {
       if (rows.some(x => x.id === r.class_id)) continue;
       rows.push({ id: r.class_id, name: r.name, section: r.section, group_name: r.group_name, role: 'delegate', delegation_session: r.session });
@@ -188,8 +366,9 @@ router.get('/today', auth(['teacher']), async (req, res) => {
         sessions = ['p5'];
       } else if (c.role === 'ct') {
         sessions = ['morning'];
-        // CT who also has P5 for same class gets both
-        if (isP5) sessions.push('p5');
+        // Show the P5 close-out to the class teacher so they can review both
+        // departure groups after the 5th-period teacher submits.
+        if (isP5 || await H.p5Applicable(c.id, date)) sessions.push('p5');
       }
       if (sessions.length === 0) continue;
 
@@ -197,7 +376,8 @@ router.get('/today', auth(['teacher']), async (req, res) => {
       const result = {
         class_id: c.id, class_name: c.name, section: c.section, group_name: c.group_name,
         role: c.role, delegation_session: c.delegation_session || null,
-        is_weekend: H.isWeekend(date), is_holiday: !!(day && day.is_holiday), occasion: day && day.occasion,
+        is_weekend: H.isWeekend(date), is_holiday: !!(day && day.is_holiday) || globalHoliday.holiday,
+        occasion: day && day.occasion || globalHoliday.title,
         open_override: !!(day && day.open_override),
         total_students: 0, present: 0, absent: 0,
         is_p5_teacher: isP5,
@@ -216,9 +396,27 @@ router.get('/today', auth(['teacher']), async (req, res) => {
            FROM attendance a JOIN students s ON s.id=a.student_id
            WHERE s.class_id=? AND a.date=? AND a.session=?`, [c.id, date, sess]);
         result[sess] = {
-          ...state, taken: !!meta.by_id, taken_at: meta.at,
+          ...state, taken: !!meta.by_id || !!state.locked, taken_at: meta.at,
           total: Number(cnt.total || 0), present: Number(cnt.present || 0), absent: Number(cnt.absent || 0),
         };
+        if (sess === 'p5') {
+          const [[p5Counts]] = await pool.query(
+            `SELECT SUM(CASE WHEN m.status='present' THEN 1 ELSE 0 END) AS eligible,
+                    SUM(CASE WHEN m.status='present' AND p.status='early_departure_with_leave' THEN 1 ELSE 0 END) AS with_leave,
+                    SUM(CASE WHEN m.status='present' AND p.status='early_departure_no_leave' THEN 1 ELSE 0 END) AS without_leave
+             FROM students s
+             LEFT JOIN attendance m ON m.student_id=s.id AND m.date=? AND m.session='morning'
+             LEFT JOIN attendance p ON p.student_id=s.id AND p.date=? AND p.session='p5'
+             WHERE s.class_id=? AND (s.status IS NULL OR s.status='active')`,
+            [date, date, c.id]);
+          const eligible = Number(p5Counts?.eligible || 0);
+          const withLeave = Number(p5Counts?.with_leave || 0);
+          const withoutLeave = Number(p5Counts?.without_leave || 0);
+          result[sess].eligible = eligible;
+          result[sess].with_leave = withLeave;
+          result[sess].without_leave = withoutLeave;
+          result[sess].stayed = state.locked ? Math.max(0, eligible - withLeave - withoutLeave) : 0;
+        }
         if (!result.total_students) result.total_students = Number(cnt.total || 0);
       }
       out.push(result);
@@ -252,6 +450,8 @@ router.get('/class/:id', auth(['teacher', 'admin']), async (req, res) => {
       [date, classId]);
     const attBy = new Map(att.map(a => [a.student_id, a]));
     const mBy = new Map(morning.map(a => [a.student_id, { status: a.status, remark: a.remark }]));
+    const state = await openState(classId, date, session);
+    const submitted = !!state.locked;
     const roster = students.map(s => {
       const a = attBy.get(s.student_id);
       const mData = mBy.get(s.student_id) || { status: null, remark: null };
@@ -265,10 +465,13 @@ router.get('/class/:id', auth(['teacher', 'admin']), async (req, res) => {
         recorded_by_name: a ? a.recorded_by_name : null, recorded_at: a ? a.recorded_at : null,
         morning_status: ms, morning_remark: mData.remark,
         p5_eligible: eligible,
+        p5_outcome: session === 'p5' && eligible
+          ? (a ? a.status : submitted ? 'p5_stayed' : null)
+          : null,
       };
     });
-    const state = await openState(classId, date, session);
     const day = await getDay(classId, date);
+    const globalHoliday = await H.getGlobalHoliday(date);
     const [[meta]] = await pool.query(
       `SELECT MAX(recorded_by) AS by_id, MAX(recorded_at) AS at FROM attendance
        WHERE date=? AND session=? AND student_id IN (SELECT id FROM students WHERE class_id=?)`,
@@ -277,8 +480,9 @@ router.get('/class/:id', auth(['teacher', 'admin']), async (req, res) => {
     res.json({
       class: c, date, session, students: roster,
       state, can_take: can.ok, can_take_how: can.how || null,
-      taken: roster.some(r => r.status != null), taken_at: meta.at,
-      holiday: !!(day && day.is_holiday), occasion: day && day.occasion,
+      taken: roster.some(r => r.status != null) || submitted, taken_at: meta.at,
+      holiday: !!(day && day.is_holiday) || globalHoliday.holiday,
+      occasion: day && day.occasion || globalHoliday.title,
       open_override: !!(day && day.open_override),
     });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
@@ -697,9 +901,11 @@ router.post('/admin/delegate', auth(['admin']), async (req, res) => {
   const sess = session === 'p5' ? 'p5' : 'morning';
   if (!cid || !date || !uid) return res.status(400).json({ error: 'class_id, date, to_user_id required' });
   try {
+    const expiresAt = await AttendanceAccess.requestExpiry(date, sess);
+    if (!validAttendanceDate(date) || !expiresAt || expiresAt <= Date.now()) return res.status(400).json({ error: 'আজকের কার্যকর হাজিরার সময় দিন।' });
     await pool.query(
-      `INSERT INTO attendance_delegation (class_id,date,session,granted_by,granted_to) VALUES (?,?,?,?,?)`,
-      [cid, date, sess, req.user.id, uid]);
+      `INSERT INTO attendance_delegation (class_id,date,session,granted_by,granted_to,expires_at_epoch) VALUES (?,?,?,?,?,?)`,
+      [cid, date, sess, req.user.id, uid, expiresAt]);
     await audit(cid, date, sess, 'delegate', `to user ${uid}`, req.user.id);
     const tokens = await H.getTeacherTokens([uid]);
     if (tokens.length) {

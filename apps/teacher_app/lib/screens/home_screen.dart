@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:share_plus/share_plus.dart';
+
 import '../api.dart';
 import '../class_alerts.dart';
 import '../config.dart';
@@ -14,8 +15,11 @@ import 'class_students_screen.dart';
 import 'profile_screen.dart';
 import 'promotion_screen.dart';
 import 'routine_screen.dart';
+import 'notifications_screen.dart';
+import 'student_profile_screen.dart';
 import '../widgets/offline_sync_banner.dart';
 import '../update_check.dart';
+import '../widgets/notification_settings_dialog.dart';
 
 class HomeScreen extends StatefulWidget {
   final dynamic teacher;
@@ -65,20 +69,109 @@ class _HomeScreenState extends State<HomeScreen> {
     // NOTE: onMessageOpenedApp is already registered inside handleForegroundMessages
     // (fcm_service.dart). Registering it again here would double-navigate on tap.
     handleForegroundMessages(context, _onNotificationTap);
-    FirebaseMessaging.instance.getInitialMessage().then((m) { if (m != null) _onNotificationTap(m.data); });
+    FirebaseMessaging.instance.getInitialMessage().then((m) {
+      if (m != null) {
+        _onNotificationTap({
+          ...m.data,
+          if (m.notification?.title != null) 'title': m.notification!.title!,
+          if (m.notification?.body != null) 'body': m.notification!.body!,
+        });
+      }
+    });
   }
 
   void _onNotificationTap(Map<String, dynamic> data) {
-    final examId = data['exam_id'];
-    if (examId != null && examId.toString().isNotEmpty) {
-      final examName = data['exam_name'] ?? 'Exam';
-      Navigator.push(context, MaterialPageRoute(
-        builder: (_) => ExamDetailScreen(examId: int.tryParse(examId.toString()) ?? 0, examName: examName.toString())));
+    final kind = '${data['kind'] ?? ''}'.toLowerCase();
+    if (kind == 'attendance_access_request') {
+      _openNotifications();
       return;
     }
-    setState(() => _tab = 1);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _examsKey.currentState?.reload());
+    final type = '${data['type'] ?? data['notification_type'] ?? ''}'
+        .toLowerCase();
+    final examId =
+        data['exam_id'] ??
+        (const {'result', 'class_test_result', 'exam'}.contains(type)
+            ? data['related_id']
+            : null);
+    final parsedExamId = int.tryParse('$examId');
+    if (parsedExamId != null && parsedExamId > 0) {
+      final examName = data['exam_name'] ?? 'Exam';
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ExamDetailScreen(
+            examId: parsedExamId,
+            examName: examName.toString(),
+          ),
+        ),
+      );
+      return;
+    }
+    final studentId = int.tryParse('${data['student_id'] ?? ''}');
+    if (studentId != null && kind == 'student_profile_edit_request') {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => StudentProfileScreen(
+            studentId: studentId,
+            studentName: '${data['student_name'] ?? 'শিক্ষার্থী'}',
+          ),
+        ),
+      );
+      return;
+    }
+    if (studentId != null && const {'complaint', 'special'}.contains(type)) {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => StudentProfileScreen(
+            studentId: studentId,
+            studentName: '${data['student_name'] ?? 'শিক্ষার্থী'}',
+          ),
+        ),
+      );
+      return;
+    }
+    if (const {'general', 'notice'}.contains(type) &&
+        data['class_id'] == null) {
+      showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text('${data['title'] ?? 'নোটিফিকেশন'}'),
+          content: Text('${data['body'] ?? ''}'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('বন্ধ করুন'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+    final tab = switch (type) {
+      'attendance' || 'leave' => 2,
+      'homework' => 3,
+      'routine' => 4,
+      'promotion' => 7,
+      'class_teacher_request' => 6,
+      _ => data['class_id'] != null ? 5 : 0,
+    };
+    setState(() => _tab = tab);
+    if (tab == 1)
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _examsKey.currentState?.reload(),
+      );
   }
+
+  void _openNotifications() => Navigator.push(
+    context,
+    MaterialPageRoute(
+      builder: (_) => TeacherNotificationsScreen(
+        onOpen: (data) async => _onNotificationTap(data),
+      ),
+    ),
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -104,6 +197,7 @@ class _HomeScreenState extends State<HomeScreen> {
           onBrandTap: () => setState(() => _tab = 0),
           onOpenExams: () => setState(() => _tab = 1),
           onOpenProfile: () => setState(() => _tab = 6),
+          onOpenNotifications: _openNotifications,
           onSelectTab: (i) => setState(() => _tab = i),
         ),
       ),
@@ -118,12 +212,29 @@ class _HomeScreenState extends State<HomeScreen> {
         backgroundColor: Colors.white,
         indicatorColor: const Color(0xFFE9E7FF),
         selectedIndex: const [0, 4, 2, 6].indexOf(_tab).clamp(0, 3).toInt(),
-        onDestinationSelected: (i) => setState(() => _tab = const [0, 4, 2, 6][i]),
+        onDestinationSelected: (i) =>
+            setState(() => _tab = const [0, 4, 2, 6][i]),
         destinations: const [
-          NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home_rounded), label: 'হোম'),
-          NavigationDestination(icon: Icon(Icons.calendar_month_outlined), selectedIcon: Icon(Icons.calendar_month_rounded), label: 'রুটিন'),
-          NavigationDestination(icon: Icon(Icons.fact_check_outlined), selectedIcon: Icon(Icons.fact_check_rounded), label: 'হাজিরা'),
-          NavigationDestination(icon: Icon(Icons.person_outline_rounded), selectedIcon: Icon(Icons.person_rounded), label: 'প্রোফাইল'),
+          NavigationDestination(
+            icon: Icon(Icons.home_outlined),
+            selectedIcon: Icon(Icons.home_rounded),
+            label: 'হোম',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.calendar_month_outlined),
+            selectedIcon: Icon(Icons.calendar_month_rounded),
+            label: 'রুটিন',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.fact_check_outlined),
+            selectedIcon: Icon(Icons.fact_check_rounded),
+            label: 'হাজিরা',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.person_outline_rounded),
+            selectedIcon: Icon(Icons.person_rounded),
+            label: 'প্রোফাইল',
+          ),
         ],
       ),
     );
@@ -139,10 +250,17 @@ class _TeacherTopBar extends StatelessWidget {
   final VoidCallback onBrandTap;
   final VoidCallback onOpenExams;
   final VoidCallback onOpenProfile;
+  final VoidCallback onOpenNotifications;
   final void Function(int) onSelectTab;
-  const _TeacherTopBar({required this.teacherName, required this.activeTab,
-      required this.onBrandTap, required this.onOpenExams, required this.onOpenProfile,
-      required this.onSelectTab});
+  const _TeacherTopBar({
+    required this.teacherName,
+    required this.activeTab,
+    required this.onBrandTap,
+    required this.onOpenExams,
+    required this.onOpenProfile,
+    required this.onOpenNotifications,
+    required this.onSelectTab,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -150,81 +268,137 @@ class _TeacherTopBar extends StatelessWidget {
       child: Container(
         height: 60,
         padding: const EdgeInsets.symmetric(horizontal: 12),
-        decoration: BoxDecoration(color: Colors.white,
-          boxShadow: [BoxShadow(color: const Color(0xFF202A49).withValues(alpha: 0.07), blurRadius: 10, offset: const Offset(0, 2))]),
-        child: Row(children: [
-          Builder(builder: (ctx) => IconButton(
-                icon: const Icon(Icons.grid_view_rounded, color: Color(0xFF353B56)),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFF202A49).withValues(alpha: 0.07),
+              blurRadius: 10,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            Builder(
+              builder: (ctx) => IconButton(
+                icon: const Icon(
+                  Icons.grid_view_rounded,
+                  color: Color(0xFF353B56),
+                ),
                 tooltip: 'Menu',
                 onPressed: () => _openNavMenu(ctx),
-              )),
-          GestureDetector(
-            onTap: onBrandTap,
-            child: Row(children: [
-              Container(
-                width: 34, height: 34,
+              ),
+            ),
+            GestureDetector(
+              onTap: onBrandTap,
+              child: Row(
+                children: [
+                  Container(
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE9E7FF),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: Padding(
+                        padding: const EdgeInsets.all(4),
+                        child: Image.asset(
+                          'assets/school_logo.png',
+                          fit: BoxFit.contain,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text(
+                        'Teacher Panel',
+                        style: TextStyle(
+                          color: Color(0xFF202A49),
+                          fontWeight: FontWeight.w800,
+                          fontSize: 14,
+                        ),
+                      ),
+                      Text(
+                        teacherName,
+                        style: TextStyle(
+                          color: Colors.blueGrey.shade500,
+                          fontSize: 11,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const Spacer(),
+            IconButton(
+              tooltip: 'নোটিফিকেশন',
+              onPressed: onOpenNotifications,
+              icon: const Icon(
+                Icons.notifications_none_rounded,
+                color: Color(0xFF353B56),
+              ),
+            ),
+            _TopAction(
+              icon: Icons.quiz_rounded,
+              label: 'Exams',
+              active: activeTab == 1,
+              onTap: onOpenExams,
+            ),
+            const SizedBox(width: 4),
+            _TopAction(
+              icon: Icons.share_rounded,
+              label: 'Share App',
+              active: false,
+              onTap: () async {
+                final base = Config.api.replaceAll(RegExp(r'/api/?$'), '');
+                await Share.share(
+                  'Teacher App — Nazirhat Collegiate High School\n\nডাউনলোড লিংক:\n$base/download\n\nv${await installedVersion()}',
+                  subject: 'School Teacher App',
+                );
+              },
+            ),
+            const SizedBox(width: 4),
+            GestureDetector(
+              onTap: onOpenProfile,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 250),
+                curve: Curves.easeOutBack,
+                padding: const EdgeInsets.all(2),
                 decoration: BoxDecoration(
-                    color: const Color(0xFFE9E7FF),
-                    borderRadius: BorderRadius.circular(10)),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: Padding(
-                    padding: const EdgeInsets.all(4),
-                    child: Image.asset('assets/school_logo.png', fit: BoxFit.contain),
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: activeTab == 6
+                        ? const Color(0xFF5C50E8)
+                        : Colors.grey.shade300,
+                    width: activeTab == 6 ? 2.5 : 1.2,
+                  ),
+                ),
+                child: CircleAvatar(
+                  radius: 15,
+                  backgroundColor: const Color(0xFFE9E7FF),
+                  child: Text(
+                    teacherName.isNotEmpty ? teacherName[0].toUpperCase() : 'T',
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF5C50E8),
+                    ),
                   ),
                 ),
               ),
-              const SizedBox(width: 8),
-              Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-                const Text('Teacher Panel', style: TextStyle(color: Color(0xFF202A49), fontWeight: FontWeight.w800, fontSize: 14)),
-                Text(teacherName, style: TextStyle(color: Colors.blueGrey.shade500, fontSize: 11),
-                    overflow: TextOverflow.ellipsis),
-              ]),
-            ]),
-          ),
-          const Spacer(),
-          _TopAction(
-            icon: Icons.quiz_rounded,
-            label: 'Exams',
-            active: activeTab == 1,
-            onTap: onOpenExams,
-          ),
-          const SizedBox(width: 4),
-          _TopAction(
-            icon: Icons.share_rounded,
-            label: 'Share App',
-            active: false,
-            onTap: () async {
-              final base = Config.api.replaceAll(RegExp(r'/api/?$'), '');
-              await Share.share(
-                'Teacher App — Nazirhat Collegiate High School\n\nডাউনলোড লিংক:\n$base/download\n\nv${await installedVersion()}',
-                subject: 'School Teacher App',
-              );
-            },
-          ),
-          const SizedBox(width: 4),
-          GestureDetector(
-            onTap: onOpenProfile,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 250),
-              curve: Curves.easeOutBack,
-              padding: const EdgeInsets.all(2),
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                border: Border.all(
-                    color: activeTab == 6 ? const Color(0xFF5C50E8) : Colors.grey.shade300,
-                    width: activeTab == 6 ? 2.5 : 1.2),
-              ),
-              child: CircleAvatar(
-                radius: 15,
-                backgroundColor: const Color(0xFFE9E7FF),
-                child: Text(teacherName.isNotEmpty ? teacherName[0].toUpperCase() : 'T',
-                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Color(0xFF5C50E8))),
-              ),
             ),
-          ),
-          const SizedBox(width: 4),
-        ]),
+            const SizedBox(width: 4),
+          ],
+        ),
       ),
     );
   }
@@ -248,56 +422,110 @@ class _TeacherTopBar extends StatelessWidget {
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
       builder: (c) => SafeArea(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          const SizedBox(height: 10),
-          Container(width: 44, height: 4,
-              decoration: BoxDecoration(color: Colors.grey.shade300,
-                  borderRadius: BorderRadius.circular(99))),
-          const SizedBox(height: 6),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
-            child: Row(children: [
-              CircleAvatar(
-                backgroundColor: Theme.of(c).colorScheme.primary,
-                child: Text(teacherName.isNotEmpty ? teacherName[0].toUpperCase() : 'T',
-                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 10),
+            Container(
+              width: 44,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.grey.shade300,
+                borderRadius: BorderRadius.circular(99),
               ),
-              const SizedBox(width: 10),
-              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(teacherName, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15)),
-                const Text('Teacher Panel', style: TextStyle(fontSize: 11, color: Colors.grey)),
-              ])),
-            ]),
-          ),
-          const Divider(height: 1),
-          Flexible(
-            child: ListView(
-              shrinkWrap: true,
-              children: [
-                for (final it in items)
-                  ListTile(
-                    leading: Icon(it.$2,
+            ),
+            const SizedBox(height: 6),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+              child: Row(
+                children: [
+                  CircleAvatar(
+                    backgroundColor: Theme.of(c).colorScheme.primary,
+                    child: Text(
+                      teacherName.isNotEmpty
+                          ? teacherName[0].toUpperCase()
+                          : 'T',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          teacherName,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 15,
+                          ),
+                        ),
+                        const Text(
+                          'Teacher Panel',
+                          style: TextStyle(fontSize: 11, color: Colors.grey),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final it in items)
+                    ListTile(
+                      leading: Icon(
+                        it.$2,
                         color: activeTab == it.$1
                             ? Theme.of(c).colorScheme.primary
-                            : Colors.grey.shade600),
-                    title: Text(it.$3,
-                        style: TextStyle(fontWeight: activeTab == it.$1
-                            ? FontWeight.w800 : FontWeight.w500)),
-                    subtitle: Text(it.$4, style: const TextStyle(fontSize: 11)),
-                    selected: activeTab == it.$1,
-                    selectedTileColor: Theme.of(c).colorScheme.primaryContainer
-                        .withValues(alpha: 0.35),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    onTap: () {
-                      Navigator.pop(c);
-                      onSelectTab(it.$1);
-                    },
-                  ),
-              ],
+                            : Colors.grey.shade600,
+                      ),
+                      title: Text(
+                        it.$3,
+                        style: TextStyle(
+                          fontWeight: activeTab == it.$1
+                              ? FontWeight.w800
+                              : FontWeight.w500,
+                        ),
+                      ),
+                      subtitle: Text(
+                        it.$4,
+                        style: const TextStyle(fontSize: 11),
+                      ),
+                      selected: activeTab == it.$1,
+                      selectedTileColor: Theme.of(c)
+                          .colorScheme
+                          .primaryContainer
+                          .withValues(alpha: 0.35),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      onTap: () {
+                        Navigator.pop(c);
+                        onSelectTab(it.$1);
+                      },
+                    ),
+                ],
+              ),
             ),
-          ),
-          const SizedBox(height: 8),
-        ]),
+            ListTile(
+              leading: const Icon(Icons.notifications_active_outlined),
+              title: const Text('Notification সেটিংস'),
+              subtitle: const Text('Push notification চালু বা বন্ধ করুন'),
+              onTap: () {
+                Navigator.pop(c);
+                showNotificationSettings(ctx);
+              },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
       ),
     );
   }
@@ -308,7 +536,12 @@ class _TopAction extends StatelessWidget {
   final String label;
   final bool active;
   final VoidCallback onTap;
-  const _TopAction({required this.icon, required this.label, required this.active, required this.onTap});
+  const _TopAction({
+    required this.icon,
+    required this.label,
+    required this.active,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -322,20 +555,30 @@ class _TopAction extends StatelessWidget {
           color: active ? const Color(0xFFE9E7FF) : const Color(0xFFF2F3F8),
           borderRadius: BorderRadius.circular(999),
         ),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(icon, size: 17, color: const Color(0xFF5C50E8)),
-          AnimatedSize(
-            duration: const Duration(milliseconds: 250),
-            curve: Curves.easeInOut,
-            child: active
-                ? Padding(padding: const EdgeInsets.only(left: 5),
-                    child: Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800,
-                        color: const Color(0xFF5C50E8))))
-                : const SizedBox.shrink(),
-          ),
-        ]),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 17, color: const Color(0xFF5C50E8)),
+            AnimatedSize(
+              duration: const Duration(milliseconds: 250),
+              curve: Curves.easeInOut,
+              child: active
+                  ? Padding(
+                      padding: const EdgeInsets.only(left: 5),
+                      child: Text(
+                        label,
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w800,
+                          color: const Color(0xFF5C50E8),
+                        ),
+                      ),
+                    )
+                  : const SizedBox.shrink(),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
-

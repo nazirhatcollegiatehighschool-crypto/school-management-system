@@ -28,3 +28,199 @@ model users {
   signature_name   String?   @db.VarChar(100)
 }
 
+// Keep these models aligned with the PostgreSQL/Supabase tables used by the
+// raw-query API layer. The application currently uses `db.js` for CRUD, while
+// Prisma generates the client and owns migration metadata.
+model sessions {
+  id        Int @id @default(autoincrement())
+  name      String @unique @db.VarChar(20)
+  is_active Int @default(0)
+}
+
+model classes {
+  id         Int @id @default(autoincrement())
+  name       String @db.VarChar(50)
+  section    String @db.VarChar(20)
+  group_name String? @db.VarChar(20)
+  session_id Int?
+  teacher_id Int?
+
+  @@unique([name, section])
+  @@index([session_id])
+  @@index([teacher_id])
+}
+
+model students {
+  id                      Int       @id @default(autoincrement())
+  student_code            String    @unique @db.VarChar(20)
+  name                    String    @db.VarChar(100)
+  dob                     DateTime? @db.Date
+  roll                    Int
+  class_id                Int
+  guardian_id             Int?
+  guardian_name           String?   @db.VarChar(100)
+  guardian_phone          String?   @db.VarChar(20)
+  guardian_email          String?   @db.VarChar(100)
+  address                 String?   @db.VarChar(255)
+  photo                   String?   @db.VarChar(255)
+  father_name             String?   @db.VarChar(100)
+  mother_name             String?   @db.VarChar(100)
+  birth_cert_no           String?   @db.VarChar(50)
+  birth_cert_placeholder  Boolean   @default(false)
+  session_id              Int?
+  created_at              DateTime  @default(now()) @db.Timestamp()
+  religion                String?   @db.VarChar(30)
+  section                 String?   @db.VarChar(20)
+  status                  String?   @default("active") @db.VarChar(50)
+  gender                  String?   @db.VarChar(10)
+  blood_group             String?   @db.VarChar(10)
+  optional_subject        String?   @db.VarChar(80)
+  compulsory_subject      String?   @db.VarChar(120)
+  phone                   String?   @db.VarChar(20)
+  email                   String?   @db.VarChar(100)
+  receives_scholarship    Boolean   @default(false)
+
+  @@unique([class_id, roll])
+  @@index([guardian_id])
+}
+
+model student_subjects {
+  id               Int      @id @default(autoincrement())
+  student_id       Int
+  subject_id       Int
+  is_mandatory     Int      @default(1)
+  is_fourth_subject Int     @default(0)
+  is_elective      Int      @default(0)
+  assigned_by      Int?
+  created_at       DateTime @default(now()) @db.Timestamp()
+
+  @@unique([subject_id, student_id])
+  @@index([student_id])
+}
+
+model group_selections {
+  id             Int      @id @default(autoincrement())
+  run_id         Int?
+  student_id     Int
+  from_class_id  Int
+  to_group       String   @db.VarChar(30)
+  to_class_id    Int?
+  eligible_groups String[] @default([])
+  base_score     Decimal? @default(0) @db.Decimal(8, 2)
+  selected_by    Int?
+  selected_at    DateTime @default(now()) @db.Timestamptz(6)
+  status         String   @default("confirmed") @db.VarChar(20)
+
+  @@unique([student_id, from_class_id])
+  @@index([to_class_id])
+}
+
+model student_promotion_status {
+  id                         Int       @id @default(autoincrement())
+  student_id                 Int
+  from_class_id              Int
+  target_class_id            Int?
+  target_session_id          Int?
+  source_event_id            Int?
+  status                     String?   @default("pending_results") @db.VarChar(30)
+  decision                   String?   @db.VarChar(30)
+  final_gpa                  Decimal?  @db.Decimal(4, 2)
+  failed_subjects            String[]  @default([])
+  mandatory_failed_subjects  String[]  @default([])
+  grace_used                 Int       @default(0)
+  admin_note                 String?   @db.Text
+  reviewed_by                Int?
+  reviewed_at                DateTime? @db.Timestamptz(6)
+  approved_by                Int?
+  approved_at                DateTime? @db.Timestamptz(6)
+  created_at                 DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at                 DateTime? @default(now()) @db.Timestamptz(6)
+
+  @@unique([student_id, target_session_id])
+  @@index([from_class_id])
+  @@index([target_class_id])
+}
+
+model promotions {
+  id                     Int       @id @default(autoincrement())
+  student_id             Int
+  event_id               Int
+  class_id               Int
+  group_name             String?   @db.VarChar(20)
+  from_class             String    @db.VarChar(50)
+  to_class               String    @db.VarChar(50)
+  promoted_roll          Int?
+  decision               String    @default("promoted") @db.VarChar(20)
+  final_gpa              Decimal   @default(0) @db.Decimal(4, 2)
+  recorded_by            Int?
+  created_at             DateTime  @default(now()) @db.Timestamp()
+  passing_year           Int?
+  destination_session_id Int?
+  run_id                 Int?
+  from_section           String?   @db.VarChar(30)
+  to_section             String?   @db.VarChar(30)
+  combined_rank          Int?
+  section_position       Int?
+
+  @@unique([event_id, student_id])
+  @@index([student_id])
+}
+
+model routine_religions {
+  routine_id Int
+  religion   String @db.VarChar(20)
+
+  @@id([routine_id, religion])
+}
+
+model results {
+  id                       Int       @id @default(autoincrement())
+  student_id               Int
+  exam_id                  Int
+  total_gpa_without_4th    Decimal   @default(0) @db.Decimal(4, 2)
+  gpa_4th_bonus            Decimal   @default(0) @db.Decimal(4, 2)
+  final_gpa                Decimal   @default(0) @db.Decimal(4, 2)
+  result_status            String    @default("ABSENT") @db.VarChar(10)
+  teacher_remarks          String?   @db.Text
+  computed_at              DateTime  @default(now()) @db.Timestamp()
+  total_marks_obtained     Decimal?  @db.Decimal(8, 2)
+  total_marks_full         Decimal?  @db.Decimal(8, 2)
+  pass_all                 Int?      @default(0)
+  section_position         Int?
+  combined_position       Int?
+  section_size             Int?
+  combined_size            Int?
+
+  @@unique([student_id, exam_id])
+  @@index([exam_id])
+  @@map("results")
+}
+
+model event_promotion_grace {
+  event_id   Int
+  class_id   Int
+  subject_id Int
+  granted_by Int?
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+
+  @@id([event_id, class_id, subject_id])
+  @@index([class_id, event_id])
+}
+
+model guardian_links {
+  id                  Int       @id @default(autoincrement())
+  guardian_id         Int
+  student_id          Int
+  role                String    @default("sibling") @db.VarChar(20)
+  status              String    @default("pending") @db.VarChar(20)
+  requester_student_id Int?
+  decided_by          Int?
+  remark              String?   @db.VarChar(255)
+  requested_at        DateTime  @default(now()) @db.Timestamptz(6)
+  decided_at          DateTime? @db.Timestamptz(6)
+
+  @@unique([guardian_id, student_id])
+  @@index([student_id])
+  @@index([status])
+}
+

@@ -11,10 +11,21 @@ require('dotenv').config();
 // ------------------------------------------------------------------
 
 const isMysql = /^mysql:\/\//i.test(process.env.DATABASE_URL || '');
+// Serverless instances share Supabase's connection budget across many cold
+// starts. Keep each Vercel instance deliberately small; local/VM deployments
+// retain the previous pool size unless an operator sets DB_POOL_MAX.
+const poolMax = Number.parseInt(process.env.DB_POOL_MAX || '', 10) || (process.env.VERCEL ? 2 : 10);
 
 function pgToMysql(sql) {
   // $n placeholders (routine_alerts) -> ? in numeric order
   sql = sql.replace(/\$(\d+)/g, '?');
+  // PostgreSQL month-window expressions used by attendance summaries.
+  // MySQL accepts CAST(? AS DATE) and DATE_ADD(date, INTERVAL n UNIT).
+  sql = sql.replace(
+    /\(\s*\?\s*::\s*date\s*\+\s*INTERVAL\s*'(\d+)\s+(MONTH|DAY|YEAR|HOUR|MINUTE|SECOND)'\s*\)/gi,
+    (_, amount, unit) => `DATE_ADD(CAST(? AS DATE), INTERVAL ${amount} ${unit.toUpperCase()})`,
+  );
+  sql = sql.replace(/\?\s*::\s*date/gi, 'CAST(? AS DATE)');
   // ILIKE -> LIKE (utf8mb4_unicode_ci comparisons are case-insensitive)
   sql = sql.replace(/\bILIKE\b/gi, 'LIKE');
   // IS [NOT] DISTINCT FROM -> <=> / NOT <=>
@@ -28,6 +39,7 @@ function pgToMysql(sql) {
   // ON CONFLICT (..) DO UPDATE SET a=EXCLUDED.a -> ON DUPLICATE KEY UPDATE a=VALUES(a)
   sql = sql.replace(/\bON\s+CONFLICT\s*\([^)]*\)\s*DO\s+UPDATE\s+SET\b/gi, 'ON DUPLICATE KEY UPDATE');
   sql = sql.replace(/(\w+)\s*=\s*EXCLUDED\.(\w+)/g, '$1=VALUES($2)');
+  sql = sql.replace(/\bEXCLUDED\.(\w+)\b/g, 'VALUES($1)');
   return sql;
 }
 
@@ -42,7 +54,7 @@ if (isMysql) {
     password: decodeURIComponent(u.password || ''),
     database: decodeURIComponent(u.pathname || '').replace(/^\//, '') || undefined,
     waitForConnections: true,
-    connectionLimit: (process.env.DB_POOL_MAX && parseInt(process.env.DB_POOL_MAX)) || 10,
+    connectionLimit: poolMax,
     charset: 'utf8mb4',
     timezone: 'Z',
     dateStrings: false,
@@ -102,6 +114,7 @@ if (isMysql) {
   };
   pool._mysql = myPool;
   pool._transform = pgToMysql;
+  pool._transformMysql = pgToMysql;
   pool._mode = 'mysql';
   module.exports = pool;
   return;
@@ -133,7 +146,7 @@ types.setTypeParser(20, val => (val === null ? null : parseInt(val, 10))); // in
 const pgPool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DB_SSL === 'false' ? false : { rejectUnauthorized: false },
-  max: (process.env.DB_POOL_MAX && parseInt(process.env.DB_POOL_MAX)) || 10,
+  max: poolMax,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 15000,
   application_name: 'school-backend'
@@ -141,11 +154,18 @@ const pgPool = new Pool({
 
 // MySQL `?` placeholders -> PostgreSQL `$n`
 function transformSql(sql) {
+  // A number of legacy routes use MySQL's INSERT IGNORE. PostgreSQL must use
+  // ON CONFLICT DO NOTHING; leaving the original token makes those writes
+  // fail on Supabase (including event/class links and teacher-created exams).
+  const ignoreDuplicates = /^\s*insert\s+ignore\s+into\b/i.test(sql);
+  if (ignoreDuplicates) sql = sql.replace(/^\s*insert\s+ignore\s+into\b/i, 'INSERT INTO');
   // 1. strip MySQL backticks (identifiers are all lowercase, safe unquoted)
   sql = sql.replace(/`/g, '');
   // 2. rewrite MySQL date/time SQL functions to PG
   sql = sql.replace(/DATE_ADD\(NOW\(\),\s*INTERVAL\s+(\d+)\s+(MINUTE|HOUR|DAY|SECOND)\)/gi,
     (m, num, unit) => `(NOW() + make_interval(secs => ${num} * CASE '${unit}' WHEN 'SECOND' THEN 1 WHEN 'MINUTE' THEN 60 WHEN 'HOUR' THEN 3600 WHEN 'DAY' THEN 86400 ELSE 0 END))`);
+  sql = sql.replace(/DATE_SUB\(NOW\(\),\s*INTERVAL\s+(\d+)\s+(MINUTE|HOUR|DAY|SECOND)\)/gi,
+    (m, num, unit) => `(NOW() - make_interval(secs => ${num} * CASE '${unit}' WHEN 'SECOND' THEN 1 WHEN 'MINUTE' THEN 60 WHEN 'HOUR' THEN 3600 WHEN 'DAY' THEN 86400 ELSE 0 END))`);
   sql = sql.replace(/CURDATE\(\)/gi, 'CURRENT_DATE');
   // 2b. mysql2 array-expansion: `IN (?)` / `NOT IN (?)` become ANY/ALL-predicates.
   //     `\u0007` acts as a numbered placeholder in the pass below.
@@ -177,6 +197,9 @@ function transformSql(sql) {
     } else {
       out += ch;
     }
+  }
+  if (ignoreDuplicates && !/\bON\s+CONFLICT\b/i.test(out)) {
+    out = out.replace(/;\s*$/, '') + ' ON CONFLICT DO NOTHING';
   }
   return out;
 }
@@ -222,5 +245,6 @@ pool = {
 };
 pool._pg = pgPool;
 pool._transform = transformSql;
+pool._transformMysql = pgToMysql;
 
 module.exports = pool;

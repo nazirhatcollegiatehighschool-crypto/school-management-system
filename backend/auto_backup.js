@@ -7,7 +7,8 @@ const cron = require('node-cron');
 
 class AutoBackup {
   constructor() {
-    this.supabaseUrl = 'postgresql://postgres:Jewel@114070Jewel@114070@db.gqonldfvammlizljmtdk.supabase.co:5432/postgres';
+    this.supabaseUrl = process.env.BACKUP_DATABASE_URL || process.env.DIRECT_URL || process.env.DATABASE_URL;
+    if (!this.supabaseUrl) throw new Error('Set BACKUP_DATABASE_URL in the secure process environment.');
     this.backupBase = path.join(__dirname, 'database', 'backups');
     this.schemaBase = path.join(__dirname, 'database', 'schemas');
     this.changesLog = path.join(__dirname, 'database', 'changes.log');

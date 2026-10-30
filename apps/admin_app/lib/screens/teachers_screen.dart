@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
 import '../api.dart';
+import '../pdf/admin_pdfs.dart';
+import '../pdf/app_pdf.dart';
 
 class TeachersScreen extends StatefulWidget {
   const TeachersScreen({super.key});
@@ -69,20 +71,29 @@ class _TeachersScreenState extends State<TeachersScreen> {
     }
   }
 
+  Future<void> _printTeacherRoster() async {
+    try {
+      final settings = await Api.get('/admin/settings');
+      final rows = _rows.whereType<Map>().map((row) => Map.from(row)).toList();
+      final bytes = await AdminPdfs.teacherRoster(
+        rows,
+        settings: settings is Map ? settings : const {},
+      );
+      await AppPdf.preview(bytes);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error.toString().replaceFirst('Exception: ', '')),
+        ),
+      );
+    }
+  }
+
   Future<void> _manageDesignations() async {
     final teachers = _rows
         .where((t) => t['active'] == 1 || t['active'] == true)
         .toList();
-    int? chosen(String role) {
-      for (final t in teachers) {
-        if ('${t['designation']}'.trim().toLowerCase() == role.toLowerCase())
-          return int.tryParse('${t['id']}');
-      }
-      return null;
-    }
-
-    int? head = chosen('Headmaster'),
-        assistantHead = chosen('Assistant Headmaster');
     final senior = <int>{
       for (final t in teachers.where(
         (t) => '${t['designation']}'.trim().toLowerCase() == 'senior teacher',
@@ -101,44 +112,14 @@ class _TeachersScreenState extends State<TeachersScreen> {
       builder: (dialogCtx) => StatefulBuilder(
         builder: (ctx, setDialog) {
           final usedIds = <int>{
-            if (head != null) head!,
-            if (assistantHead != null) assistantHead!,
+            for (final t in teachers.where((t) {
+              final role = '${t['designation']}'.trim().toLowerCase();
+              return ['head teacher', 'headmaster', 'principal', 'assistant head teacher', 'assistant headmaster', 'vice principal'].contains(role);
+            }))
+              int.parse('${t['id']}'),
             ...senior,
             ...assistants,
           };
-          Widget singleRole(
-            String label,
-            int? current,
-            ValueChanged<int?> change,
-          ) => Padding(
-            padding: const EdgeInsets.only(bottom: 12),
-            child: DropdownButtonFormField<int>(
-              value: current ?? 0,
-              decoration: InputDecoration(
-                labelText: label,
-                border: const OutlineInputBorder(),
-              ),
-              items: [
-                const DropdownMenuItem<int>(
-                  value: 0,
-                  child: Text('— নির্বাচন নেই —'),
-                ),
-                ...teachers
-                    .where(
-                      (t) =>
-                          int.tryParse('${t['id']}') == current ||
-                          !usedIds.contains(int.tryParse('${t['id']}')),
-                    )
-                    .map(
-                      (t) => DropdownMenuItem<int>(
-                        value: int.parse('${t['id']}'),
-                        child: Text('${t['name']}'),
-                      ),
-                    ),
-              ],
-              onChanged: (v) => change(v == null || v == 0 ? null : v),
-            ),
-          );
           Widget multiRole(String label, Set<int> selected, String key) =>
               ExpansionTile(
                 title: Text('$label (${selected.length})'),
@@ -173,16 +154,6 @@ class _TeachersScreenState extends State<TeachersScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    singleRole(
-                      'Headmaster — একজন',
-                      head,
-                      (v) => setDialog(() => head = v),
-                    ),
-                    singleRole(
-                      'Assistant Headmaster — একজন',
-                      assistantHead,
-                      (v) => setDialog(() => assistantHead = v),
-                    ),
                     multiRole('Senior Teacher — একাধিক', senior, 'senior'),
                     multiRole(
                       'Assistant Teacher — একাধিক',
@@ -202,8 +173,6 @@ class _TeachersScreenState extends State<TeachersScreen> {
                 onPressed: () async {
                   try {
                     await Api.put('/admin/leadership-assignments', {
-                      'headmaster_id': head,
-                      'assistant_headmaster_id': assistantHead,
                       'senior_teacher_ids': senior.toList(),
                       'assistant_teacher_ids': assistants.toList(),
                     });
@@ -710,6 +679,11 @@ class _TeachersScreenState extends State<TeachersScreen> {
       appBar: AppBar(
         title: const Text('Teachers'),
         actions: [
+          IconButton(
+            onPressed: _rows.isEmpty ? null : _printTeacherRoster,
+            tooltip: 'শিক্ষক স্বাক্ষর তালিকা PDF',
+            icon: const Icon(Icons.picture_as_pdf_outlined),
+          ),
           IconButton(
             onPressed: _manageDesignations,
             tooltip: 'পদবি নির্ধারণ',

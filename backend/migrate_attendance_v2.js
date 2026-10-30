@@ -20,8 +20,8 @@ const stmts = [
   `ALTER TABLE attendance ADD COLUMN IF NOT EXISTS override_reason varchar(255)`,
   `ALTER TABLE attendance ADD COLUMN IF NOT EXISTS idem_key varchar(80)`,
   `ALTER TABLE attendance ADD COLUMN IF NOT EXISTS recorded_at timestamptz DEFAULT now()`,
-  // status must accept 'leave' too — widen enum->varchar if needed
-  `ALTER TABLE attendance ALTER COLUMN status TYPE varchar(20) USING status::text`,
+  // Includes the full early-departure outcome values written by the P5 register.
+  `ALTER TABLE attendance ALTER COLUMN status TYPE varchar(40) USING status::text`,
   `CREATE UNIQUE INDEX IF NOT EXISTS uq_att_sds ON attendance(student_id, date, session)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS uq_att_idem ON attendance(idem_key) WHERE idem_key IS NOT NULL`,
 

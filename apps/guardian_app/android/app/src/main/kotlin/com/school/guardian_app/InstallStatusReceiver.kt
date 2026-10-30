@@ -24,16 +24,18 @@ class InstallStatusReceiver : BroadcastReceiver() {
     companion object {
         const val TAG = "SchoolInstallStatus"
         const val CHANNEL_ID = "school_update_status"
-        const val ACTION_STATUS = "com.school.teacher_app.INSTALL_STATUS"
+        const val ACTION_STATUS = "com.school.guardian_app.INSTALL_STATUS"
 
         fun statusMessage(status: Int, msg: String?): String {
             return when (status) {
                 PackageInstaller.STATUS_SUCCESS -> "Update installed ✅"
+                PackageInstaller.STATUS_PENDING_USER_ACTION ->
+                    "Update প্রস্তুত — installer dialog-এ Install/Update চাপুন।"
                 PackageInstaller.STATUS_FAILURE_ABORTED -> "Install বাতিল হয়েছে। আবার চেষ্টা করুন।"
                 PackageInstaller.STATUS_FAILURE_BLOCKED ->
                     "System blocked the install (${msg ?: "unknown-source/Play-Protect"}). Settings → Install unknown apps → Allow, তারপর আবার চেষ্টা করুন।"
                 PackageInstaller.STATUS_FAILURE_CONFLICT ->
-                    "Signature conflict — নতুন APK ভিন্ন key দিয়ে sign করা। পুরনো app uninstall করে install করুন (data যাবে) অথবা সঠিক key-এর build নিন।"
+                    "এই APK-র signing key app-এর সঙ্গে মেলেনি। App uninstall করবেন না—তাতে data মুছে যেতে পারে। সঠিক key-তে sign করা update লাগবে।"
                 PackageInstaller.STATUS_FAILURE_INCOMPATIBLE ->
                     "Incompatible: এই APK ফোনের Android version/CPU-তে চলে না।"
                 PackageInstaller.STATUS_FAILURE_INVALID ->
@@ -51,6 +53,42 @@ class InstallStatusReceiver : BroadcastReceiver() {
         val apkPath = intent.getStringExtra("apkPath")
         Log.i(TAG, "status=$status msg=$msg apk=$apkPath")
 
+        if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
+            val confirmationIntent = pendingUserActionIntent(intent)
+            if (confirmationIntent == null) {
+                Log.e(TAG, "Installer requested user action without a confirmation intent")
+                showStatusNotification(context, status, msg, apkPath, null)
+                return
+            }
+            confirmationIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            showStatusNotification(context, status, msg, apkPath, confirmationIntent)
+            try {
+                context.startActivity(confirmationIntent)
+            } catch (e: Exception) {
+                Log.e(TAG, "Unable to open installer confirmation; notification remains actionable", e)
+            }
+            return
+        }
+
+        showStatusNotification(context, status, msg, apkPath, null)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun pendingUserActionIntent(statusIntent: Intent): Intent? {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            statusIntent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
+        } else {
+            statusIntent.getParcelableExtra(Intent.EXTRA_INTENT)
+        }
+    }
+
+    private fun showStatusNotification(
+        context: Context,
+        status: Int,
+        msg: String?,
+        apkPath: String?,
+        confirmationIntent: Intent?
+    ) {
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             nm.createNotificationChannel(
@@ -58,7 +96,10 @@ class InstallStatusReceiver : BroadcastReceiver() {
             )
         }
         val success = status == PackageInstaller.STATUS_SUCCESS
-        val tapIntent: Intent = if (success) {
+        val tapIntent: Intent = confirmationIntent ?: if (success) {
+            context.packageManager.getLaunchIntentForPackage(context.packageName)
+                ?: Intent(Intent.ACTION_MAIN)
+        } else if (status == PackageInstaller.STATUS_FAILURE_CONFLICT) {
             context.packageManager.getLaunchIntentForPackage(context.packageName)
                 ?: Intent(Intent.ACTION_MAIN)
         } else {

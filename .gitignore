@@ -78,6 +78,23 @@ Desktop.ini
 .DS_Store
 
 .vercel/
+.release-signing/
 
 .vercel
 .env*
+.pgtest.json
+login.json
+_tmp_admin_pass.mjs
+backend/.pgtest.json
+backend/fix_*.js
+backend/reset_*.js
+backend/supabase_sync.js
+
+# Local database backups contain private student and school data
+database_backups/
+
+# Scratch/build artifacts that can contain private database copies or APKs
+.tmp/
+.omo/
+release_builds/
+apps/release_builds/

@@ -5,10 +5,38 @@ plugins {
     id("com.google.gms.google-services")
 }
 
+val releaseStoreFile = System.getenv("SCHOOL_RELEASE_KEYSTORE")
+val releaseStorePassword = System.getenv("SCHOOL_RELEASE_STORE_PASSWORD")
+val releaseKeyAlias = System.getenv("SCHOOL_RELEASE_KEY_ALIAS")
+val releaseKeyPassword = System.getenv("SCHOOL_RELEASE_KEY_PASSWORD")
+val releaseSigningConfigured = listOf(
+    releaseStoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+val releaseVariantRequested = gradle.startParameter.taskNames.any {
+    it.contains("release", ignoreCase = true)
+}
+if (releaseVariantRequested && !releaseSigningConfigured) {
+    error("Release builds require the local organization signing configuration; see project_map.md.")
+}
+
 android {
     namespace = "com.school.teacher_app"
     compileSdk = 36
     ndkVersion = flutter.ndkVersion
+
+    if (releaseSigningConfigured) {
+        signingConfigs {
+            create("organizationRelease") {
+                storeFile = file(releaseStoreFile!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
 
     compileOptions {
         isCoreLibraryDesugaringEnabled = true
@@ -33,9 +61,11 @@ android {
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (releaseSigningConfigured) {
+                signingConfigs.getByName("organizationRelease")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 }

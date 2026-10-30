@@ -4,28 +4,59 @@ const multer = require('multer');
 const pool = require('../db');
 const { auth, signToken } = require('../middleware/auth');
 const { queuePush, getGuardianTokens } = require('../fcm');
-const { validateMarksValue, validateMarksRecord } = require('../validate');
+const { validateStudent, validateMarksValue, validateMarksRecord } = require('../validate');
 const { ymd, dhakaToday } = require('../dates');
 const { computeResult, gradePaper, classLevelOf } = require('../grading');
+const { decidePromotionByGrace } = require('../lib/promotion_grace');
+const { normalizeGender } = require('../lib/gender');
 const { SESSION_MORNING, SESSION_P5, FINAL, FINAL_BN, synthesize, guardWindow, currentWindow } = require('../attendance_fsm');
 const PDFDocument = require('pdfkit');
 const path = require('path');
 const fs = require('fs');
 const { loadSchoolLogo } = require('../lib/school_logo');
-const { uploadTeacherSignature, deleteTeacherSignature, getClassSignatories } = require('../lib/teacher_signatures');
-
-// The MySQL->PostgreSQL translator rewrites `IN (?)` into `= ANY(?)`, which
-// makes PG try to read the single value as an array literal and aborts the
-// query ("malformed array literal"). A one-element IN list must therefore be
-// written as a plain equality. Two or more placeholders stay untouched.
-function inClause(column, ids) {
-  const list = (ids || []).filter(v => v !== undefined && v !== null);
-  if (!list.length) return { sql: '1=0', params: [] };
-  if (list.length === 1) return { sql: `${column} = ?`, params: [list[0]] };
-  return { sql: `${column} IN (${list.map(() => '?').join(',')})`, params: list };
-}
+const { loadStudentActivities } = require('../lib/student_activities');
+const { uploadTeacherSignature, deleteTeacherSignature, getClassSignatories, loadTeacherSignature } = require('../lib/teacher_signatures');
+const { syncCurrentAcademicSession } = require('./results');
+const { validateStudentCurriculum, canonicalReligion } = require('../curriculum');
+const { toDatabaseBoolean, validateStudentProfileFields } = require('../lib/student_update');
+const promoEngine = require('../promotion_engine');
+const { inClause } = require('../lib/sql');
+const { routineSubjectScopeSql } = require('../lib/teacher_routine_access');
 
 router.use(auth('teacher'));
+
+// Exam submit/approve/reject audit trail. These paths previously called an
+// undefined `log()` after the transaction committed, so a successful submit
+// returned HTTP 500 even though the lock had been applied.
+function log(userId, action, detail) {
+  return pool.query('INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)',
+    [userId, action, detail || '']).catch(() => {});
+}
+
+router.get('/meta/options', async (req, res) => {
+  try {
+    const [religionRows] = await pool.query(
+      `SELECT DISTINCT religion
+       FROM students
+       WHERE religion IS NOT NULL
+         AND TRIM(religion) <> ''
+         AND LOWER(TRIM(religion)) NOT IN ('unknown','উল্লেখ নেই')
+       ORDER BY religion`
+    );
+    const religions = religionRows
+      .map((r) => (r.religion ? String(r.religion).trim() : null))
+      .filter((v) => v && v.toLowerCase() !== 'unknown' && v !== 'উল্লেখ নেই');
+
+    res.json({
+      religions,
+      genders: ['Male', 'Female', 'Other'],
+      bloodGroups: ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-', 'Unknown'],
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 
 // ---- Teacher signature upload (ink-only PNG, background auto-removed)
 // Rule: signature must be dark ink on light background; the server strips the
@@ -219,6 +250,41 @@ async function autoAssignReligionSubjects(studentId, classId, religion, teacherI
   }
 }
 
+function studentMatchesReligionSubject(student, subjectName) {
+  const name = String(subjectName || '').toLowerCase();
+  const religion = String(student.religion || '').toLowerCase();
+  if (/hindu/.test(name)) return /hindu/.test(religion);
+  if (/christian/.test(name)) return /christian/.test(religion);
+  if (/buddh/.test(name)) return /buddh/.test(religion);
+  if (/islam|muslim/.test(name)) return /islam|muslim/.test(religion);
+  return true;
+}
+
+async function routineReligionScope(subjectId, classId) {
+  try {
+    const [rows] = await pool.query(
+      `SELECT DISTINCT rr.religion FROM routine_religions rr
+        JOIN routines r ON r.id=rr.routine_id
+       WHERE r.subject_id=? AND (
+         EXISTS (SELECT 1 FROM routine_sections rs WHERE rs.routine_id=r.id AND rs.class_id=?) OR
+         EXISTS (SELECT 1 FROM routine_groups rg WHERE rg.routine_id=r.id AND rg.class_id=?)
+       ) ORDER BY rr.religion`, [subjectId, classId, classId]);
+    return rows.map(r => canonicalReligion(r.religion)).filter(Boolean);
+  } catch (e) {
+    if (['42P01', 'ER_NO_SUCH_TABLE'].includes(e.code) || e.mysqlCode === 'ER_NO_SUCH_TABLE') return [];
+    throw e;
+  }
+}
+
+function religionFromSubjectName(subjectName) {
+  const name = String(subjectName || '').toLowerCase();
+  if (/hindu/.test(name)) return 'Hinduism';
+  if (/christian/.test(name)) return 'Christianity';
+  if (/buddh/.test(name)) return 'Buddhism';
+  if (/islam|muslim/.test(name)) return 'Islam';
+  return null;
+}
+
 function bangladeshNow() {
   const shifted = Date.now() + TZ_OFF;
   const d = new Date(shifted);
@@ -240,11 +306,14 @@ router.get('/profile', async (req, res) => {
       [req.user.id]
     );
     const [uRows] = await pool.query(
-      'SELECT is_class_teacher, designation, sort_order, signature, signature_name FROM users WHERE id=?', [req.user.id]
+      `SELECT phone, is_class_teacher, designation, sort_order, signature, signature_name,
+              teacher_dob, teacher_address, teacher_blood_group, teacher_index_number,
+              teacher_pns_number, teacher_degree, teacher_joining_date
+       FROM users WHERE id=?`, [req.user.id]
     );
     const is_class_teacher = uRows[0]?.is_class_teacher || [];
     const sig = uRows[0]?.signature || null;
-    res.json({ teacher: { ...req.user, designation: uRows[0]?.designation || null, sort_order: uRows[0]?.sort_order ?? null, signature_url: sig, signature_name: uRows[0]?.signature_name || null }, subjects, classes, is_class_teacher });
+    res.json({ teacher: { ...req.user, ...uRows[0], designation: uRows[0]?.designation || null, sort_order: uRows[0]?.sort_order ?? null, signature_url: sig, signature_name: uRows[0]?.signature_name || null }, subjects, classes, is_class_teacher });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -255,50 +324,46 @@ router.get('/profile', async (req, res) => {
 router.put('/profile', async (req, res) => {
   const { name, designation } = req.body || {};
   if (designation !== undefined) return res.status(403).json({ error: 'পদবি admin panel থেকে নির্ধারণ করা হয়।' });
-  if (name === undefined && designation === undefined) {
+  const profileFields = [
+    ['phone', 20], ['teacher_dob', 10], ['teacher_address', 255],
+    ['teacher_blood_group', 5], ['teacher_index_number', 40],
+    ['teacher_pns_number', 40], ['teacher_degree', 150], ['teacher_joining_date', 10],
+  ];
+  const fields = [];
+  const params = [];
+  if (name !== undefined) {
+    const clean = String(name).trim();
+    if (clean.length < 3 || clean.length > 100) return res.status(400).json({ error: 'নাম ৩ থেকে ১০০ অক্ষরের মধ্যে দিন।' });
+    fields.push('name=?'); params.push(clean);
+  }
+  for (const [key, limit] of profileFields) {
+    if (!Object.prototype.hasOwnProperty.call(req.body || {}, key)) continue;
+    const raw = req.body[key];
+    const value = raw == null || String(raw).trim() === '' ? null : String(raw).trim();
+    if (value != null && value.length > limit) return res.status(400).json({ error: `${key} সর্বোচ্চ ${limit} অক্ষর হতে পারে।` });
+    if ((key === 'teacher_dob' || key === 'teacher_joining_date') && value != null &&
+        (!/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`)) ||
+          new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) !== value)) {
+      return res.status(400).json({ error: 'তারিখ YYYY-MM-DD ফরম্যাটে দিন।' });
+    }
+    if (key === 'phone' && value != null && !/^\+?[0-9 ()-]{7,20}$/.test(value)) {
+      return res.status(400).json({ error: 'সঠিক ফোন নম্বর দিন।' });
+    }
+    fields.push(`${key}=?`); params.push(value);
+  }
+  if (fields.length === 0) {
     return res.status(400).json({ error: 'Nothing to update' });
   }
-  let cleanName = name;
-  let cleanDesignation = designation;
-  if (name !== undefined) {
-    cleanName = String(name).trim();
-    if (cleanName.length < 3) return res.status(400).json({ error: 'Name must be at least 3 characters' });
-  }
-  if (designation !== undefined) {
-    cleanDesignation = String(designation).trim();
-    if (cleanDesignation.length < 2) return res.status(400).json({ error: 'Designation must be at least 2 characters' });
-    // Exclusive posts: if another teacher currently holds it, block with 409.
-    const norm = cleanDesignation.toLowerCase().replace(/\s+/g, ' ').trim();
-    const exclusive = ['head teacher', 'headmaster', 'principal', 'assistant head teacher', 'assistant headmaster', 'vice principal'];
-    if (exclusive.indexOf(norm) !== -1) {
-      const [holders] = await pool.query(
-        "SELECT id, name FROM users WHERE role='teacher' AND id<>? AND LOWER(TRIM(designation)) IN ('head teacher','headmaster','principal','assistant head teacher','assistant headmaster','vice principal')",
-        [req.user.id]);
-      // head-family vs assistant-family are separate locks
-      const headFam = ['head teacher', 'headmaster', 'principal'];
-      const wantHead = headFam.indexOf(norm) !== -1;
-      const clash = holders.find(h => {
-        const hn = String(h.designation || '').toLowerCase().trim();
-        return wantHead ? headFam.indexOf(hn) !== -1 : headFam.indexOf(hn) === -1;
-      });
-      if (clash) {
-        return res.status(409).json({ error: `“${cleanDesignation}” পদটি এখন ${clash.name}-এর দখলে — admin remove না করা পর্যন্ত অন্য কেউ নিতে পারবে না।` });
-      }
-    }
-  }
   try {
-    const fields = [];
-    const params = [];
-    if (cleanName) { fields.push('name=?'); params.push(cleanName); }
-    if (cleanDesignation !== undefined) { fields.push('designation=?'); params.push(cleanDesignation); }
-    if (fields.length === 0) return res.status(400).json({ error: 'Nothing to update' });
     params.push(req.user.id);
     await pool.query(`UPDATE users SET ${fields.join(', ')} WHERE id=?`, params);
     await pool.query('INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)',
-      [req.user.id, 'profile_update',
-       (cleanName ? 'name=' + cleanName + (cleanDesignation ? ', ' : '') : '') + (cleanDesignation ? 'designation=' + cleanDesignation : '')]);
+      [req.user.id, 'profile_update', `Teacher optional profile fields updated: ${fields.map(field => field.split('=')[0]).join(',')}`]);
     const [rows] = await pool.query(
-      'SELECT id, role, username, name, designation, sort_order, is_class_teacher, signature, signature_name FROM users WHERE id=?', [req.user.id]);
+      `SELECT id, role, username, name, phone, designation, sort_order, is_class_teacher,
+              signature, signature_name, teacher_dob, teacher_address, teacher_blood_group,
+              teacher_index_number, teacher_pns_number, teacher_degree, teacher_joining_date
+       FROM users WHERE id=?`, [req.user.id]);
     const u = rows[0];
     if (!u) return res.status(404).json({ error: 'User not found' });
     u.signature_url = u.signature || null;
@@ -330,13 +395,76 @@ router.put('/profile/password', async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
-router.get('/subjects', async (req, res) => {
+router.get('/notifications', async (req, res) => {
   try {
     const [rows] = await pool.query(
-      `SELECT sub.id, sub.name, sub.class_id, c.name AS class_name, c.section
+      `SELECT n.id, n.title, n.body, n.type, n.target_type, n.related_id,
+              n.class_id, n.student_id, n.created_at, c.name AS class_name,
+              c.section, s.name AS student_name, s.roll, r.read_at,
+              (SELECT ar.status FROM attendance_access_requests ar
+                WHERE ar.id=n.related_id AND ar.class_teacher_id=? LIMIT 1) AS attendance_request_status,
+              (SELECT ar.expires_at_epoch FROM attendance_access_requests ar
+                WHERE ar.id=n.related_id AND ar.class_teacher_id=? LIMIT 1) AS attendance_request_expires_at
+       FROM notifications n
+       LEFT JOIN classes c ON c.id=n.class_id
+       LEFT JOIN students s ON s.id=n.student_id
+       LEFT JOIN teacher_notification_reads r ON r.notification_id=n.id AND r.user_id=?
+       WHERE (n.target_type='teacher' AND (n.target_user_id IS NULL OR n.target_user_id=?))
+          OR n.class_id IN (SELECT id FROM classes WHERE teacher_id=?)
+          OR n.student_id IN (SELECT id FROM students WHERE class_id IN
+              (SELECT id FROM classes WHERE teacher_id=?))
+       ORDER BY n.id DESC LIMIT 100`, [req.user.id, req.user.id, req.user.id, req.user.id, req.user.id, req.user.id]);
+    res.json({ notifications: rows, unread: rows.filter(row => !row.read_at).length });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+router.get('/student-profile-edit-requests', async (req,res) => {
+  try {
+    const [rows] = await pool.query(`SELECT r.*,s.name AS student_name,s.roll,c.name AS class_name,c.section,g.name AS guardian_name FROM student_profile_edit_requests r JOIN students s ON s.id=r.student_id JOIN classes c ON c.id=r.class_id LEFT JOIN users g ON g.id=r.guardian_id WHERE r.class_teacher_id=? ORDER BY r.created_at DESC LIMIT 100`,[req.user.id]);
+    res.json(rows);
+  } catch(err) { console.error(err); res.status(500).json({error:'Server error'}); }
+});
+router.post('/student-profile-edit-requests/:id/review', async (req,res) => {
+  const status=['resolved','rejected'].includes(req.body?.status)?req.body.status:null;
+  if(!status) return res.status(400).json({error:'status must be resolved or rejected'});
+  try {
+    const [result]=await pool.query(`UPDATE student_profile_edit_requests SET status=?,reviewed_by=?,reviewer_role='teacher',admin_note=?,reviewed_at=NOW() WHERE id=? AND class_teacher_id=? AND status='pending'`,[status,req.user.id,String(req.body?.note||'').slice(0,1000),req.params.id,req.user.id]);
+    if(!result.affectedRows) return res.status(404).json({error:'Pending request not found'});
+    res.json({ok:true,status});
+  } catch(err) { console.error(err); res.status(500).json({error:'Server error'}); }
+});
+
+router.post('/notifications/:id/read', async (req, res) => {
+  try {
+    const [[visible]] = await pool.query(
+      `SELECT n.id FROM notifications n WHERE n.id=? AND
+        ((n.target_type='teacher' AND (n.target_user_id IS NULL OR n.target_user_id=?)) OR n.class_id IN (SELECT id FROM classes WHERE teacher_id=?)
+         OR n.student_id IN (SELECT id FROM students WHERE class_id IN
+           (SELECT id FROM classes WHERE teacher_id=?)))`,
+      [req.params.id, req.user.id, req.user.id, req.user.id]);
+    if (!visible) return res.status(404).json({ error: 'Notification not found' });
+    await pool.query(
+      'INSERT IGNORE INTO teacher_notification_reads (notification_id,user_id) VALUES (?,?)',
+      [visible.id, req.user.id]);
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+router.get('/subjects', async (req, res) => {
+  try {
+    // Two sides for a class teacher:
+    //   1) subjects they personally teach (own_subject = 1)
+    //   2) every subject of a class where they are the class teacher.
+    // The UI groups these separately (Create Exam → subject picker).
+    const [rows] = await pool.query(
+      `SELECT sub.id, sub.name, sub.class_id, c.name AS class_name,
+              c.section, c.group_name,
+              CASE WHEN sub.teacher_id = ? THEN 1 ELSE 0 END AS own_subject,
+              CASE WHEN c.teacher_id = ? THEN 1 ELSE 0 END AS class_teacher_subject
        FROM subjects sub JOIN classes c ON sub.class_id = c.id
-       WHERE sub.teacher_id = ? ORDER BY sub.class_id, sub.id`,
-      [req.user.id]
+       WHERE sub.teacher_id = ? OR c.teacher_id = ?
+       ORDER BY own_subject DESC, c.name, c.section, sub.name`,
+      [req.user.id, req.user.id, req.user.id, req.user.id]
     );
     res.json(rows);
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
@@ -344,19 +472,23 @@ router.get('/subjects', async (req, res) => {
 
 router.get('/exams', async (req, res) => {
   try {
-    // Admin exams: the class teacher of that class AND the assigned subject
-    // teacher may see/enter them (subject teachers enter their own subjects).
-    // Teacher-created exams: creator or explicitly shared teachers
+    const routineSubjectScope = routineSubjectScopeSql();
     const [rows] = await pool.query(
-      `SELECT e.*, c.name AS class_name, c.section, sub.name AS subject_name,
+      `SELECT e.*, c.name AS class_name, c.section, c.group_name,
+              sub.name AS subject_name,
+              ev.session_id AS session_id, ev.year AS event_year,
+              ev.exam_kind AS event_exam_kind,
+              sess.name AS session_name, sess.is_active AS session_active,
               CASE WHEN e.created_by = ? THEN 1 ELSE 0 END AS is_mine,
-              CASE WHEN sub.teacher_id = ? THEN 1 ELSE 0 END AS subject_mine,
+              CASE WHEN ${routineSubjectScope} THEN 1 ELSE 0 END AS subject_mine,
               EXISTS(SELECT 1 FROM mark_edit_requests mr
                      WHERE mr.exam_id=e.id AND mr.status='pending') AS reentry_pending
        FROM exams e
        JOIN classes c ON e.class_id = c.id
        JOIN subjects sub ON e.subject_id = sub.id
-       WHERE (e.source = 'admin' AND (c.teacher_id = ? OR sub.teacher_id = ?)
+       LEFT JOIN exam_events ev ON ev.id = e.event_id
+       LEFT JOIN sessions sess ON sess.id = ev.session_id
+       WHERE (e.source = 'admin' AND ${routineSubjectScope}
               AND (e.event_id IS NULL OR EXISTS (
                 SELECT 1 FROM exam_events ev
                 WHERE ev.id=e.event_id AND ev.is_published=0
@@ -364,12 +496,17 @@ router.get('/exams', async (req, res) => {
                     SELECT 1 FROM students eligible
                     WHERE eligible.class_id=e.class_id AND eligible.session_id=ev.session_id
                       AND (eligible.status IS NULL OR eligible.status='active')
+                       AND EXISTS (SELECT 1 FROM promotions mp JOIN exam_events src ON src.id=mp.event_id
+                         WHERE mp.student_id=eligible.id AND mp.decision='promoted'
+                           AND mp.destination_session_id=ev.session_id AND src.exam_kind='test' AND src.year=ev.year-1)
                   ))
                   AND ((e.entry_open=1 AND e.status<>'published')
                     OR e.entry_status IN ('submitted','approved')
                     OR EXISTS(SELECT 1 FROM mark_edit_requests mr WHERE mr.exam_id=e.id AND mr.status='pending'))
               )))
-          OR (e.source = 'teacher' AND (e.created_by = ? OR e.id IN (SELECT exam_id FROM exam_shares WHERE teacher_id = ?)))
+          OR (e.source = 'teacher' AND (e.created_by = ?
+              OR e.id IN (SELECT exam_id FROM exam_shares WHERE teacher_id = ?)
+              OR ${routineSubjectScope}))
        ORDER BY e.created_at DESC`,
       [req.user.id, req.user.id, req.user.id, req.user.id, req.user.id, req.user.id]
     );
@@ -383,9 +520,17 @@ router.post('/exams', async (req, res) => {
   if (!name || !class_id || !subject_id) return res.status(400).json({ error: 'name, class_id, subject_id required' });
   try {
     const [[subj]] = await pool.query(
-      'SELECT id, class_id, full_marks FROM subjects WHERE id=? AND teacher_id=?', [subject_id, req.user.id]
+      `SELECT sub.id, sub.class_id, sub.full_marks, sub.teacher_id,
+              c.teacher_id AS class_teacher_id
+       FROM subjects sub JOIN classes c ON c.id = sub.class_id
+       WHERE sub.id = ?`, [subject_id]
     );
-    if (!subj) return res.status(403).json({ error: 'This subject is not assigned to you' });
+    if (!subj) return res.status(404).json({ error: 'Subject not found' });
+    const ownsSubject = Number(subj.teacher_id) === Number(req.user.id);
+    const isClassTeacher = Number(subj.class_teacher_id) === Number(req.user.id);
+    if (!ownsSubject && !isClassTeacher) {
+      return res.status(403).json({ error: 'This subject is neither yours nor in your class' });
+    }
     // Guard: the exam's class must match the subject's class
     if (Number(subj.class_id) !== Number(class_id)) {
       return res.status(400).json({ error: 'class_id does not match the subject\'s class' });
@@ -406,29 +551,45 @@ router.post('/exams', async (req, res) => {
     // Validate the subject full_marks so teacher-created tests get proper defaults
     const subjectFull = Number(subj.full_marks) || (exam_type === 'class_test' ? 25 : 100);
     const total = Number(total_marks) || subjectFull;
+    let resolvedEventId = event_id || null;
+    if (!resolvedEventId) {
+      const current = await syncCurrentAcademicSession();
+      const classIds = JSON.stringify([Number(class_id)]);
+      const [event] = await pool.query(
+        `INSERT INTO exam_events (name,session_id,created_by,exam_kind,year,class_ids,entry_open,is_published)
+         VALUES (?,?,?,'other',?,?,1,0)`,
+        [name, current.id, req.user.id, current.current_year, classIds]);
+      resolvedEventId = event.insertId;
+      await pool.query('INSERT IGNORE INTO exam_event_classes (event_id,class_id) VALUES (?,?)', [resolvedEventId, class_id]).catch(() => {});
+    }
     const [result] = await pool.query(
-      `INSERT INTO exams (name, exam_type, class_id, subject_id, source, created_by, exam_date, event_id)
-       VALUES (?,?,?,?,?,?,?,?)`,
-      [name, exam_type || 'class_test', class_id, subject_id, 'teacher', req.user.id, exam_date || null, event_id || null]
+      `INSERT INTO exams (name, exam_type, class_id, subject_id, source, created_by, exam_date, event_id, entry_open)
+       VALUES (?,?,?,?,?,?,?,?,1)`,
+      [name, exam_type || 'class_test', class_id, subject_id, 'teacher', req.user.id, exam_date || null, resolvedEventId]
     );
-    res.status(201).json({ id: result.insertId, total });
+    res.status(201).json({ id: result.insertId, event_id: resolvedEventId, total });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
 async function teacherCanAccessExam(examId, userId) {
+  const routineSubjectScope = routineSubjectScopeSql({ classAlias: 'cls', subjectAlias: 'sub' });
   const [rows] = await pool.query(
     `SELECT e.*, cls.teacher_id AS class_teacher_id, sub.teacher_id AS subject_teacher_id,
+                CASE WHEN ${routineSubjectScope} THEN 1 ELSE 0 END AS routine_teacher,
                 ev.entry_open AS event_entry_open, ev.is_published AS event_is_published,
-                ev.exam_kind AS event_exam_kind, ev.session_id AS event_session_id
+                ev.exam_kind AS event_exam_kind, ev.session_id AS event_session_id, ev.year AS event_year,
+                ev.name AS event_name
      FROM exams e
      LEFT JOIN classes cls ON e.class_id = cls.id
      LEFT JOIN subjects sub ON e.subject_id = sub.id
      LEFT JOIN exam_events ev ON ev.id = e.event_id
      WHERE e.id = ? AND (
-        (e.source = 'admin' AND (sub.teacher_id = ? OR cls.teacher_id = ?))
-        OR (e.source = 'teacher' AND (e.created_by = ? OR e.id IN (SELECT exam_id FROM exam_shares WHERE teacher_id = ?)))
+       (e.source = 'admin' AND ${routineSubjectScope})
+       OR (e.source = 'teacher' AND (e.created_by = ?
+           OR e.id IN (SELECT exam_id FROM exam_shares WHERE teacher_id = ?)
+           OR ${routineSubjectScope}))
      )`,
-    [examId, userId, userId, userId, userId]
+    [userId, examId, userId, userId, userId, userId]
   );
   const exam = rows[0] || null;
   if (!exam) return null;
@@ -437,7 +598,7 @@ async function teacherCanAccessExam(examId, userId) {
   // Class teacher (non-subject) → read-only supervisor: can_enter=0.
   exam.can_enter = (exam.source === 'teacher')
     ? 1
-    : (Number(exam.subject_teacher_id) === Number(userId) ? 1 : 0);
+    : (Number(exam.routine_teacher) === 1 ? 1 : 0);
   exam.is_class_teacher = Number(exam.class_teacher_id) === Number(userId) ? 1 : 0;
   return exam;
 }
@@ -461,9 +622,11 @@ router.get('/exams/:id', async (req, res) => {
     // student_subjects. If NO enrollments exist for this subject yet (legacy
     // classes), fall back to all active class students so old data keeps working.
     const modelSessionClause = exam.event_exam_kind === 'special_model_test'
-      ? ' AND s.session_id = ?' : '';
+      ? ` AND s.session_id = ? AND EXISTS (SELECT 1 FROM promotions mp JOIN exam_events src ON src.id=mp.event_id
+          WHERE mp.student_id=s.id AND mp.decision='promoted' AND mp.destination_session_id=?
+            AND src.exam_kind='test' AND src.year=?)` : '';
     const modelSessionParams = exam.event_exam_kind === 'special_model_test'
-      ? [exam.event_session_id] : [];
+      ? [exam.event_session_id, exam.event_session_id, Number(exam.event_year) - 1] : [];
     const [[enrollCount]] = await pool.query(
       `SELECT COUNT(*) AS c FROM student_subjects ss
        JOIN students s ON s.id = ss.student_id
@@ -475,7 +638,7 @@ router.get('/exams/:id', async (req, res) => {
     if (enrollCount && Number(enrollCount.c) > 0) {
       eligibilityEnforced = true;
       [students] = await pool.query(
-        `SELECT s.id, s.name, s.roll
+        `SELECT s.id, s.name, s.roll, s.religion
          FROM students s
          JOIN student_subjects ss ON ss.student_id = s.id AND ss.subject_id = ?
          WHERE s.class_id = ? AND (s.status IS NULL OR s.status = 'active')${modelSessionClause}
@@ -484,19 +647,33 @@ router.get('/exams/:id', async (req, res) => {
       );
     } else {
       [students] = await pool.query(
-        `SELECT s.id, s.name, s.roll
+        `SELECT s.id, s.name, s.roll, s.religion
          FROM students s WHERE s.class_id = ? AND (s.status IS NULL OR s.status = 'active')${modelSessionClause}
          ORDER BY s.roll`,
         [exam.class_id, ...modelSessionParams]
       );
     }
+    if (/religion|islam|hindu|buddh|christian|ধর্ম|ইসলাম|হিন্দু|বৌদ্ধ|খ্রিস্ট/i.test(String(exam.subject_name || ''))) {
+      let allowed = await routineReligionScope(exam.subject_id, exam.class_id);
+      if (!allowed.length) {
+        const explicit = religionFromSubjectName(exam.subject_name);
+        if (explicit) allowed = [explicit];
+        else return res.status(409).json({ error: 'এই ধর্মীয় subject-এর routine-এ শিক্ষার্থীর ধর্ম নির্বাচন করা নেই। Routine সম্পাদনা করে এক বা একাধিক ধর্ম বেছে নিন।' });
+      }
+      const permitted = new Set(allowed.map(canonicalReligion));
+      students = students.filter(s => permitted.has(canonicalReligion(s.religion)));
+    }
     const [marks] = await pool.query(
-      `SELECT m.id, m.student_id, m.marks, m.total, m.cq, m.mcq, m.practical, m.written, m.ca, m.absent, m.edit_until,
+      `SELECT m.id, m.student_id, m.marks, m.total, m.cq, m.mcq, m.practical, m.written, m.ca, m.absent, m.edit_until, m.recorded_by,
         (m.edit_until IS NOT NULL AND m.edit_until > NOW()) AS editable
        FROM marks m WHERE m.exam_id = ?`,
       [req.params.id]
     );
+    const draftEditable = !['submitted', 'approved'].includes(exam.entry_status) &&
+      exam.status !== 'published';
+    marks.forEach(mark => { mark.editable = draftEditable; });
     const [[subj]] = await pool.query('SELECT name, full_marks, teacher_id, cq_full, mcq_full, practical_full, written_full, ca_full FROM subjects WHERE id=?', [exam.subject_id]);
+    students = students.filter(student => studentMatchesReligionSubject(student, subj && subj.name));
     const subjectMine = subj ? Number(subj.teacher_id) === Number(req.user.id) : false;
     const isClassTeacher = Number(exam.is_class_teacher) === 1;
     // App-level edit right mirrors the write rule: subject teacher only.
@@ -515,7 +692,14 @@ router.get('/exams/:id', async (req, res) => {
       ],
     } : null;
     if (markStructure) markStructure.has_components = markStructure.components.length > 0;
-    res.json({ exam: { ...exam, subject_name: subj ? subj.name : exam.subject_name, full_marks: subj ? subj.full_marks : null, subject_mine: subjectMine ? 1 : 0, is_class_teacher: isClassTeacher ? 1 : 0, can_enter: canEnter ? 1 : 0, mark_structure: markStructure, eligibility_enforced: eligibilityEnforced ? 1 : 0 }, students, marks, reentry_request: reentryRequest || null, settings: await schoolSettings(), signatures: await getClassSignatories(exam.class_id) });
+    const [markWriters] = await pool.query(
+      `SELECT recorded_by FROM marks WHERE exam_id=? AND recorded_by IS NOT NULL
+       GROUP BY recorded_by ORDER BY COUNT(*) DESC, MAX(recorded_at) DESC LIMIT 1`, [req.params.id]);
+    const writerId = markWriters[0]?.recorded_by || req.user.id;
+    const [[writer]] = await pool.query(
+      'SELECT id, name, designation, signature, signature_name FROM users WHERE id=?', [writerId]);
+    const writerSignature = writer ? await loadTeacherSignature(writer.signature) : null;
+    res.json({ exam: { ...exam, subject_name: subj ? subj.name : exam.subject_name, full_marks: subj ? subj.full_marks : null, subject_mine: subjectMine ? 1 : 0, is_class_teacher: isClassTeacher ? 1 : 0, can_enter: canEnter ? 1 : 0, mark_structure: markStructure, eligibility_enforced: eligibilityEnforced ? 1 : 0 }, students, marks, reentry_request: reentryRequest || null, teacher_name: req.user.name, marks_entered_by: writer ? { id: writer.id, name: writer.signature_name || writer.name, designation: writer.designation || 'Subject Teacher', signature_base64: writerSignature ? writerSignature.toString('base64') : null } : { name: req.user.name, designation: 'Subject Teacher', signature_base64: null }, settings: await schoolSettings(), signatures: await getClassSignatories(exam.class_id) });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -561,6 +745,7 @@ router.post('/exams/:id/marks', async (req, res) => {
 // marks for another teacher's subject.
 // ------------------------------------------------------------------
 router.post('/exams/:id/submit', async (req, res) => {
+  const conn = await pool.getConnection();
   try {
     const exam = await teacherCanAccessExam(req.params.id, req.user.id);
     if (!exam) return res.status(404).json({ error: 'Exam not found or not your subject' });
@@ -568,22 +753,38 @@ router.post('/exams/:id/submit', async (req, res) => {
       return res.status(403).json({ error: 'শুধু assigned subject teacher marks submit করতে পারেন। Class teacher শুধু দেখতে ও review করতে পারেন।' });
     }
     if (exam.status === 'published') return res.status(409).json({ error: 'Result already published.' });
-    if (exam.entry_status === 'approved') return res.status(409).json({ error: 'Already approved.' });
+    if (['submitted', 'approved'].includes(String(exam.entry_status))) {
+      return res.status(409).json({ error: 'এই marks sheet ইতিমধ্যে submit হয়েছে।' });
+    }
+    await conn.beginTransaction();
 
+    const [[locked]] = await conn.query('SELECT entry_status,status FROM exams WHERE id=? FOR UPDATE', [exam.id]);
+    if (!locked || ['submitted','approved'].includes(String(locked.entry_status)) || locked.status === 'published') {
+      await conn.rollback();
+      return res.status(409).json({ error: 'অন্য শিক্ষক ইতিমধ্যে marks sheet submit করেছেন।' });
+    }
     const { validateExamMarks } = require('../mark_validation');
     const v = await validateExamMarks(exam.id, { strict: true });
     if (!v.ok) {
+      await conn.rollback();
       return res.status(400).json({
         error: 'অসম্পূর্ণ/ভুল নম্বর — submit করা যায় না।',
         error_count: v.error_count, errors: v.errors,
       });
     }
-    await pool.query(
-      `UPDATE exams SET entry_status='submitted', submitted_at=NOW(), submitted_by=?, reject_reason=NULL WHERE id=?`,
+    // Conditional update is the single-winner gate when multiple teachers are
+    // assigned to the same subject. Exactly one can become the official submitter.
+    const [claim] = await conn.query(
+      `UPDATE exams SET entry_status='submitted', submitted_at=NOW(), submitted_by=?, reject_reason=NULL
+       WHERE id=? AND entry_status NOT IN ('submitted','approved') AND status<>'published'`,
       [req.user.id, exam.id]);
+    if (!claim?.affectedRows) { await conn.rollback(); return res.status(409).json({ error: 'অন্য শিক্ষক ইতিমধ্যে marks sheet submit করেছেন।' }); }
+    await conn.query('UPDATE marks SET recorded_by=?, edit_until=NULL WHERE exam_id=?', [req.user.id, exam.id]);
+    await conn.commit();
     await log(req.user.id, 'exam_submit', `Exam ${exam.id} submitted for class-teacher approval`);
     res.json({ ok: true, entry_status: 'submitted', self_approved: false });
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+  } catch (err) { try { await conn.rollback(); } catch (_) {} console.error(err); res.status(err.status || 500).json({ error: err.status ? err.message : 'Server error' }); }
+  finally { conn.release(); }
 });
 
 // Class teacher re-opens a locked subject so its subject teacher can edit.
@@ -594,6 +795,9 @@ router.post('/exams/:id/unlock', async (req, res) => {
     if (!exam) return res.status(404).json({ error: 'Exam not found' });
     if (Number(exam.is_class_teacher) !== 1) {
       return res.status(403).json({ error: 'শুধু এই class-এর class teacher unlock করতে পারেন।' });
+    }
+    if (['submitted', 'approved'].includes(String(exam.entry_status))) {
+      return res.status(403).json({ error: 'Submitted marks sheet re-entry শুধু Admin অনুমোদন করতে পারবেন।' });
     }
     await pool.query(
       `UPDATE exams SET entry_status='draft', reject_reason=? WHERE id=?`,
@@ -616,12 +820,19 @@ router.post('/exams/:id/ct-approve', async (req, res) => {
     if (exam.entry_status !== 'submitted') {
       return res.status(400).json({ error: `entry_status "${exam.entry_status}" — শুধু submitted approve করা যায়।` });
     }
+    if (exam.reject_reason) {
+      return res.status(409).json({ error: 'Rejected marks sheet পুনরায় approve করার আগে Admin re-entry approval লাগবে।' });
+    }
     const { validateExamMarks } = require('../mark_validation');
     const v = await validateExamMarks(exam.id, { strict: true });
     if (!v.ok) return res.status(422).json({ error: 'Validation failed', errors: v.errors, error_count: v.error_count });
-    await pool.query(
-      `UPDATE exams SET entry_status='approved', approved_at=NOW(), approved_by=?, reject_reason=NULL WHERE id=?`,
+    const [updated] = await pool.query(
+      `UPDATE exams SET entry_status='approved', approved_at=NOW(), approved_by=?, reject_reason=NULL
+        WHERE id=? AND entry_status='submitted' AND COALESCE(reject_reason, '')=''`,
       [req.user.id, exam.id]);
+    if (!updated.affectedRows) {
+      return res.status(409).json({ error: 'Marks sheet-এর status বদলে গেছে; refresh করে আবার চেষ্টা করুন।' });
+    }
     await log(req.user.id, 'exam_ct_approve', `Class teacher approved exam ${exam.id}`);
     res.json({ ok: true, entry_status: 'approved' });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
@@ -647,12 +858,10 @@ router.post('/exams/:id/reentry-request', async (req, res) => {
     const [created] = await pool.query(
       `INSERT INTO mark_edit_requests (mark_id, student_id, exam_id, teacher_id, reason)
        VALUES (?,?,?,?,?)`, [anchor.id, anchor.student_id, exam.id, req.user.id, reason]);
-    if (exam.class_teacher_id) {
-      await pool.query(
-        `INSERT INTO notifications (title, body, type, target_type, related_id, created_by)
-         VALUES (?,?,?,?,?,?)`,
-        ['Re-entry approval needed', `${req.user.name} ${exam.subject_name || 'subject'}-এর re-entry চেয়েছেন: ${reason}`, 'special', 'teacher', created.insertId, req.user.id]);
-    }
+    await pool.query(
+      `INSERT INTO notifications (title, body, type, target_type, related_id, created_by)
+       VALUES (?,?,?,?,?,?)`,
+      ['Admin re-entry approval needed', `${req.user.name} ${exam.subject_name || 'subject'}-এর re-entry চেয়েছেন: ${reason}`, 'special', 'admin', created.insertId, req.user.id]);
     res.status(201).json({ ok: true, id: created.insertId, status: 'pending' });
   } catch (err) {
     if (err.code === '23505' || err.code === 'ER_DUP_ENTRY' || err.errno === 1062) {
@@ -663,50 +872,15 @@ router.post('/exams/:id/reentry-request', async (req, res) => {
   }
 });
 
-// Class-teacher one-tap approval unlocks the subject sheet for a fresh
-// five-hour correction window. The subject teacher must submit it again.
+// Re-entry requests require admin approval. Class teachers only review the
+// initial submission; they cannot unlock a submitted marks sheet.
 router.post('/exams/:id/reentry-approve', async (req, res) => {
-  try {
-    const exam = await teacherCanAccessExam(req.params.id, req.user.id);
-    if (!exam) return res.status(404).json({ error: 'Exam not found' });
-    if (Number(exam.is_class_teacher) !== 1) {
-      return res.status(403).json({ error: 'শুধু ওই class-এর class teacher re-entry approve করতে পারেন।' });
-    }
-    if (!['submitted', 'approved'].includes(exam.entry_status)) {
-      return res.status(409).json({ error: 'এই exam এখন re-entry approval-এর অবস্থায় নেই।' });
-    }
-    const [[request]] = await pool.query(
-      `SELECT id FROM mark_edit_requests
-       WHERE exam_id=? AND status='pending' ORDER BY created_at DESC LIMIT 1`, [exam.id]);
-    if (!request) return res.status(404).json({ error: 'কোনো pending re-entry request নেই।' });
-    const conn = await pool.getConnection();
-    try {
-      await conn.beginTransaction();
-      await conn.query(
-        `UPDATE mark_edit_requests SET status='approved', decided_at=NOW(), decided_by=? WHERE id=? AND status='pending'`,
-        [req.user.id, request.id]);
-      await conn.query(
-        `UPDATE exams SET entry_status='draft', submitted_at=NULL, submitted_by=NULL,
-                approved_at=NULL, approved_by=NULL, reject_reason=NULL WHERE id=?`, [exam.id]);
-      await conn.query(
-        `UPDATE marks SET edit_until=NOW() + INTERVAL '5 hours' WHERE exam_id=?`, [exam.id]);
-      await conn.commit();
-    } catch (err) {
-      await conn.rollback();
-      throw err;
-    } finally {
-      conn.release();
-    }
-    await log(req.user.id, 'exam_reentry_approve', `Re-entry request ${request.id} approved for exam ${exam.id}`);
-    res.json({ ok: true, entry_status: 'draft', request_id: request.id });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
-  }
+  res.status(403).json({ error: 'Re-entry request শুধু Admin অনুমোদন করতে পারবেন।' });
 });
 
 router.post('/exams/:id/ct-reject', async (req, res) => {
-  const reason = (req.body && req.body.reason) || null;
+  const reason = String((req.body && req.body.reason) || '').trim().slice(0, 500);
+  if (!reason) return res.status(400).json({ error: 'Reject করার কারণ লিখুন।' });
   try {
     const exam = await teacherCanAccessExam(req.params.id, req.user.id);
     if (!exam) return res.status(404).json({ error: 'Exam not found' });
@@ -714,9 +888,17 @@ router.post('/exams/:id/ct-reject', async (req, res) => {
       return res.status(403).json({ error: 'শুধু এই class-এর class teacher reject করতে পারেন।' });
     }
     if (exam.entry_status !== 'submitted') return res.status(400).json({ error: 'Only submitted exams can be rejected' });
-    await pool.query(`UPDATE exams SET entry_status='draft', reject_reason=? WHERE id=?`, [reason, exam.id]);
-    await log(req.user.id, 'exam_ct_reject', `Class teacher rejected exam ${exam.id}: ${reason || ''}`);
-    res.json({ ok: true, entry_status: 'draft' });
+    if (exam.reject_reason) return res.status(409).json({ error: 'এই marks sheet ইতিমধ্যে reject করা হয়েছে।' });
+    const [updated] = await pool.query(
+      `UPDATE exams SET entry_status='submitted', reject_reason=?
+        WHERE id=? AND entry_status='submitted' AND COALESCE(reject_reason, '')=''`,
+      [reason, exam.id]);
+    if (!updated.affectedRows) {
+      return res.status(409).json({ error: 'Marks sheet-এর status বদলে গেছে; refresh করে আবার চেষ্টা করুন।' });
+    }
+    await log(req.user.id, 'exam_ct_reject',
+      `Class teacher rejected exam ${exam.id}; admin re-entry approval required: ${reason || ''}`);
+    res.json({ ok: true, entry_status: 'submitted' });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -728,6 +910,9 @@ router.post('/exams/:id/finalize', async (req, res) => {
     if (exam.status === 'published') {
       return res.status(409).json({ error: 'Exam already published' });
     }
+    if (['submitted', 'approved'].includes(String(exam.entry_status))) {
+      return res.status(409).json({ error: 'Submitted marks sheet পুনরায় finalize করা যাবে না।' });
+    }
     if (Number(exam.can_enter) !== 1) {
       return res.status(403).json({ error: 'Only the subject teacher can finalize this exam.' });
     }
@@ -738,19 +923,21 @@ router.post('/exams/:id/finalize', async (req, res) => {
     const examId = exam.id;
     // Get all students in the exam's class
     const [classStudents] = await pool.query(
-      `SELECT id, name, roll, student_code FROM students WHERE class_id=? AND (status IS NULL OR status=?)${exam.event_exam_kind === 'special_model_test' ? ' AND session_id=?' : ''}`,
-      exam.event_exam_kind === 'special_model_test' ? [exam.class_id, 'active', exam.event_session_id] : [exam.class_id, 'active']);
+      `SELECT s.id, s.name, s.roll, s.student_code, s.religion FROM students s WHERE s.class_id=? AND (s.status IS NULL OR s.status=?)${exam.event_exam_kind === 'special_model_test' ? ` AND s.session_id=? AND EXISTS (SELECT 1 FROM promotions mp JOIN exam_events src ON src.id=mp.event_id WHERE mp.student_id=s.id AND mp.decision='promoted' AND mp.destination_session_id=? AND src.exam_kind='test' AND src.year=?)` : ''}`,
+      exam.event_exam_kind === 'special_model_test' ? [exam.class_id, 'active', exam.event_session_id, exam.event_session_id, Number(exam.event_year) - 1] : [exam.class_id, 'active']);
+    const [[subject]] = await pool.query('SELECT name FROM subjects WHERE id=?', [exam.subject_id]);
+    const eligibleStudents = classStudents.filter(s => studentMatchesReligionSubject(s, subject && subject.name));
     // Get students who already have marks
     const [markedStudents] = await pool.query('SELECT DISTINCT student_id FROM marks WHERE exam_id=?', [examId]);
     const markedIds = new Set(markedStudents.map(m => m.student_id));
-    const absentStudents = classStudents.filter(s => !markedIds.has(s.id));
+    const absentStudents = eligibleStudents.filter(s => !markedIds.has(s.id));
     if (absentStudents.length === 0) {
       return res.status(400).json({ error: 'All students already have marks entered.' });
     }
     // Return confirmation info before finalizing
     res.json({
       confirm: true,
-      total_students: classStudents.length,
+      total_students: eligibleStudents.length,
       marked: markedIds.size,
       to_be_marked_absent: absentStudents.length,
       absent_students: absentStudents.map(s => ({ id: s.id, name: s.name, roll: s.roll }))
@@ -769,37 +956,49 @@ router.post('/exams/:id/finalize-confirm', async (req, res) => {
     if (exam.status === 'published') {
       return res.status(409).json({ error: 'Exam already published' });
     }
+    if (['submitted', 'approved'].includes(String(exam.entry_status))) {
+      return res.status(409).json({ error: 'Submitted marks sheet পুনরায় finalize করা যাবে না।' });
+    }
     if (Number(exam.can_enter) !== 1 || Number(exam.entry_open) === 0 ||
         (exam.event_id && Number(exam.event_is_published) === 1)) {
       return res.status(403).json({ error: 'Marks entry is closed by admin.' });
     }
     const examId = exam.id;
     const [classStudents] = await pool.query(
-      `SELECT id, name, roll, student_code FROM students WHERE class_id=? AND (status IS NULL OR status=?)${exam.event_exam_kind === 'special_model_test' ? ' AND session_id=?' : ''}`,
-      exam.event_exam_kind === 'special_model_test' ? [exam.class_id, 'active', exam.event_session_id] : [exam.class_id, 'active']);
+      `SELECT s.id, s.name, s.roll, s.student_code, s.religion FROM students s WHERE s.class_id=? AND (s.status IS NULL OR s.status=?)${exam.event_exam_kind === 'special_model_test' ? ` AND s.session_id=? AND EXISTS (SELECT 1 FROM promotions mp JOIN exam_events src ON src.id=mp.event_id WHERE mp.student_id=s.id AND mp.decision='promoted' AND mp.destination_session_id=? AND src.exam_kind='test' AND src.year=?)` : ''}`,
+      exam.event_exam_kind === 'special_model_test' ? [exam.class_id, 'active', exam.event_session_id, exam.event_session_id, Number(exam.event_year) - 1] : [exam.class_id, 'active']);
+    const [[subject]] = await pool.query('SELECT name FROM subjects WHERE id=?', [exam.subject_id]);
+    const eligibleStudents = classStudents.filter(s => studentMatchesReligionSubject(s, subject && subject.name));
     const [markedStudents] = await pool.query('SELECT DISTINCT student_id FROM marks WHERE exam_id=?', [examId]);
     const markedIds = new Set(markedStudents.map(m => m.student_id));
-    const absentStudents = classStudents.filter(s => !markedIds.has(s.id));
+    const absentStudents = eligibleStudents.filter(s => !markedIds.has(s.id));
     const conn = await pool.getConnection();
     try {
       await conn.beginTransaction();
+      const [[lockedExam]] = await conn.query('SELECT entry_status,status FROM exams WHERE id=? FOR UPDATE', [examId]);
+      if (!lockedExam || ['submitted','approved'].includes(String(lockedExam.entry_status)) || lockedExam.status === 'published') {
+        throw Object.assign(new Error('অন্য শিক্ষক ইতিমধ্যে marks sheet submit করেছেন।'), { status: 409 });
+      }
       // Insert absent marks for students without marks
       for (const s of absentStudents) {
         await conn.query(
           `INSERT INTO marks (student_id, exam_id, marks, total, absent, recorded_by, recorded_at, edit_until)
-           VALUES (?,?,?,?,?,?,NOW(),DATE_ADD(NOW(), INTERVAL 5 HOUR))`,
+           VALUES (?,?,?,?,?,?,NOW(),NULL)`,
           [s.id, examId, 0, exam.full_marks || 100, 1, req.user.id]
         );
       }
       // Submit for class-teacher approval — the teacher NO LONGER publishes.
       // Publishing is an admin-only action (Q3).
-      await conn.query(
-        `UPDATE exams SET entry_status='submitted', submitted_at=NOW(), submitted_by=?, reject_reason=NULL WHERE id=?`,
+      const [claim] = await conn.query(
+        `UPDATE exams SET entry_status='submitted', submitted_at=NOW(), submitted_by=?, reject_reason=NULL WHERE id=? AND entry_status NOT IN ('submitted','approved') AND status<>'published'`,
         [req.user.id, examId]);
+      if (!claim?.affectedRows) throw Object.assign(new Error('অন্য শিক্ষক ইতিমধ্যে marks sheet submit করেছেন।'), { status: 409 });
+      await conn.query('UPDATE marks SET recorded_by=?,edit_until=NULL WHERE exam_id=?', [req.user.id,examId]);
       await conn.commit();
       res.json({ ok: true, message: `Exam submitted. ${absentStudents.length} student(s) marked absent. Class teacher approval-এর অপেক্ষায়।` });
     } catch (err) {
       await conn.rollback();
+      if (err.status) return res.status(err.status).json({ error: err.message });
       throw err;
     } finally {
       conn.release();
@@ -810,8 +1009,8 @@ router.post('/exams/:id/finalize-confirm', async (req, res) => {
   }
 });
 
-// Shared marks submitter: guards + validation + upsert with the 5-hour edit
-// window. Used by POST /exams/:id/marks and POST /events/:id/marks.
+// Shared marks submitter: guards + validation + draft upsert. Used by
+// POST /exams/:id/marks and POST /events/:id/marks.
 //
 // Scientific entry rule: ONLY the assigned subject teacher (or the creator /
 // an explicit sharee of a teacher-created test) may write numbers. The class
@@ -831,12 +1030,10 @@ async function submitExamMarks(exam, records, userId) {
       (exam.event_id && Number(exam.event_is_published) === 1)) {
     throw Object.assign(new Error('Marks entry is closed by admin for this exam.'), { status: 403 });
   }
-  // Q3 lock rule: once the class teacher approves the subject-exam, the
-  // subject teacher can no longer edit. The class teacher must unlock it
-  // first (or the admin re-opens it).
+  // Submitted sheets are immutable until an admin approves a re-entry request.
   if (exam.entry_status === 'submitted' || exam.entry_status === 'approved') {
     throw Object.assign(new Error(
-      'এই subject submit করা হয়েছে — edit করতে class teacher-এর re-entry approval দরকার।'
+      'এই subject submit করা হয়েছে — edit করতে Admin-এর re-entry approval দরকার।'
     ), { status: 403 });
   }
   // Entry deadline: an explicit date+time closes entry exactly then.
@@ -859,15 +1056,16 @@ async function submitExamMarks(exam, records, userId) {
     }
   }
   // Default total = the subject's full_marks (never hardcode 100 for class tests).
-  const [[subj]] = await pool.query('SELECT full_marks, cq_full, mcq_full, practical_full, written_full, ca_full FROM subjects WHERE id=?', [exam.subject_id]);
+  const [[subj]] = await pool.query('SELECT name, full_marks, cq_full, mcq_full, practical_full, written_full, ca_full FROM subjects WHERE id=?', [exam.subject_id]);
   const defaultTotal = Number(subj && subj.full_marks) || 100;
   const layout = subj ? { full_marks: defaultTotal, cq_full: subj.cq_full, mcq_full: subj.mcq_full, practical_full: subj.practical_full, written_full: subj.written_full, ca_full: subj.ca_full } : { full_marks: defaultTotal };
   const studentIds = records.map(r => r.student_id);
   const [classStudents] = await pool.query(
-    `SELECT id, status FROM students WHERE class_id=?${exam.event_exam_kind === 'special_model_test' ? ' AND session_id=?' : ''}`,
-    exam.event_exam_kind === 'special_model_test' ? [exam.class_id, exam.event_session_id] : [exam.class_id]);
-  const allowed = new Set(classStudents.filter(s => !s.status || s.status === 'active').map(s => String(s.id)));
-  const inactive = new Set(classStudents.filter(s => s.status && s.status !== 'active').map(s => String(s.id)));
+    `SELECT s.id, s.status, s.religion FROM students s WHERE s.class_id=?${exam.event_exam_kind === 'special_model_test' ? ` AND s.session_id=? AND EXISTS (SELECT 1 FROM promotions mp JOIN exam_events src ON src.id=mp.event_id WHERE mp.student_id=s.id AND mp.decision='promoted' AND mp.destination_session_id=? AND src.exam_kind='test' AND src.year=?)` : ''}`,
+    exam.event_exam_kind === 'special_model_test' ? [exam.class_id, exam.event_session_id, exam.event_session_id, Number(exam.event_year) - 1] : [exam.class_id]);
+  const eligibleClassStudents = classStudents.filter(s => studentMatchesReligionSubject(s, subj && subj.name));
+  const allowed = new Set(eligibleClassStudents.filter(s => !s.status || s.status === 'active').map(s => String(s.id)));
+  const inactive = new Set(eligibleClassStudents.filter(s => s.status && s.status !== 'active').map(s => String(s.id)));
   for (const sid of studentIds) {
     if (inactive.has(String(sid))) {
       throw Object.assign(new Error(`Student ${sid} is inactive (dropped out) — marks entry not allowed`), { status: 403 });
@@ -886,6 +1084,10 @@ async function submitExamMarks(exam, records, userId) {
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
+    const [[locked]] = await conn.query('SELECT entry_status,status FROM exams WHERE id=? FOR UPDATE', [examId]);
+    if (!locked || ['submitted','approved'].includes(String(locked.entry_status)) || locked.status === 'published') {
+      throw Object.assign(new Error('অন্য শিক্ষক ইতিমধ্যে marks sheet submit করেছেন।'), { status: 409 });
+    }
     for (const r of records) {
       const total = r.total !== undefined && r.total !== null && r.total !== '' ? r.total : defaultTotal;
       // Component values (null when the teacher left that part blank).
@@ -899,25 +1101,20 @@ async function submitExamMarks(exam, records, userId) {
         : Number(r.marks);
       const [existing] = await conn.query('SELECT id, edit_until FROM marks WHERE student_id=? AND exam_id=?', [r.student_id, examId]);
       if (existing.length > 0) {
-        const editUntil = existing[0].edit_until;
-        const editable = editUntil && new Date(editUntil) > new Date();
-        if (!editable) {
-          throw Object.assign(new Error('Mark for student ' + r.student_id + ' is locked. Admin permission required.'), { status: 403 });
-        }
         await conn.query(
-          `UPDATE marks SET marks=?, total=?, cq=?, mcq=?, practical=?, written=?, ca=?, comment=?, recorded_by=?, recorded_at=NOW(), edit_until=DATE_ADD(NOW(), INTERVAL 5 HOUR) WHERE id=?`,
+          `UPDATE marks SET marks=?, total=?, cq=?, mcq=?, practical=?, written=?, ca=?, comment=?, recorded_by=?, recorded_at=NOW(), edit_until=NULL WHERE id=?`,
           [effectiveMarks, total, cq, mcq, practical, written, ca, r.comment || null, userId, existing[0].id]
         );
       } else {
         await conn.query(
           `INSERT INTO marks (student_id, exam_id, marks, total, cq, mcq, practical, written, ca, comment, recorded_by, recorded_at, edit_until)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(),DATE_ADD(NOW(), INTERVAL 5 HOUR))`,
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(),NULL)`,
           [r.student_id, examId, effectiveMarks, total, cq, mcq, practical, written, ca, r.comment || null, userId]
         );
       }
     }
     await conn.commit();
-    return { ok: true, message: 'Marks saved. You can edit for 5 hours only.' };
+    return { ok: true, message: 'খসড়া নম্বর সেভ হয়েছে। Submit না করা পর্যন্ত edit করা যাবে।' };
   } catch (err) {
     await conn.rollback();
     throw err;
@@ -949,12 +1146,14 @@ router.get('/classes/:id/students', async (req, res) => {
       return res.status(403).json({ error: 'You are not the class teacher of this class' });
     }
     const fields = isClassTeacher
-      ? 'id, student_code, name, roll, dob, gender, religion, blood_group, receives_scholarship, phone, email, guardian_name, guardian_phone, guardian_email, father_name, mother_name, birth_cert_no, address, optional_subject, photo'
+      ? 'id, student_code, name, roll, dob, gender, religion, blood_group, receives_scholarship, phone, email, guardian_name, guardian_phone, guardian_email, father_name, mother_name, birth_cert_no, birth_cert_placeholder, address, optional_subject, photo'
       : 'id, student_code, name, roll, optional_subject, photo';
     const [rows] = await pool.query(
       `SELECT ${fields} FROM students WHERE class_id=? AND (status IS NULL OR status=?) ORDER BY roll`, [req.params.id, 'active']
     );
-    res.json(rows);
+    res.json(rows.map(row => row.gender == null
+      ? row
+      : { ...row, gender: normalizeGender(row.gender) }));
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -964,8 +1163,15 @@ router.get('/classes/:id/summary', async (req, res) => {
     const [[cls]] = await pool.query('SELECT id, teacher_id FROM classes WHERE id=?', [classId]);
     if (!cls || Number(cls.teacher_id) !== Number(req.user.id)) return res.status(403).json({ error: 'শুধু class teacher class summary দেখতে পারবেন।' });
     const [gender] = await pool.query(
-      `SELECT COALESCE(NULLIF(LOWER(gender),''),'unknown') AS label, COUNT(*) AS count
-       FROM students WHERE class_id=? AND (status IS NULL OR status='active') GROUP BY COALESCE(NULLIF(LOWER(gender),''),'unknown')`, [classId]);
+      `SELECT CASE
+         WHEN LOWER(TRIM(gender)) IN ('femal','femail','females') THEN 'female'
+         ELSE COALESCE(NULLIF(LOWER(TRIM(gender)),''),'unknown')
+       END AS label, COUNT(*) AS count
+       FROM students WHERE class_id=? AND (status IS NULL OR status='active')
+       GROUP BY CASE
+         WHEN LOWER(TRIM(gender)) IN ('femal','femail','females') THEN 'female'
+         ELSE COALESCE(NULLIF(LOWER(TRIM(gender)),''),'unknown')
+       END`, [classId]);
     const [religion] = await pool.query(
       `SELECT COALESCE(NULLIF(religion,''),'উল্লেখ নেই') AS label, COUNT(*) AS count
        FROM students WHERE class_id=? AND (status IS NULL OR status='active') GROUP BY COALESCE(NULLIF(religion,''),'উল্লেখ নেই')`, [classId]);
@@ -978,10 +1184,27 @@ router.get('/classes/:id/summary', async (req, res) => {
 router.get('/students/:id/profile-history', async (req, res) => {
   try {
     const [[student]] = await pool.query(
-      `SELECT s.*, c.name AS class_name, c.section, c.group_name, c.teacher_id
-       FROM students s JOIN classes c ON c.id=s.class_id WHERE s.id=?`, [req.params.id]);
+      `SELECT s.*, c.name AS class_name, c.section, c.group_name, c.teacher_id,
+              ss.name AS session_name
+       FROM students s JOIN classes c ON c.id=s.class_id
+       LEFT JOIN sessions ss ON ss.id=s.session_id WHERE s.id=?`, [req.params.id]);
     if (!student) return res.status(404).json({ error: 'Student not found' });
-    if (Number(student.teacher_id) !== Number(req.user.id)) return res.status(403).json({ error: 'শুধু নিজের class-এর class teacher এই profile দেখতে পারবেন।' });
+    // Read access: the class teacher, or any teacher who takes a subject
+    // routine in this student's class (subject teachers open profiles from
+    // the live-class student list). Write access (PUT) stays class-teacher-only.
+    if (Number(student.teacher_id) !== Number(req.user.id)) {
+      const [teaches] = await pool.query(
+        `SELECT 1 FROM routines r JOIN subjects sub ON sub.id=r.subject_id
+         WHERE r.teacher_id=? AND sub.class_id=?
+           AND (EXISTS (SELECT 1 FROM routine_sections rs WHERE rs.routine_id=r.id AND rs.class_id=?)
+             OR EXISTS (SELECT 1 FROM routine_groups rg WHERE rg.routine_id=r.id AND rg.class_id=?))
+         LIMIT 1`,
+        [req.user.id, student.class_id, student.class_id, student.class_id]
+      );
+      if (teaches.length === 0) {
+        return res.status(403).json({ error: 'শুধু নিজের class বা নিজের পড়ানো class-এর শিক্ষার্থীর profile দেখতে পারবেন।' });
+      }
+    }
     const [[attendance]] = await pool.query(
       `SELECT COUNT(DISTINCT date) AS school_days,
         COUNT(DISTINCT CASE WHEN status IN ('present','late') THEN date END) AS attended_days,
@@ -992,6 +1215,18 @@ router.get('/students/:id/profile-history', async (req, res) => {
       `SELECT report_date, subject_name, homework_status, learning_status, performance,
               uniform_brought, note, teacher_id FROM student_daily_reports
        WHERE student_id=? ORDER BY report_date DESC, updated_at DESC`, [req.params.id]);
+    const [uniformReports] = await pool.query(
+      `SELECT report_date, uniform_brought, note, teacher_id, updated_at
+       FROM student_uniform_reports WHERE student_id=? ORDER BY report_date DESC, updated_at DESC`, [req.params.id]);
+    const legacyUniformDates = new Set(uniformReports.map(row => String(row.report_date).slice(0, 10)));
+    for (const row of reports) {
+      const date = String(row.report_date).slice(0, 10);
+      if ((row.uniform_brought === false || row.uniform_brought === 0) && !legacyUniformDates.has(date)) {
+        uniformReports.push({ report_date: row.report_date, uniform_brought: false, note: row.note, teacher_id: row.teacher_id });
+        legacyUniformDates.add(date);
+      }
+    }
+    uniformReports.sort((a, b) => String(b.report_date).localeCompare(String(a.report_date)));
     const [complaints] = await pool.query(
       `SELECT n.title, n.body, n.created_at, u.name AS teacher_name
        FROM notifications n LEFT JOIN users u ON u.id=n.created_by
@@ -999,10 +1234,21 @@ router.get('/students/:id/profile-history', async (req, res) => {
     const [promotions] = await pool.query(
       `SELECT from_class, to_class, from_section, to_section, decision, passing_year, created_at
        FROM promotions WHERE student_id=? ORDER BY created_at, id`, [req.params.id]);
-    const missingUniform = reports.filter(row => row.uniform_brought === false || row.uniform_brought === 0).length;
+    const missingUniformDates = new Set([
+      ...reports.filter(row => row.uniform_brought === false || row.uniform_brought === 0).map(row => String(row.report_date).slice(0, 10)),
+      ...uniformReports.filter(row => row.uniform_brought === false || row.uniform_brought === 0).map(row => String(row.report_date).slice(0, 10)),
+    ]);
+    const missingUniform = missingUniformDates.size;
     const repeats = promotions.filter(row => ['retained','not_eligible','failed','repeated'].includes(String(row.decision || '').toLowerCase()));
-    res.json({ student, attendance: attendance || {}, daily_reports: reports, complaints,
-      uniform_missing_reports: missingUniform, repeated_classes: repeats });
+    const sameClassAttempts = new Map();
+    for (const row of promotions) {
+      const key = String(row.from_class || '').trim().toLowerCase();
+      if (key) sameClassAttempts.set(key, (sameClassAttempts.get(key) || 0) + 1);
+    }
+    const irregular = !!Number(student.is_irregular) || repeats.length > 0 || [...sameClassAttempts.values()].some(count => count > 1);
+    student.gender = normalizeGender(student.gender);
+    res.json({ student, attendance: attendance || {}, daily_reports: reports, uniform_reports: uniformReports, complaints,
+      uniform_missing_reports: missingUniform, repeated_classes: repeats, irregular });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -1029,6 +1275,48 @@ router.get('/classes/:id/daily-reports', async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
+// Uniform is a separate class-teacher report, kept out of study progress.
+router.get('/classes/:id/uniform-reports', async (req, res) => {
+  const classId = Number(req.params.id);
+  const date = String(req.query.date || dhakaToday());
+  try {
+    const [[cls]] = await pool.query('SELECT id FROM classes WHERE id=? AND teacher_id=?', [classId, req.user.id]);
+    if (!cls) return res.status(403).json({ error: 'শুধু নিজের class-এর class teacher uniform report দেখতে পারবেন।' });
+    const [rows] = await pool.query(
+      `SELECT student_id, uniform_brought, note FROM student_uniform_reports
+       WHERE class_id=? AND report_date=?`, [classId, date]);
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+router.post('/classes/:id/uniform-reports', async (req, res) => {
+  const classId = Number(req.params.id);
+  const { student_id, uniform_brought, note } = req.body || {};
+  const date = String(req.body?.date || dhakaToday());
+  if (!Number.isInteger(classId) || !Number.isInteger(Number(student_id)) ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(date) || typeof uniform_brought !== 'boolean') {
+    return res.status(400).json({ error: 'শিক্ষার্থী, তারিখ ও uniform-এর তথ্য দিতে হবে।' });
+  }
+  try {
+    const [[cls]] = await pool.query('SELECT id FROM classes WHERE id=? AND teacher_id=?', [classId, req.user.id]);
+    if (!cls) return res.status(403).json({ error: 'শুধু class teacher uniform report দিতে পারবেন।' });
+    const [[student]] = await pool.query(
+      'SELECT id FROM students WHERE id=? AND class_id=? AND (status IS NULL OR status=?)',
+      [student_id, classId, 'active']);
+    if (!student) return res.status(404).json({ error: 'এই class-এর সক্রিয় শিক্ষার্থী পাওয়া যায়নি।' });
+    await pool.query(
+      `INSERT INTO student_uniform_reports
+        (student_id,class_id,teacher_id,report_date,uniform_brought,note)
+       VALUES (?,?,?,?,?,?)
+       ON CONFLICT (student_id,report_date) DO UPDATE SET
+         class_id=EXCLUDED.class_id, teacher_id=EXCLUDED.teacher_id,
+         uniform_brought=EXCLUDED.uniform_brought, note=EXCLUDED.note, updated_at=NOW()`,
+      [student_id, classId, req.user.id, date, uniform_brought,
+        note == null ? null : String(note).trim().slice(0, 500)]);
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
 router.post('/classes/:id/daily-reports', async (req, res) => {
   const classId = Number(req.params.id);
   const { student_id, subject_name, homework_status, learning_status, performance, uniform_brought, note } = req.body || {};
@@ -1041,17 +1329,52 @@ router.post('/classes/:id/daily-reports', async (req, res) => {
     if (!(await canReportClass(classId, req.user.id))) return res.status(403).json({ error: 'এই class-এর report দেওয়ার অনুমতি নেই।' });
     const [[student]] = await pool.query('SELECT id FROM students WHERE id=? AND class_id=? AND (status IS NULL OR status=?)', [student_id, classId, 'active']);
     if (!student) return res.status(404).json({ error: 'এই class-এর সক্রিয় শিক্ষার্থী পাওয়া যায়নি।' });
+    const uniformRequested = Object.prototype.hasOwnProperty.call(req.body || {}, 'uniform_brought');
+    if (uniformRequested) {
+      const [[classTeacher]] = await pool.query(
+        'SELECT id FROM classes WHERE id=? AND teacher_id=?', [classId, req.user.id]);
+      if (!classTeacher) {
+        return res.status(403).json({ error: 'শুধু class teacher uniform report দিতে পারবেন।' });
+      }
+    }
     await pool.query(
       `INSERT INTO student_daily_reports
         (student_id,class_id,teacher_id,report_date,subject_name,homework_status,learning_status,performance,uniform_brought,note)
        VALUES (?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT (student_id,teacher_id,report_date,subject_name) DO UPDATE SET
          homework_status=EXCLUDED.homework_status, learning_status=EXCLUDED.learning_status,
-         performance=EXCLUDED.performance, uniform_brought=EXCLUDED.uniform_brought,
+         performance=EXCLUDED.performance,
+         uniform_brought=CASE WHEN ? THEN EXCLUDED.uniform_brought ELSE student_daily_reports.uniform_brought END,
          note=EXCLUDED.note, updated_at=NOW()`,
       [student_id, classId, req.user.id, date, String(subject_name).trim().slice(0,120), homework_status,
-       learning_status, performance, uniform_brought === false || uniform_brought === 0 ? false : true,
-       note == null ? null : String(note).trim().slice(0,500)]);
+       learning_status, performance,
+       uniformRequested ? !(uniform_brought === false || uniform_brought === 0) : true,
+       note == null ? null : String(note).trim().slice(0,500),
+       uniformRequested]);
+    // Only the student in this request is notified. The dedup key makes a
+    // repeated save of the same subject/day a no-op, so untouched students and
+    // repeated taps never produce duplicate guardian alerts.
+    const [[studentInfo]] = await pool.query('SELECT name FROM students WHERE id=?', [student_id]);
+    const homeworkBn = homework_status === 'done' ? 'হোমওয়ার্ক হয়েছে' : 'হোমওয়ার্ক হয়নি';
+    const learningBn = learning_status === 'learned' ? 'শিখেছে' : learning_status === 'partial' ? 'আংশিক শিখেছে' : 'শেখেনি';
+    const performanceBn = performance === 'good' ? 'ভালো' : performance === 'average' ? 'মাঝারি' : 'দুর্বল';
+    const title = 'আজকের পড়াশোনার আপডেট';
+    const body = `${studentInfo?.name || 'শিক্ষার্থী'} — ${String(subject_name).trim()}: ${learningBn}, ${homeworkBn}, ${performanceBn}।`;
+    const dedupKey = `daily:${student_id}:${date}:${String(subject_name).trim().slice(0, 60)}`;
+    const [notice] = await pool.query(
+      `INSERT INTO notifications (student_id,class_id,title,body,type,target_type,dedup_key,created_by)
+       VALUES (?,?,?,?,?,'guardians',?,?) ON CONFLICT (dedup_key) DO NOTHING`,
+      [student_id, classId, title, body, 'daily_report', dedupKey, req.user.id]);
+    if (Number(notice.affectedRows) > 0) {
+      const tokens = await getGuardianTokens([student_id]);
+      queuePush(tokens, title, body, {
+        type: 'daily_report',
+        kind: 'daily_report',
+        student_id,
+        class_id: classId,
+        date,
+      });
+    }
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
@@ -1081,15 +1404,32 @@ router.get('/classes/:id/roll-check', async (req, res) => {
 router.put('/students/:id', async (req, res) => {
   const { name, dob, gender, religion, blood_group, phone, email, guardian_name,
     guardian_phone, guardian_email, father_name, mother_name, birth_cert_no,
-    address, optional_subject, receives_scholarship } = req.body || {};
+    address, optional_subject, compulsory_subject, receives_scholarship } = req.body || {};
   try {
+    const fieldErrors = validateStudentProfileFields(req.body || {});
+    if (fieldErrors.length) return res.status(400).json({ error: fieldErrors.join('; ') });
+    if (birth_cert_no !== undefined && !String(birth_cert_no || '').trim()) {
+      return res.status(400).json({ error: 'জন্মনিবন্ধন নম্বর খালি রাখা যাবে না।' });
+    }
     const [[stu]] = await pool.query(
-      `SELECT s.id, s.class_id, c.teacher_id FROM students s JOIN classes c ON c.id=s.class_id WHERE s.id=?`,
+      `SELECT s.id, s.class_id, s.name, s.dob, s.guardian_phone,
+              s.optional_subject, s.compulsory_subject, c.teacher_id
+       FROM students s JOIN classes c ON c.id=s.class_id WHERE s.id=?`,
       [req.params.id]);
     if (!stu) return res.status(404).json({ error: 'Student not found' });
     if (stu.teacher_id !== req.user.id) {
       return res.status(403).json({ error: 'কেবল নিজের class-এর শিক্ষার্থীর তথ্য edit করতে পারবেন।' });
     }
+    const studentErrors = validateStudent({
+      name: name === undefined ? stu.name : name,
+      dob: dob === undefined ? stu.dob : dob,
+      guardian_phone: guardian_phone === undefined ? stu.guardian_phone : guardian_phone,
+    });
+    if (studentErrors.length) return res.status(400).json({ error: studentErrors.join('; ') });
+    const curriculum = await validateStudentCurriculum(stu.class_id, {
+      optional_subject: optional_subject !== undefined ? optional_subject : stu.optional_subject,
+      compulsory_subject: compulsory_subject !== undefined ? compulsory_subject : stu.compulsory_subject,
+    }, { partial: optional_subject === undefined && compulsory_subject === undefined });
     const updates = [];
     const params = [];
     const set = (col, v) => { if (v !== undefined) { updates.push(col + '=?'); params.push(v === '' ? null : v); } };
@@ -1097,40 +1437,63 @@ router.put('/students/:id', async (req, res) => {
       if (!String(name).trim()) return res.status(400).json({ error: 'Name cannot be empty' });
       set('name', String(name).trim().slice(0, 100));
     }
-    set('dob', dob || null);
-    set('gender', gender || null);
-    set('religion', religion || null);
-    set('blood_group', blood_group || null);
-    set('phone', phone || null);
-    set('email', email || null);
-    set('guardian_name', guardian_name || null);
-    set('guardian_phone', guardian_phone || null);
-    set('guardian_email', guardian_email || null);
-    set('father_name', father_name || null);
-    set('mother_name', mother_name || null);
-    set('birth_cert_no', birth_cert_no || null);
-    set('address', address || null);
-    set('optional_subject', optional_subject || null);
-    if (receives_scholarship !== undefined) set('receives_scholarship', receives_scholarship === true || receives_scholarship === 1 ? 1 : 0);
+    if (dob !== undefined) set('dob', dob || null);
+    if (gender !== undefined) set('gender', normalizeGender(gender));
+    if (religion !== undefined) set('religion', canonicalReligion(religion));
+    if (blood_group !== undefined) set('blood_group', blood_group || null);
+    if (phone !== undefined) set('phone', phone || null);
+    if (email !== undefined) set('email', email || null);
+    if (guardian_name !== undefined) set('guardian_name', guardian_name || null);
+    if (guardian_phone !== undefined) set('guardian_phone', guardian_phone || null);
+    if (guardian_email !== undefined) set('guardian_email', guardian_email || null);
+    if (father_name !== undefined) set('father_name', father_name || null);
+    if (mother_name !== undefined) set('mother_name', mother_name || null);
+    if (birth_cert_no !== undefined) set('birth_cert_no', String(birth_cert_no).trim());
+    if (birth_cert_no !== undefined && String(birth_cert_no).trim()) {
+      updates.push('birth_cert_placeholder=FALSE');
+    }
+    if (address !== undefined) set('address', address || null);
+    if (optional_subject !== undefined || compulsory_subject !== undefined) {
+      set('optional_subject', curriculum.optional_subject || null);
+      set('compulsory_subject', curriculum.compulsory_subject || null);
+    }
+    if (receives_scholarship !== undefined) set('receives_scholarship', toDatabaseBoolean(receives_scholarship));
     if (!updates.length) return res.status(400).json({ error: 'Nothing to update' });
     params.push(req.params.id);
     await pool.query(`UPDATE students SET ${updates.join(', ')} WHERE id=?`, params);
-    await pool.query('INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)',
-      [req.user.id, 'student_edit', 'Class teacher edited student id ' + req.params.id]);
-    res.json({ ok: true });
+    let auditLogged = true;
+    try {
+      await pool.query('INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)',
+        [req.user.id, 'student_edit', 'Class teacher edited student id ' + req.params.id]);
+    } catch (err) {
+      auditLogged = false;
+      console.error('student_edit_audit_log_failed', err.code || err.name || 'unknown');
+    }
+    res.json({ ok: true, audit_logged: auditLogged });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
 // New admission (class-teacher only): 6-digit code auto-generated, roll auto = MAX(roll)+1.
 router.post('/students', async (req, res) => {
-  const { name, dob, roll, class_id, religion, guardian_id, guardian_name, guardian_phone, guardian_email, address, father_name, mother_name, birth_cert_no, gender, blood_group, optional_subject, phone, email, receives_scholarship } = req.body || {};
-  if (!name || !class_id) return res.status(400).json({ error: 'name and class_id required' });
+  const { name, dob, roll, class_id, religion, guardian_id, guardian_name, guardian_phone, guardian_email, address, father_name, mother_name, birth_cert_no, gender, blood_group, optional_subject, compulsory_subject, phone, email, receives_scholarship } = req.body || {};
+  const quickAdd = req.body?.quick_add === true || !String(name || '').trim();
+  if (!class_id || !String(birth_cert_no || '').trim() || (quickAdd && (!roll || !dob || !guardian_phone))) {
+    return res.status(400).json({ error: 'Quick add-এর জন্য roll, birth registration number, birthdate এবং guardian phone আবশ্যক।' });
+  }
+  if (quickAdd && (!Number.isInteger(Number(roll)) || Number(roll) < 1 || !/^\d{4}-\d{2}-\d{2}$/.test(String(dob)) ||
+      Number.isNaN(Date.parse(`${dob}T00:00:00Z`)) || new Date(`${dob}T00:00:00Z`).toISOString().slice(0, 10) !== String(dob) ||
+      String(guardian_phone).replace(/\D/g, '').length < 10)) {
+    return res.status(400).json({ error: 'Roll, date of birth অথবা guardian phone সঠিক নয়।' });
+  }
   try {
     const [[cls]] = await pool.query('SELECT id, name, teacher_id FROM classes WHERE id=?', [class_id]);
     if (!cls) return res.status(404).json({ error: 'Class not found' });
-    if (cls.teacher_id !== req.user.id) {
+    if (Number(cls.teacher_id) !== Number(req.user.id)) {
       return res.status(403).json({ error: 'কেবলমাত্র নির্ধারিত ক্লাস টিচারই নতুন শিক্ষার্থী ভর্তি করতে পারবেন।' });
     }
+    const curriculum = await validateStudentCurriculum(class_id, { compulsory_subject, optional_subject }, { partial: quickAdd });
+    const [[existingBirthCert]] = await pool.query('SELECT id,name FROM students WHERE birth_cert_no=? LIMIT 1', [String(birth_cert_no).trim()]);
+    if (existingBirthCert) return res.status(409).json({ error: `জন্মনিবন্ধন নম্বরটি ${existingBirthCert.name || 'অন্য শিক্ষার্থীর'} জন্য আছে।` });
     // Duplicate guard: same class + roll already admitted → 409 (idempotent).
     const dupRollNum = roll !== undefined && roll !== null && roll !== '' ? Number(roll) : 0;
     if (dupRollNum) {
@@ -1147,15 +1510,18 @@ router.post('/students', async (req, res) => {
     const [[rollRow]] = await pool.query('SELECT COALESCE(MAX(roll),0)+1 AS next_roll FROM students WHERE class_id=?', [class_id]);
     const effectiveRoll = roll !== undefined && roll !== null && roll !== '' ? Number(roll) : rollRow.next_roll;
     const code = await genStudentCode();
+    const studentName = String(name || '').trim() || `নতুন শিক্ষার্থী · Roll ${effectiveRoll}`;
+    const profileComplete = !quickAdd && ['name','religion','guardian_name','guardian_phone','father_name','mother_name','address','gender']
+      .every(k => String((req.body || {})[k] || '').trim());
     const [result] = await pool.query(
-      `INSERT INTO students (student_code, name, dob, roll, class_id, religion, guardian_id, guardian_name, guardian_phone, guardian_email, address, father_name, mother_name, birth_cert_no, gender, blood_group, optional_subject, phone, email, receives_scholarship)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [code, name, dob || null, effectiveRoll, class_id, religion || null, guardian_id || null, guardian_name || null, guardian_phone || null, guardian_email || null, address || null, father_name || null, mother_name || null, birth_cert_no || null, gender || null, blood_group || null, optional_subject || null, phone || null, email || null, receives_scholarship ? 1 : 0]
+      `INSERT INTO students (student_code, name, dob, roll, class_id, religion, guardian_id, guardian_name, guardian_phone, guardian_email, address, father_name, mother_name, birth_cert_no, gender, blood_group, optional_subject, compulsory_subject, phone, email, receives_scholarship, guardian_profile_locked_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [code, studentName, dob || null, effectiveRoll, class_id, canonicalReligion(religion), guardian_id || null, guardian_name || null, guardian_phone || null, guardian_email || null, address || null, father_name || null, mother_name || null, String(birth_cert_no).trim(), normalizeGender(gender), blood_group || null, curriculum.optional_subject || null, curriculum.compulsory_subject || null, phone || null, email || null, toDatabaseBoolean(receives_scholarship), profileComplete ? new Date() : null]
     );
     await autoAssignReligionSubjects(result.insertId, class_id, religion, req.user.id);
     await pool.query('INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)',
-      [req.user.id, 'student_register', 'Registered student ' + name + ' (' + code + ') in class ' + class_id + ' ' + (cls.name || '')]);
-    res.status(201).json({ id: result.insertId, student_code: code, roll: effectiveRoll });
+      [req.user.id, 'student_register', 'Registered student ' + studentName + ' (' + code + ') in class ' + class_id + ' ' + (cls.name || '')]);
+    res.status(201).json({ id: result.insertId, student_code: code, roll: effectiveRoll, profile_pending: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.code === 'ER_DUP_ENTRY' ? 'Duplicate roll in class' : 'Server error' });
@@ -1223,7 +1589,11 @@ router.get('/class-teacher-requests', async (req, res) => {
 router.get('/directory', async (req, res) => {
   try {
     const now = bangladeshNow();
-    const schoolDay = now.day >= 0 && now.day <= 4;
+    const requestedDay = req.query.day == null ? now.day : Number(req.query.day);
+    if (!Number.isInteger(requestedDay) || requestedDay < 0 || requestedDay > 6) {
+      return res.status(400).json({ error: 'day must be between 0 and 6' });
+    }
+    const schoolDay = requestedDay >= 0 && requestedDay <= 4;
     const [teachers] = await pool.query(
       "SELECT id, name, designation, phone FROM users WHERE role='teacher' AND active=1 ORDER BY (sort_order IS NULL), sort_order, name"
     );
@@ -1233,7 +1603,7 @@ router.get('/directory', async (req, res) => {
        FROM routines r JOIN time_slots ts ON r.time_slot_id = ts.id
        JOIN subjects s ON r.subject_id = s.id
        WHERE r.day = ? ORDER BY ts.slot_order`,
-      [now.day]
+      [requestedDay]
     );
     const [ctRows] = await pool.query(
       'SELECT teacher_id, COUNT(*) AS cnt FROM classes WHERE teacher_id IS NOT NULL GROUP BY teacher_id'
@@ -1249,13 +1619,14 @@ router.get('/directory', async (req, res) => {
         name: t.name,
         designation: t.designation || '',
         phone: t.phone || '',
-        free: schoolDay ? !current : true,
+        free: requestedDay === now.day && schoolDay ? !current : true,
+        busy_now: requestedDay === now.day && schoolDay ? !!current : false,
         current_class: current ? { subject_name: current.subject_name, slot_label: current.slot_label } : null,
         periods_today: mine.map(r => ({ slot_order: r.slot_order, slot_label: r.slot_label, subject_name: r.subject_name })),
         class_teacher_of: ctMap.get(t.id) || 0
       };
     });
-    res.json({ day: now.day, bd_time: now.time, teachers: out });
+    res.json({ day: requestedDay, today: now.day, bd_time: now.time, teachers: out });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -1264,14 +1635,16 @@ router.get('/classes/:id/guardians', async (req, res) => {
     const [cls] = await pool.query('SELECT id FROM classes WHERE id=? AND teacher_id=?', [req.params.id, req.user.id]);
     if (cls.length === 0) return res.status(403).json({ error: 'You are not the class teacher of this class' });
     const [rows] = await pool.query(
-      `SELECT s.id AS student_id, s.name AS student_name, s.roll, s.gender, s.religion, s.receives_scholarship,
+      `SELECT s.id AS student_id, s.name AS student_name, s.roll, s.dob, s.gender, s.religion,
+              s.receives_scholarship, s.father_name, s.mother_name, s.birth_cert_no,
+              s.birth_cert_placeholder, s.address,
               s.guardian_name, s.guardian_phone,
               g.username AS guardian_login
        FROM students s
        LEFT JOIN users g ON g.role='guardian' AND g.name = s.guardian_name
-       WHERE s.class_id=? ORDER BY s.roll`, [req.params.id]
+       WHERE s.class_id=? AND (s.status IS NULL OR s.status=?) ORDER BY s.roll`, [req.params.id, 'active']
     );
-    res.json(rows);
+    res.json(rows.map(row => ({ ...row, gender: normalizeGender(row.gender) })));
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -1773,14 +2146,15 @@ router.get('/complaints', async (req, res) => {
 router.post('/complaints', async (req, res) => {
   const { student_id, title, body, kind } = req.body || {};
   if (!student_id || !title || !body) return res.status(400).json({ error: 'student_id, title and body required' });
+  if (kind && kind !== 'complaint') return res.status(400).json({ error: 'শুধু written complaint পাঠানো যাবে।' });
   try {
     const [[stu]] = await pool.query(
       `SELECT s.id, s.guardian_id FROM students s JOIN classes c ON s.class_id = c.id
-       WHERE s.id=? AND (c.teacher_id=? OR s.class_id IN (SELECT class_id FROM subjects WHERE teacher_id=?))`,
-      [student_id, req.user.id, req.user.id]
+       WHERE s.id=? AND c.teacher_id=?`,
+      [student_id, req.user.id]
     );
-    if (!stu) return res.status(403).json({ error: 'This student is not in a class you teach' });
-    const type = kind === 'special' ? 'special' : 'complaint';
+    if (!stu) return res.status(403).json({ error: 'শুধু class teacher নিজের class-এর শিক্ষার্থীর written complaint পাঠাতে পারবেন।' });
+    const type = 'complaint';
     await pool.query(
       'INSERT INTO notifications (student_id, title, body, type, target_type, created_by) VALUES (?,?,?,?,?,?)',
       [student_id, title, body, type, 'students', req.user.id]
@@ -1969,9 +2343,32 @@ router.get('/attendance/today-summary', async (req, res) => {
 
 // Promotion review (READ-ONLY) for the CLASS TEACHER of the class.
 // Scientific rule enforced: ONLY the class teacher may drive promotions —
-// a subject teacher of the class sees nothing here. The class teacher sets
-// the grace limit (PUT /promotion/grace-limit, 0..11 failed subjects) and
-// reviews the auto-decisions; EXECUTION stays admin-only (2-key rule).
+// a subject teacher of the class sees nothing here. Grace follows the exact
+// subject selections made by Admin before publishing; execution stays admin-only.
+router.get('/promotion/events', async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT DISTINCT c.id AS class_id, c.name AS class_name,
+              c.section, c.group_name, ev.id AS event_id, ev.name,
+              ev.year AS event_year, ev.exam_kind
+         FROM classes c
+         JOIN exams x ON x.class_id=c.id
+         JOIN exam_events ev ON ev.id=x.event_id
+        WHERE c.teacher_id=? AND ev.is_published=1
+          AND (
+            (LOWER(c.name) LIKE '%class 10%' AND ev.exam_kind='test')
+            OR (LOWER(c.name) IN ('class 6', 'class 7', 'class 8', 'class 9')
+                AND ev.exam_kind='annual')
+          )
+        ORDER BY ev.year DESC, c.name, c.section, c.group_name, ev.id DESC`,
+      [req.user.id]);
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 router.get('/promotion/review', async (req, res) => {
   const cid = Number(req.query.class_id);
   const eid = Number(req.query.event_id);
@@ -2005,16 +2402,20 @@ router.get('/promotion/review', async (req, res) => {
       return res.status(400).json({ error: 'Event এখনো publish হয়নি — publish-এর পর promotion review করা যাবে।' });
     }
     const [[cls]] = await pool.query('SELECT id, name, group_name FROM classes WHERE id=?', [cid]);
-    // The review endpoint already gated class-teacher + annual/test + published;
-    // grace reads/writes the SAME rule the admin engine uses (shared key).
-    const graceKey = isClass10 ? 'test' : 'annual';
-    const [[grace]] = await pool.query(
-      'SELECT grace_failed FROM promotion_grace WHERE class_id=? AND exam_type=?', [cid, graceKey]);
-    const graceFailed = grace ? Number(grace.grace_failed) : 0;
+    // Match the Admin calculation and publish-time rule: grace is granted to
+    // selected mandatory subject families for this exact event and class.
+    const [graceRows] = await pool.query(
+      `SELECT sub.name FROM event_promotion_grace g
+         JOIN subjects sub ON sub.id=g.subject_id
+        WHERE g.event_id=? AND g.class_id=? ORDER BY sub.name`,
+      [eid, cid]);
+    const graceSubjects = [...new Set(graceRows.map(row => String(row.name || '').trim()).filter(Boolean))];
     const [students] = await pool.query(
       'SELECT id, name, student_code, roll FROM students WHERE class_id=? ORDER BY roll', [cid]);
     const [promos] = await pool.query(
-      `SELECT student_id, decision, promoted_roll FROM promotions WHERE event_id=? AND class_id=?`,
+      `SELECT student_id, decision, promoted_roll, to_class, to_section,
+              destination_session_id, created_at
+         FROM promotions WHERE event_id=? AND class_id=?`,
       [eid, cid]);
     const promoByStudent = {};
     promos.forEach(p => { promoByStudent[p.student_id] = p; });
@@ -2023,59 +2424,90 @@ router.get('/promotion/review', async (req, res) => {
     for (const s of students) {
       const r = await computeResult(s.id, eid);
       if (!r) continue;
-      const failedNames = (r.families || [])
-        .filter((f) => !f.is_optional && f.letter_grade === 'F')
-        .map((f) => f.subject);
-      const failCount = failedNames.length;
-      let decision = 'retained';
-      if (r.result_status !== 'ABSENT' && failCount === 0) decision = 'promoted';
-      else if (r.result_status !== 'ABSENT' && failCount <= graceFailed) decision = 'grace_promoted';
+      const outcome = decidePromotionByGrace({
+        families: r.families || [],
+        selectedSubjectNames: graceSubjects,
+        resultStatus: r.result_status,
+      });
+      const failedNames = outcome.failed;
+      const decision = outcome.decision;
       const done = promoByStudent[s.id];
       review.push({
         id: s.id, name: s.name, student_code: s.student_code, roll: s.roll,
         final_gpa: r.final_gpa, result_status: r.result_status,
-        fail_count: failCount, failed_subjects: failedNames, decision,
+        fail_count: failedNames.length, failed_subjects: failedNames,
+        grace_failed_subjects: outcome.graceFailed,
+        ungraced_failed_subjects: outcome.ungracedFailed,
+        grace_used: outcome.autoGrace, decision,
         executed: done ? done.decision : null,
         promoted_roll: done ? done.promoted_roll : null,
+        promoted_to_class: done ? done.to_class : null,
+        promoted_to_section: done ? done.to_section : null,
+        promotion_session_id: done ? done.destination_session_id : null,
+        promotion_recorded_at: done ? done.created_at : null,
       });
     }
     review.sort((a, b) => Number(b.final_gpa) - Number(a.final_gpa) || a.roll - b.roll);
-    res.json({ event: ev, class: cls, grace_failed: graceFailed, total: review.length, review });
+    res.json({
+      event: ev, class: cls, grace_subjects: graceSubjects,
+      total: review.length, review,
+    });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+// Class 9 group-approval queue is shared with the admin panel. Only a teacher
+// assigned to an actual Arts/Commerce/Science stream may review it.
+router.get('/group-approval', async (req, res) => {
+  try {
+    const [[access]] = await pool.query(
+      `SELECT id FROM classes WHERE name='Class 9' AND teacher_id=?
+         AND LOWER(COALESCE(group_name, '')) NOT LIKE '%pending%'
+         AND LOWER(COALESCE(section, '')) NOT LIKE '%pending%'
+         AND (LOWER(COALESCE(group_name, '')) LIKE '%arts%' OR LOWER(COALESCE(section, '')) LIKE '%arts%'
+           OR LOWER(COALESCE(group_name, '')) LIKE '%humanit%' OR LOWER(COALESCE(section, '')) LIKE '%humanit%'
+           OR LOWER(COALESCE(group_name, '')) LIKE '%commerce%' OR LOWER(COALESCE(section, '')) LIKE '%commerce%'
+           OR LOWER(COALESCE(group_name, '')) LIKE '%business%' OR LOWER(COALESCE(section, '')) LIKE '%business%'
+           OR LOWER(COALESCE(group_name, '')) LIKE '%science%' OR LOWER(COALESCE(section, '')) LIKE '%science%') LIMIT 1`, [req.user.id]);
+    if (!access) return res.status(403).json({ error: 'শুধু Class 9-এর Arts/Commerce/Science class teacher group approval দেখতে পারবেন।' });
+    res.json(await promoEngine.pendingGroupApprovals());
+  } catch (err) { console.error(err); res.status(err.status || 500).json({ error: err.message || 'Server error' }); }
+});
+
+router.post('/group-approval', async (req, res) => {
+  const { student_id, from_class_id, group, compulsory_subject, optional_subject } = req.body || {};
+  if (!student_id || !from_class_id || !group) return res.status(400).json({ error: 'student_id, from_class_id, group required' });
+  try {
+    const [[access]] = await pool.query(
+      `SELECT id FROM classes WHERE name='Class 9' AND teacher_id=?
+         AND LOWER(COALESCE(group_name, '')) NOT LIKE '%pending%'
+         AND LOWER(COALESCE(section, '')) NOT LIKE '%pending%'
+         AND (LOWER(COALESCE(group_name, '')) LIKE '%arts%' OR LOWER(COALESCE(section, '')) LIKE '%arts%'
+           OR LOWER(COALESCE(group_name, '')) LIKE '%humanit%' OR LOWER(COALESCE(section, '')) LIKE '%humanit%'
+           OR LOWER(COALESCE(group_name, '')) LIKE '%commerce%' OR LOWER(COALESCE(section, '')) LIKE '%commerce%'
+           OR LOWER(COALESCE(group_name, '')) LIKE '%business%' OR LOWER(COALESCE(section, '')) LIKE '%business%'
+           OR LOWER(COALESCE(group_name, '')) LIKE '%science%' OR LOWER(COALESCE(section, '')) LIKE '%science%') LIMIT 1`, [req.user.id]);
+    if (!access) return res.status(403).json({ error: 'শুধু Class 9-এর class teacher group approval দিতে পারবেন।' });
+    const dest = await promoEngine.assignGroup(Number(student_id), Number(from_class_id), group, req.user.id, { compulsory_subject, optional_subject });
+    await pool.query('INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)',
+      [req.user.id, 'group_assign_teacher', `Student ${student_id} -> ${group}`]);
+    res.json({ ok: true, to_class_id: dest.id, group: dest.group_name, roll: dest.roll });
+  } catch (err) { console.error(err); res.status(err.status || 500).json({ error: err.message || 'Server error' }); }
 });
 
 // Class-teacher grace control: "কত বিষয় পর্যন্ত fail হলেও শর্তসাপেক্ষে
 // promotion" — 0..11. Same shared rule the admin engine reads, so both panels
 // can never disagree (single source of truth). Class-teacher-only.
 router.put('/promotion/grace-limit', async (req, res) => {
-  const cid = Number(req.body && req.body.class_id);
-  const g = Number(req.body && req.body.grace_failed);
-  if (!cid || !Number.isInteger(g) || g < 0 || g > 11) {
-    return res.status(400).json({ error: 'class_id and grace_failed (0..11) required' });
-  }
-  try {
-    const [[mine]] = await pool.query(
-      'SELECT id, name FROM classes WHERE id=? AND teacher_id=?', [cid, req.user.id]);
-    if (!mine) {
-      return res.status(403).json({ error: 'শুধু ওই class-এর class teacher grace limit বসাতে পারেন।' });
-    }
-    const needKind = /class\s*10/i.test(String(mine.name || '')) ? 'test' : 'annual';
-    await pool.query(
-      `INSERT INTO promotion_grace (class_id, exam_type, grace_failed, notes)
-       VALUES (?,?,?,?)
-       ON CONFLICT (class_id, exam_type) DO UPDATE SET grace_failed=EXCLUDED.grace_failed, notes=EXCLUDED.notes, updated_at=NOW()`,
-      [cid, needKind, g, `set by class teacher ${req.user.name || req.user.id}`]);
-    await pool.query('INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)',
-      [req.user.id, 'promote_grace_ct', `Class teacher set grace=${g} for class ${cid} (${needKind})`]);
-    res.json({ ok: true, class_id: cid, exam_type: needKind, grace_failed: g });
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+  res.status(410).json({
+    error: 'Grace এখন event ও subject অনুযায়ী Admin ফলাফল প্রকাশের আগে নির্ধারণ করেন।',
+  });
 });
 
 // =====================================================================
 // EXAM COVERAGE + MARK EDIT REQUESTS + EVENT RESULTS + SEAT/ADMIT PDFs
 // - Coverage: কতজন student-এর number entry হয়েছে / কত subject-এর number
 //   add হয়েছে — class teacher teacher-app থেকে দেখে।
-// - ৫ ঘণ্টা পার হলে re-edit শুধু admin অনুমতিতে: teacher request পাঠায়।
+// - Submitted marks re-entry: teacher requests, admin approves the full sheet.
 // - Event result: নিজের class-এর student-wise result (admin-created বা
 //   self-created — উভয় exam-এর)।
 // - Seat plan + admit card PDF: admin-created exam-এর জন্য class teacher
@@ -2094,6 +2526,9 @@ router.get('/exams/:id/coverage', async (req, res) => {
        FROM students s LEFT JOIN marks m ON m.student_id=s.id AND m.exam_id=?
        WHERE s.class_id=? ORDER BY s.roll`,
       [req.params.id, exam.class_id]);
+    const editable = !['submitted', 'approved'].includes(String(exam.entry_status)) &&
+      exam.status !== 'published';
+    rows.forEach(row => { row.editable = editable; });
     const entered = rows.filter(r => r.mark_id != null);
     res.json({
       exam_id: exam.id, student_count: rows.length,
@@ -2328,8 +2763,8 @@ router.get('/current-exam', async (req, res) => {
                 (SELECT COUNT(*) FROM marks m JOIN exams x ON x.id=m.exam_id
                   WHERE x.event_id=? AND x.class_id=? AND x.subject_id=sub.id) AS entered_count
          FROM subjects sub LEFT JOIN users u ON u.id=sub.teacher_id
-         WHERE sub.class_id=? ORDER BY sub.name`,
-        [req.user.id, ev.id, c.class_id, ev.id, c.class_id, ev.id, c.class_id, ev.id, c.class_id, ev.id, c.class_id, c.class_id]);
+         WHERE sub.class_id=? AND EXISTS (SELECT 1 FROM exams active WHERE active.event_id=? AND active.class_id=sub.class_id AND active.subject_id=sub.id AND active.entry_open=1 AND active.status<>'published') ORDER BY sub.name`,
+        [req.user.id, ev.id, c.class_id, ev.id, c.class_id, ev.id, c.class_id, ev.id, c.class_id, ev.id, c.class_id, c.class_id, ev.id]);
       c.subjects = subs.map(s => ({
         ...s,
         is_mine: Number(s.is_mine) === 1,
@@ -2356,8 +2791,14 @@ router.get('/events', async (req, res) => {
        LEFT JOIN sessions s ON s.id=e.session_id
        JOIN exams x ON x.event_id=e.id
        LEFT JOIN classes c ON c.id=x.class_id
-       WHERE (c.teacher_id=? OR x.created_by=? OR EXISTS(SELECT 1 FROM subjects sub WHERE sub.class_id=c.id AND sub.teacher_id=?))
+        WHERE (c.teacher_id=? OR x.created_by=? OR EXISTS(SELECT 1 FROM subjects sub WHERE sub.class_id=c.id AND sub.teacher_id=?))
          AND e.is_published = ?
+          AND (e.exam_kind <> 'special_model_test' OR EXISTS(
+            SELECT 1 FROM students eligible JOIN promotions mp ON mp.student_id=eligible.id
+            JOIN exam_events src ON src.id=mp.event_id
+            WHERE eligible.class_id=c.id AND eligible.session_id=e.session_id
+              AND mp.destination_session_id=e.session_id AND mp.decision='promoted'
+              AND src.exam_kind='test' AND src.year=e.year-1))
          AND EXISTS(
                   SELECT 1 FROM exams ex
                   WHERE ex.event_id = e.id
@@ -2379,36 +2820,43 @@ router.get('/events', async (req, res) => {
         if (ev.class_ids) {
           let cids = typeof ev.class_ids === 'string' ? JSON.parse(ev.class_ids) : ev.class_ids;
           if (Array.isArray(cids) && cids.length) {
-            classFilter = `AND c.id IN (${cids.map(()=>'?').join(',')})`;
-            for (const cid of cids) params.push(cid);
+            const classScope = inClause('c.id', cids);
+            classFilter = `AND ${classScope.sql}`;
+            params.push(...classScope.params);
           }
         }
       } catch(e){}
       const [cls] = await pool.query(
         `SELECT DISTINCT c.id AS class_id, c.name AS class_name, c.section, c.group_name,
-          (SELECT COUNT(*) FROM students st WHERE st.class_id=c.id) AS student_count,
-          (SELECT COUNT(DISTINCT m.student_id) FROM marks m JOIN exams xx ON xx.id=m.exam_id WHERE xx.event_id=? AND xx.class_id=c.id) AS students_with_marks,
-          (SELECT COUNT(DISTINCT xx.subject_id) FROM exams xx JOIN marks m ON m.exam_id=xx.id WHERE xx.event_id=? AND xx.class_id=c.id) AS subjects_with_marks,
+          (SELECT COUNT(*) FROM students st WHERE st.class_id=c.id AND (evt.exam_kind<>'special_model_test' OR (st.session_id=evt.session_id AND EXISTS (SELECT 1 FROM promotions mp JOIN exam_events src ON src.id=mp.event_id WHERE mp.student_id=st.id AND mp.destination_session_id=evt.session_id AND mp.decision='promoted' AND src.exam_kind='test' AND src.year=evt.year-1)))) AS student_count,
+          (SELECT COUNT(DISTINCT m.student_id) FROM marks m JOIN exams xx ON xx.id=m.exam_id JOIN students st ON st.id=m.student_id WHERE xx.event_id=? AND xx.class_id=c.id AND (evt.exam_kind<>'special_model_test' OR (st.session_id=evt.session_id AND EXISTS (SELECT 1 FROM promotions mp JOIN exam_events src ON src.id=mp.event_id WHERE mp.student_id=st.id AND mp.destination_session_id=evt.session_id AND mp.decision='promoted' AND src.exam_kind='test' AND src.year=evt.year-1)))) AS students_with_marks,
+          (SELECT COUNT(DISTINCT xx.subject_id) FROM exams xx JOIN marks m ON m.exam_id=xx.id JOIN students st ON st.id=m.student_id WHERE xx.event_id=? AND xx.class_id=c.id AND (evt.exam_kind<>'special_model_test' OR (st.session_id=evt.session_id AND EXISTS (SELECT 1 FROM promotions mp JOIN exam_events src ON src.id=mp.event_id WHERE mp.student_id=st.id AND mp.destination_session_id=evt.session_id AND mp.decision='promoted' AND src.exam_kind='test' AND src.year=evt.year-1)))) AS subjects_with_marks,
           (SELECT COUNT(*) FROM exams xx WHERE xx.event_id=? AND xx.class_id=c.id) AS subject_count
-         FROM exams x JOIN classes c ON c.id=x.class_id
+          FROM exams x JOIN classes c ON c.id=x.class_id JOIN exam_events evt ON evt.id=x.event_id
          WHERE x.event_id=? AND (c.teacher_id=? OR x.created_by=? OR EXISTS(SELECT 1 FROM subjects sub WHERE sub.class_id=c.id AND sub.teacher_id=?)) ${classFilter}
+            AND (evt.exam_kind<>'special_model_test' OR EXISTS (SELECT 1 FROM students eligible JOIN promotions mp ON mp.student_id=eligible.id JOIN exam_events src ON src.id=mp.event_id WHERE eligible.class_id=c.id AND eligible.session_id=evt.session_id AND mp.destination_session_id=evt.session_id AND mp.decision='promoted' AND src.exam_kind='test' AND src.year=evt.year-1))
          ORDER BY c.name, c.section, c.group_name`,
         [ev.id, ev.id, ev.id, ev.id, req.user.id, req.user.id, req.user.id, ...params.slice(6)]);
       for (const c of cls) {
+        const routineSubjectScope = routineSubjectScopeSql();
         const [subs] = await pool.query(
           `SELECT sub.name AS subject_name, sub.full_marks, sub.teacher_id,
                   (u.name) AS subject_teacher_name, x.id AS exam_id, x.status,
+                  CASE WHEN ${routineSubjectScope} THEN 1 ELSE 0 END AS routine_teacher,
                   (SELECT COUNT(*) FROM marks m WHERE m.exam_id=x.id) AS entered_count
            FROM exams x JOIN subjects sub ON sub.id=x.subject_id
            LEFT JOIN users u ON u.id=sub.teacher_id
-           WHERE x.event_id=? AND x.class_id=? ORDER BY sub.name`,
-          [ev.id, c.class_id]);
+           JOIN classes c ON c.id=x.class_id
+           WHERE x.event_id=? AND x.class_id=?
+             AND (x.created_by=? OR ${routineSubjectScope})
+           ORDER BY sub.name`,
+          [req.user.id, ev.id, c.class_id, req.user.id, req.user.id]);
         c.subjects = subs.map(s => ({
           ...s,
-          is_mine: Number(s.teacher_id) === Number(req.user.id),
+          is_mine: Number(s.routine_teacher) === 1,
         }));
       }
-      ev.my_classes = cls;
+      ev.my_classes = cls.filter(c => c.subjects.length > 0);
     }
     res.json(events.filter(e => e.my_classes && e.my_classes.length));
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
@@ -2426,6 +2874,15 @@ async function teacherEventClassAccess(eventId, classId, userId) {
   if (!ev) return { error: 'Event not found', status: 404 };
   const [[cls]] = await pool.query('SELECT id, name, section, group_name, teacher_id FROM classes WHERE id=?', [classId]);
   if (!cls) return { error: 'Class not found', status: 404 };
+  if (ev.exam_kind === 'special_model_test') {
+    const [[eligible]] = await pool.query(
+      `SELECT s.id FROM students s JOIN promotions mp ON mp.student_id=s.id
+       JOIN exam_events src ON src.id=mp.event_id
+       WHERE s.class_id=? AND s.session_id=? AND mp.destination_session_id=? AND mp.decision='promoted'
+         AND src.exam_kind='test' AND src.year=? LIMIT 1`,
+      [classId, ev.session_id, ev.session_id, Number(ev.year) - 1]);
+    if (!eligible) return { error: 'এই Special Model Test-এ promoted student নেই', status: 404 };
+  }
   const [[mine]] = await pool.query('SELECT id FROM classes WHERE id=? AND teacher_id=?', [classId, userId]);
   const [[created]] = await pool.query(
     'SELECT id FROM exams WHERE event_id=? AND class_id=? AND created_by=? LIMIT 1', [eventId, classId, userId]);
@@ -2452,7 +2909,7 @@ async function marksForSubjects(classId, eventId, subjectIds) {
      FROM marks m
      JOIN exams e ON m.exam_id = e.id
      JOIN subjects sub ON e.subject_id = sub.id
-     WHERE e.event_id = ? AND e.class_id = ?
+       WHERE e.event_id = ? AND e.class_id = ? AND (e.entry_open=1 OR e.status='published')
        AND ${scope.sql}
      ORDER BY m.student_id`,
     [eventId, classId, ...scope.params]);
@@ -2470,15 +2927,20 @@ router.get('/events/:id/result', async (req, res) => {
   try {
     const acc = await teacherEventClassAccess(req.params.id, classId, req.user.id);
     if (acc.error) return res.status(acc.status).json({ error: acc.error });
+    const isModelTest = acc.ev.exam_kind === 'special_model_test';
+    // Full identity fields stay limited to class-wide result access. A subject
+    // teacher receives only the same basic identity fields as before.
+    const transcriptFields = acc.scoped ? '' : ', s.father_name, s.mother_name, s.dob, s.birth_cert_no';
     const [students] = await pool.query(
-      'SELECT id, name, roll, student_code FROM students WHERE class_id=? ORDER BY roll', [classId]);
+      `SELECT s.id, s.name, s.roll, s.student_code${transcriptFields} FROM students s WHERE s.class_id=?${isModelTest ? ` AND s.session_id=? AND EXISTS (SELECT 1 FROM promotions mp JOIN exam_events src ON src.id=mp.event_id WHERE mp.student_id=s.id AND mp.destination_session_id=? AND mp.decision='promoted' AND src.exam_kind='test' AND src.year=?)` : ''} ORDER BY s.roll`,
+      isModelTest ? [classId, acc.ev.session_id, acc.ev.session_id, Number(acc.ev.year) - 1] : [classId]);
     // Subject teachers only ever see their own subject(s).
     const subjScope = inClause('x.subject_id', acc.scoped ? acc.subjectIds : []);
     const [subjRows] = await pool.query(
       `SELECT x.id AS exam_id, sub.name AS subject_name,
         (SELECT COUNT(*) FROM marks m WHERE m.exam_id=x.id) AS entered_count
        FROM exams x JOIN subjects sub ON sub.id=x.subject_id
-       WHERE x.event_id=? AND x.class_id=?${acc.scoped ? ' AND ' + subjScope.sql : ''} ORDER BY sub.name`,
+       WHERE x.event_id=? AND x.class_id=? AND (x.entry_open=1 OR x.status='published')${acc.scoped ? ' AND ' + subjScope.sql : ''} ORDER BY sub.name`,
       [req.params.id, classId, ...(acc.scoped ? subjScope.params : [])]);
     const rows = [];
     const famSet = new Set();
@@ -2539,6 +3001,13 @@ router.get('/events/:id/result', async (req, res) => {
           (Number(b.fourth_score || 0) - Number(a.fourth_score || 0)) ||
           (Number(a.roll) - Number(b.roll)))
         .forEach((r, i) => { r.position = i + 1; });
+      for (const row of rows) {
+        row.activities = await loadStudentActivities(pool, {
+          studentId: row.id, classId, eventId: Number(req.params.id),
+          year: acc.ev.year, to: acc.ev.result_date || acc.ev.exam_date || dhakaToday(),
+        });
+        row.activity_period = { from: row.activities.from, to: row.activities.to };
+      }
     }
     const withResult = acc.scoped
       ? rows.filter(r => Object.keys(r.families || {}).length > 0).length
@@ -2556,6 +3025,21 @@ router.get('/events/:id/result', async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
+// Optional marksheet metadata is fetched only when a class teacher exports a
+// full result PDF; ordinary result-table reads avoid signature storage I/O.
+router.get('/events/:id/result-pdf-metadata', async (req, res) => {
+  const classId = Number(req.query.class_id);
+  if (!classId) return res.status(400).json({ error: 'class_id required' });
+  try {
+    const acc = await teacherEventClassAccess(req.params.id, classId, req.user.id);
+    if (acc.error) return res.status(acc.status).json({ error: acc.error });
+    if (acc.scoped) return res.status(403).json({ error: 'শুধু class teacher পূর্ণ marksheet export করতে পারবেন' });
+    let signatures = {};
+    try { signatures = await getClassSignatories(classId); } catch (_) { /* optional */ }
+    res.json({ settings: await schoolSettings(), signatures });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
 // Event coverage for one class (numbers for the teacher dashboard chips).
 router.get('/events/:id/coverage', async (req, res) => {
   const classId = Number(req.query.class_id);
@@ -2568,13 +3052,13 @@ router.get('/events/:id/coverage', async (req, res) => {
     const covSql = acc.scoped ? ' AND ' + covScope.sql : '';
     const covParams = acc.scoped ? covScope.params : [];
     const [[wm]] = await pool.query(
-      `SELECT COUNT(DISTINCT m.student_id) AS c FROM marks m JOIN exams x ON x.id=m.exam_id WHERE x.event_id=? AND x.class_id=?${covSql}`,
+      `SELECT COUNT(DISTINCT m.student_id) AS c FROM marks m JOIN exams x ON x.id=m.exam_id WHERE x.event_id=? AND x.class_id=? AND (x.entry_open=1 OR x.status='published')${covSql}`,
       [req.params.id, classId, ...covParams]);
     const [subj] = await pool.query(
       `SELECT x.id AS exam_id, sub.name AS subject_name, x.status, x.source,
         (SELECT COUNT(*) FROM marks m WHERE m.exam_id=x.id) AS entered_count
        FROM exams x JOIN subjects sub ON sub.id=x.subject_id
-       WHERE x.event_id=? AND x.class_id=?${covSql} ORDER BY sub.name`,
+       WHERE x.event_id=? AND x.class_id=? AND (x.entry_open=1 OR x.status='published')${covSql} ORDER BY sub.name`,
       [req.params.id, classId, ...covParams]);
     res.json({
       event: acc.ev, class: acc.cls,
@@ -2598,24 +3082,36 @@ router.get('/events/:id/entry-subjects', async (req, res) => {
     }
     const [[cls]] = await pool.query('SELECT id, name, section, group_name, teacher_id FROM classes WHERE id=?', [classId]);
     if (!cls) return res.status(404).json({ error: 'Class not found' });
-    const [[mine]] = await pool.query('SELECT id FROM classes WHERE id=? AND teacher_id=?', [classId, req.user.id]);
-    const [[teaches]] = await pool.query('SELECT id FROM subjects WHERE class_id=? AND teacher_id=? LIMIT 1', [classId, req.user.id]);
-    if (!mine && !teaches) return res.status(403).json({ error: 'এই class আপনার নয়' });
+    const routineSubjectScope = routineSubjectScopeSql();
+    const [[routineAssignment]] = await pool.query(
+      `SELECT sub.id FROM subjects sub JOIN classes c ON c.id=sub.class_id
+       WHERE c.id=? AND ${routineSubjectScope} LIMIT 1`,
+      [classId, req.user.id]);
+    if (!routineAssignment) return res.status(403).json({ error: 'এই class-এর কোনো subject আপনার routine-এ নেই' });
+    const modelStudentPredicate = ev.exam_kind === 'special_model_test'
+      ? `(s.session_id=${Number(ev.session_id)} AND EXISTS (
+          SELECT 1 FROM promotions mp JOIN exam_events src ON src.id=mp.event_id
+          WHERE mp.student_id=s.id AND mp.destination_session_id=${Number(ev.session_id)}
+            AND mp.decision='promoted' AND src.exam_kind='test' AND src.year=${Number(ev.year) - 1}))`
+      : '1=1';
     const [subs] = await pool.query(
       `SELECT sub.id AS subject_id, sub.name AS subject_name, sub.full_marks, sub.teacher_id,
               sub.cq_full, sub.mcq_full, sub.practical_full, sub.written_full, sub.ca_full,
               u.name AS subject_teacher_name,
-              (sub.teacher_id = ?) AS is_mine,
+              CASE WHEN ${routineSubjectScope} THEN 1 ELSE 0 END AS is_mine,
               (SELECT x.id FROM exams x WHERE x.event_id=? AND x.class_id=? AND x.subject_id=sub.id LIMIT 1) AS exam_id,
               (SELECT x.status FROM exams x WHERE x.event_id=? AND x.class_id=? AND x.subject_id=sub.id LIMIT 1) AS exam_status,
               (SELECT x.entry_open FROM exams x WHERE x.event_id=? AND x.class_id=? AND x.subject_id=sub.id LIMIT 1) AS exam_entry_open,
               (SELECT x.entry_deadline FROM exams x WHERE x.event_id=? AND x.class_id=? AND x.subject_id=sub.id LIMIT 1) AS exam_entry_deadline,
-              (SELECT COUNT(*) FROM marks m JOIN exams x ON x.id=m.exam_id
-                WHERE x.event_id=? AND x.class_id=? AND x.subject_id=sub.id) AS entered_count,
-              (SELECT COUNT(*) FROM students s WHERE s.class_id=?) AS student_count
+               (SELECT COUNT(*) FROM marks m JOIN exams x ON x.id=m.exam_id JOIN students s ON s.id=m.student_id
+                 WHERE x.event_id=? AND x.class_id=? AND x.subject_id=sub.id AND ${modelStudentPredicate}) AS entered_count,
+               (SELECT COUNT(*) FROM students s WHERE s.class_id=? AND ${modelStudentPredicate}) AS student_count
        FROM subjects sub LEFT JOIN users u ON u.id=sub.teacher_id
-       WHERE sub.class_id=? ORDER BY sub.name`,
-      [req.user.id, req.params.id, classId, req.params.id, classId, req.params.id, classId, req.params.id, classId, req.params.id, classId, classId, classId]);
+       JOIN classes c ON c.id=sub.class_id
+       WHERE sub.class_id=? AND ${routineSubjectScope}
+         AND EXISTS (SELECT 1 FROM exams active WHERE active.event_id=? AND active.class_id=sub.class_id AND active.subject_id=sub.id AND active.entry_open=1 AND active.status<>'published')
+       ORDER BY sub.name`,
+      [req.user.id, req.params.id, classId, req.params.id, classId, req.params.id, classId, req.params.id, classId, req.params.id, classId, classId, classId, req.user.id, req.params.id]);
     const rows = subs.map(s => ({
       ...s,
       is_mine: Number(s.is_mine) === 1,
@@ -2664,11 +3160,14 @@ router.post('/events/:id/marks', async (req, res) => {
     if (!sub || Number(sub.class_id) !== Number(class_id)) {
       return res.status(400).json({ error: 'subject does not belong to the class' });
     }
-    const [[cls]] = await pool.query('SELECT id, teacher_id FROM classes WHERE id=?', [class_id]);
+    const [[cls]] = await pool.query('SELECT id FROM classes WHERE id=?', [class_id]);
     if (!cls) return res.status(404).json({ error: 'Class not found' });
-    const isSubjectTeacher = Number(sub.teacher_id) === Number(req.user.id);
-    const isClassTeacher = Number(cls.teacher_id) === Number(req.user.id);
-    if (!isSubjectTeacher && !isClassTeacher) {
+    const routineSubjectScope = routineSubjectScopeSql();
+    const [[routineAssignment]] = await pool.query(
+      `SELECT sub.id FROM subjects sub JOIN classes c ON c.id=sub.class_id
+       WHERE sub.id=? AND c.id=? AND ${routineSubjectScope} LIMIT 1`,
+      [subject_id, class_id, req.user.id]);
+    if (!routineAssignment) {
       return res.status(403).json({ error: 'এই subject আপনার নয়' });
     }
     // find-or-create the subject-exam row

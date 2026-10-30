@@ -109,16 +109,80 @@ class ExamsScreenState extends State<ExamsScreen> {
       final id = _asInt(e['class_id']);
       if (id != null) byId.putIfAbsent(id, () => e);
     }
-    return byId.values.toList();
+    final classes = byId.values.toList();
+    classes.sort((a, b) {
+      final nameCompare = '${a['class_name'] ?? ''}'.compareTo(
+        '${b['class_name'] ?? ''}',
+      );
+      if (nameCompare != 0) return nameCompare;
+      return '${a['section'] ?? ''}'.compareTo('${b['section'] ?? ''}');
+    });
+    return classes;
   }
 
   List<Map<String, dynamic>> get _visibleExams => _selectedClassId == null
       ? _exams
       : _exams.where((e) => _asInt(e['class_id']) == _selectedClassId).toList();
 
+  /// Groups the visible exams by their session (exam event year), newest /
+  /// active session first. Teacher-created tests without an event fall into a
+  /// single "সাধারণ পরীক্ষা" bucket at the bottom.
+  List<_ExamSessionGroup> get _sessionGroups {
+    final byKey = <String, _ExamSessionGroup>{};
+    for (final e in _visibleExams) {
+      final sid = _asInt(e['session_id']);
+      final name = '${e['session_name'] ?? ''}'.trim();
+      final year = '${e['event_year'] ?? ''}'.trim();
+      final key = sid != null
+          ? 'id:$sid'
+          : (name.isNotEmpty ? 'name:$name' : 'none');
+      final group = byKey.putIfAbsent(
+        key,
+        () => _ExamSessionGroup(
+          name: name,
+          year: year,
+          isActive: _flag(e['session_active']),
+          isNone: sid == null && name.isEmpty && year.isEmpty,
+        ),
+      );
+      group.exams.add(e);
+    }
+    final groups = byKey.values.toList();
+    groups.sort((a, b) {
+      if (a.isNone != b.isNone) return a.isNone ? 1 : -1;
+      if (a.isActive != b.isActive) return a.isActive ? -1 : 1;
+      final ai = int.tryParse(a.name);
+      final bi = int.tryParse(b.name);
+      if (ai != null && bi != null && ai != bi) return bi.compareTo(ai);
+      return b.name.compareTo(a.name);
+    });
+    for (final group in groups) {
+      group.exams.sort((a, b) {
+        final classCompare = '${a['class_name'] ?? ''}'.compareTo(
+          '${b['class_name'] ?? ''}',
+        );
+        if (classCompare != 0) return classCompare;
+        final sectionCompare = '${a['section'] ?? ''}'.compareTo(
+          '${b['section'] ?? ''}',
+        );
+        if (sectionCompare != 0) return sectionCompare;
+        return '${a['subject_name'] ?? ''}'.compareTo(
+          '${b['subject_name'] ?? ''}',
+        );
+      });
+    }
+    return groups;
+  }
+
   String _classLabel(Map<String, dynamic> e) {
-    final group = e['group_name'] ?? e['section'];
-    return '${e['class_name'] ?? 'Class'}${group == null || '$group'.isEmpty ? '' : ' • $group'}';
+    final className = '${e['class_name'] ?? 'Class'}';
+    final section = '${e['section'] ?? ''}'.trim();
+    final group = '${e['group_name'] ?? ''}'.trim();
+    final parts = <String>[
+      if (section.isNotEmpty) section,
+      if (group.isNotEmpty && group != section) group,
+    ];
+    return parts.isEmpty ? className : '$className • ${parts.join(' • ')}';
   }
 
   bool _canEnter(Map<String, dynamic> e) =>
@@ -174,9 +238,15 @@ class ExamsScreenState extends State<ExamsScreen> {
   Widget build(BuildContext context) {
     final visible = _visibleExams;
     final classOptions = _classes;
+    final groups = _sessionGroups;
+    // Old cached payloads (or data before session columns existed) contain no
+    // session info at all — keep the flat list instead of one giant "unknown"
+    // banner in that case.
+    final showSessionBanners =
+        groups.isNotEmpty && !(groups.length == 1 && groups.first.isNone);
     return Scaffold(
       appBar: AppBar(
-        title: const Text('নম্বর দিন'),
+        title: const Text('Marks entry'),
         actions: [
           IconButton(
             tooltip: 'Refresh',
@@ -220,7 +290,7 @@ class ExamsScreenState extends State<ExamsScreen> {
               child: ListView(
                 padding: const EdgeInsets.fromLTRB(16, 14, 16, 28),
                 children: [
-                  _premiumHeader(visible.length),
+                  _premiumHeader(visible.length, sessions: groups.length),
                   const SizedBox(height: 18),
                   Row(
                     children: [
@@ -239,7 +309,7 @@ class ExamsScreenState extends State<ExamsScreen> {
                   ),
                   const SizedBox(height: 5),
                   Text(
-                    'Class বেছে নিন, তারপর subject খুলে শিক্ষার্থীদের নম্বর দিন।',
+                    'Session অনুযায়ী সাজানো — class বেছে নিন, তারপর subject খুলে নম্বর দিন।',
                     style: TextStyle(
                       fontSize: 12.5,
                       color: Colors.blueGrey.shade600,
@@ -252,15 +322,21 @@ class ExamsScreenState extends State<ExamsScreen> {
                   if (classOptions.isNotEmpty) const SizedBox(height: 10),
                   if (visible.isEmpty)
                     _emptyState()
+                  else if (!showSessionBanners)
+                    ...visible.map(_examTile)
                   else
-                    ...visible.map(_examTile),
+                    for (var i = 0; i < groups.length; i++) ...[
+                      _sessionBanner(groups[i], _paletteFor(i)),
+                      ..._groupTiles(groups[i], _paletteFor(i)),
+                      if (i != groups.length - 1) const SizedBox(height: 8),
+                    ],
                 ],
               ),
             ),
     );
   }
 
-  Widget _premiumHeader(int count) => Container(
+  Widget _premiumHeader(int count, {int sessions = 0}) => Container(
     clipBehavior: Clip.antiAlias,
     decoration: BoxDecoration(
       gradient: const LinearGradient(
@@ -341,7 +417,9 @@ class ExamsScreenState extends State<ExamsScreen> {
                     Text(
                       count == 0
                           ? 'এখন কোনো খোলা পরীক্ষা নেই'
-                          : '$count টি খোলা exam • আপনার অনুমোদিত class ও subject',
+                          : '$count টি খোলা exam'
+                                '${sessions > 1 ? ' • $sessions টি session' : ''}'
+                                ' • আপনার অনুমোদিত class ও subject',
                       style: TextStyle(
                         color: Colors.white.withValues(alpha: .78),
                         fontSize: 12,
@@ -386,6 +464,247 @@ class ExamsScreenState extends State<ExamsScreen> {
                 ),
               ),
             ],
+          ),
+        ),
+      ],
+    ),
+  );
+
+  static const List<List<Color>> _sessionPalettes = [
+    [Color(0xFF0B6B4F), Color(0xFF14A97A)],
+    [Color(0xFF5B2A86), Color(0xFF8B5CF6)],
+    [Color(0xFF9A4A08), Color(0xFFE09A2D)],
+    [Color(0xFF8A1C4A), Color(0xFFD45C8A)],
+    [Color(0xFF1D4ED8), Color(0xFF60A5FA)],
+    [Color(0xFF334155), Color(0xFF64748B)],
+  ];
+
+  List<Color> _paletteFor(int index) =>
+      _sessionPalettes[index % _sessionPalettes.length];
+
+  Widget _bubble(double size, double opacity) => Container(
+    width: size,
+    height: size,
+    decoration: BoxDecoration(
+      shape: BoxShape.circle,
+      color: Colors.white.withValues(alpha: opacity),
+    ),
+  );
+
+  Widget _sessionBanner(_ExamSessionGroup group, List<Color> palette) {
+    final classCount = group.exams
+        .map((e) => _asInt(e['class_id']))
+        .whereType<int>()
+        .toSet()
+        .length;
+    final openCount = group.exams.where(_canEnter).length;
+    final yearNote =
+        group.year.isNotEmpty &&
+            group.name.isNotEmpty &&
+            group.year != group.name
+        ? ' • বছর ${group.year}'
+        : '';
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: palette,
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: palette.last.withValues(alpha: .24),
+            blurRadius: 16,
+            offset: const Offset(0, 7),
+          ),
+        ],
+      ),
+      child: Stack(
+        children: [
+          Positioned(right: -28, top: -38, child: _bubble(126, .09)),
+          Positioned(left: -22, bottom: -52, child: _bubble(112, .07)),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(15, 14, 14, 14),
+            child: Row(
+              children: [
+                Container(
+                  width: 45,
+                  height: 45,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: .16),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: Colors.white.withValues(alpha: .22),
+                    ),
+                  ),
+                  child: const Icon(
+                    Icons.calendar_month_rounded,
+                    color: Colors.white,
+                    size: 24,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              group.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 15.5,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: -.2,
+                              ),
+                            ),
+                          ),
+                          if (group.isActive) ...[
+                            const SizedBox(width: 7),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 7,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withValues(alpha: .2),
+                                borderRadius: BorderRadius.circular(99),
+                              ),
+                              child: const Text(
+                                'ACTIVE',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 8,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: .7,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        '${group.exams.length} টি পরীক্ষা • $classCount টি ক্লাস'
+                        '${openCount > 0 ? ' • $openCount টি খোলা' : ''}$yearNote',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: .8),
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 7,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: .14),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: Colors.white.withValues(alpha: .2),
+                    ),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        '${group.exams.length}',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      Text(
+                        'EXAM',
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: .75),
+                          fontSize: 8,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: .6,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Within each session banner, split exams into compact class blocks so a
+  /// long "all classes" list never reads as one messy wall of cards.
+  List<Widget> _groupTiles(_ExamSessionGroup group, List<Color> palette) {
+    final perClass = <String, int>{};
+    for (final e in group.exams) {
+      final label = _classLabel(e);
+      perClass[label] = (perClass[label] ?? 0) + 1;
+    }
+    final widgets = <Widget>[];
+    String? currentClass;
+    for (final e in group.exams) {
+      final label = _classLabel(e);
+      if (label != currentClass) {
+        currentClass = label;
+        widgets.add(
+          _classSectionHeader(label, perClass[label] ?? 0, palette.first),
+        );
+      }
+      widgets.add(_examTile(e));
+    }
+    return widgets;
+  }
+
+  Widget _classSectionHeader(String label, int count, Color accent) => Padding(
+    padding: const EdgeInsets.fromLTRB(4, 6, 4, 8),
+    child: Row(
+      children: [
+        Container(
+          width: 4,
+          height: 16,
+          decoration: BoxDecoration(
+            color: accent,
+            borderRadius: BorderRadius.circular(9),
+          ),
+        ),
+        const SizedBox(width: 8),
+        const Icon(Icons.school_rounded, size: 15, color: Color(0xFF59627D)),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w800,
+              color: Color(0xFF3B4564),
+            ),
+          ),
+        ),
+        Text(
+          '$count টি',
+          style: TextStyle(
+            fontSize: 10.5,
+            fontWeight: FontWeight.w700,
+            color: accent,
           ),
         ),
       ],
@@ -486,11 +805,9 @@ class ExamsScreenState extends State<ExamsScreen> {
     final canEnter = _canEnter(e);
     final classId = _asInt(e['class_id']);
     final isOwnClass = classId != null && _classTeacherIds.contains(classId);
-    final group = e['group_name'] ?? e['section'];
     final subtitle = [
       if (e['subject_name'] != null) '${e['subject_name']}',
-      if (e['class_name'] != null)
-        '${e['class_name']}${group == null || '$group'.isEmpty ? '' : ' • $group'}',
+      if (e['class_name'] != null) _classLabel(e),
     ].join('  •  ');
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
@@ -695,4 +1012,29 @@ class ExamsScreenState extends State<ExamsScreen> {
       ),
     ],
   );
+}
+
+/// One session bucket on the "নম্বর দিন" screen. `isNone` groups exams that
+/// have no exam-event (teacher-created tests) so they stay visually separate
+/// from official session exams.
+class _ExamSessionGroup {
+  _ExamSessionGroup({
+    required this.name,
+    required this.year,
+    required this.isActive,
+    required this.isNone,
+  });
+
+  final String name;
+  final String year;
+  final bool isActive;
+  final bool isNone;
+  final List<Map<String, dynamic>> exams = [];
+
+  String get title {
+    if (isNone) return 'সাধারণ পরীক্ষা';
+    if (name.isNotEmpty) return '$name সেশন';
+    if (year.isNotEmpty) return '$year সেশন';
+    return 'সেশন';
+  }
 }

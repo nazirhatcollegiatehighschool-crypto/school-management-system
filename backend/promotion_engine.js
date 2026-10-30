@@ -26,7 +26,9 @@
 // ------------------------------------------------------------------
 
 const pool = require('./db');
+const crypto = require('crypto');
 const { computeResult } = require('./grading');
+const { canonicalSubject, validateStudentCurriculum } = require('./curriculum');
 
 // ------------------------------------------------------------------
 // Destination class resolution
@@ -47,6 +49,26 @@ async function destinationSections(conn, destClassId) {
     `SELECT id, name, section, group_name FROM classes
       WHERE name = ? ORDER BY section`, [cls.name]);
   return { cls, sections: all };
+}
+
+async function getPendingGroupClass9() {
+  const [[pending]] = await pool.query(
+    `SELECT id, name, section, group_name FROM classes
+      WHERE name='Class 9' AND (section='Pending Group' OR group_name='Pending Group')
+      ORDER BY id LIMIT 1`);
+  if (pending) return pending;
+  let insert;
+  try {
+    [insert] = await pool.query(
+      `INSERT INTO classes (name, section, group_name) VALUES ('Class 9','Pending Group','Pending Group')`);
+  } catch (err) {
+    if (err.code !== '23505' && err.code !== 'ER_DUP_ENTRY') throw err;
+    const [[raced]] = await pool.query(`SELECT id, name, section, group_name FROM classes WHERE name='Class 9' AND section='Pending Group' ORDER BY id LIMIT 1`);
+    if (raced) return raced;
+    throw err;
+  }
+  const [[created]] = await pool.query('SELECT id, name, section, group_name FROM classes WHERE id=?', [insert.insertId]);
+  return created;
 }
 
 /**
@@ -113,6 +135,8 @@ async function computeMerit(classId, eventId) {
       total_marks_obtained: Number(r.total_marks || 0),
       total_marks_full: Number(r.total_full || 0),
       final_gpa: Number(r.final_gpa || 0),
+      final_grade: gradeBand(r.final_gpa),
+      source_event_id: eventId,
       total_gpa_without_4th: Number(r.total_gpa_without_4th || 0),
       gpa_4th_bonus: Number(r.gpa_4th_bonus || 0),
       result_status: r.result_status,
@@ -123,13 +147,13 @@ async function computeMerit(classId, eventId) {
     });
   }
 
-  // Combined merit (Q16): marks desc, then weighted GPA desc, then name asc,
-  // then roll asc as a final stable tiebreak.
+  // Promotion merit: result grade first, marks second. If both are identical,
+  // use a stable random-looking event/student key so repeated reads never
+  // reorder the same cohort.
   scored.sort((a, b) =>
+    gradeBandRank(b.final_grade) - gradeBandRank(a.final_grade) ||
     b.total_marks_obtained - a.total_marks_obtained ||
-    b.final_gpa - a.final_gpa ||
-    String(a.name || '').localeCompare(String(b.name || ''), 'bn') ||
-    a.old_roll - b.old_roll);
+    randomMeritKey(eventId, a.student_id).localeCompare(randomMeritKey(eventId, b.student_id)));
 
   const sectionCounters = {};
   scored.forEach((row, i) => {
@@ -269,9 +293,14 @@ async function balanceRun(eventId, classId, opts = {}) {
   const [[srcCls]] = await pool.query('SELECT id, name, section, group_name FROM classes WHERE id=?', [classId]);
   if (!srcCls) throw Object.assign(new Error('class not found'), { status: 404 });
 
-  const dest = await promotionDestination(pool, srcCls);
+  let dest = await promotionDestination(pool, srcCls);
   if (!dest) throw Object.assign(new Error('No promotion destination for ' + srcCls.name), { status: 400 });
-  const { sections } = await destinationSections(pool, dest.id);
+  let sections = (await destinationSections(pool, dest.id)).sections;
+  const isClass8 = /class\s*8\b/i.test(String(srcCls.name));
+  if (isClass8) {
+    dest = await getPendingGroupClass9();
+    sections = [dest];
+  }
   if (!sections.length) throw Object.assign(new Error('Destination class has no sections'), { status: 400 });
   const sectionNames = sections.map(s => s.section || s.group_name);
 
@@ -366,17 +395,19 @@ async function executeRun(runId, userId) {
       await conn.query(
         `INSERT INTO promotions
            (student_id, event_id, class_id, from_class, to_class, promoted_roll, decision,
-            final_gpa, recorded_by, run_id, from_section, to_section, combined_rank, section_position, passing_year)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            final_gpa, recorded_by, run_id, from_section, to_section, combined_rank, section_position,
+            destination_session_id, passing_year)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT (student_id, event_id)
          DO UPDATE SET to_class=EXCLUDED.to_class, promoted_roll=EXCLUDED.promoted_roll,
                        decision=EXCLUDED.decision, run_id=EXCLUDED.run_id,
                        from_section=EXCLUDED.from_section, to_section=EXCLUDED.to_section,
-                       combined_rank=EXCLUDED.combined_rank, section_position=EXCLUDED.section_position`,
+                       combined_rank=EXCLUDED.combined_rank, section_position=EXCLUDED.section_position,
+                       destination_session_id=EXCLUDED.destination_session_id`,
         [a.student_id, run.event_id, run.from_class_id, srcCls.name,
          (await conn.query('SELECT name FROM classes WHERE id=?', [a.to_class_id]))[0][0].name,
          a.assigned_roll, 'promoted', 0, userId, runId, a.from_section, a.to_section,
-         a.combined_rank, a.assigned_roll, ev ? ev.year : null]);
+          a.combined_rank, a.assigned_roll, targetSession.id, ev ? ev.year : null]);
     }
     await conn.query(
       `UPDATE promotion_runs SET status='executed', executed_by=?, executed_at=NOW() WHERE id=?`,
@@ -397,48 +428,239 @@ async function executeRun(runId, userId) {
 
 /** Graduated Class 8 pool with eligibility for each Class 9 group. */
 async function groupPool(class8Id, eventId) {
-  const merit = await computeMerit(class8Id, eventId);
-  const [rules] = await pool.query('SELECT * FROM group_eligibility_rules');
-  const rulesByGroup = new Map(rules.map(r => [r.group_name, r]));
+  const [[cls]] = await pool.query('SELECT id, name FROM classes WHERE id=?', [class8Id]);
+  if (!cls || !/class\s*8\b/i.test(String(cls.name))) {
+    throw Object.assign(new Error('Waiting for Group Approval only accepts Class 8 promotion results.'), { status: 400 });
+  }
+  const [[event]] = await pool.query(
+    `SELECT id, name, year, is_published FROM exam_events WHERE id=?`, [eventId]);
+  if (!event || Number(event.is_published) !== 1) {
+    throw Object.assign(new Error('Class 8-এর published promotion result বেছে নিন।'), { status: 400 });
+  }
+  const [rows] = await pool.query(
+    `SELECT p.student_id, p.promoted_roll, s.name, s.student_code, p.decision,
+            gs.status AS group_status, gs.to_group
+       FROM promotions p JOIN students s ON s.id=p.student_id
+       LEFT JOIN group_selections gs ON gs.student_id=p.student_id AND gs.from_class_id=p.class_id
+      WHERE p.event_id=? AND p.class_id=? AND p.decision IN ('promoted','conditional','grace_promoted','admin_override')
+        AND (p.destination_session_id IS NULL OR p.destination_session_id=s.session_id)
+        AND s.class_id=(SELECT pending.id FROM classes pending WHERE LOWER(TRIM(pending.name))='class 9'
+          AND (LOWER(TRIM(COALESCE(pending.section,'')))='pending group' OR LOWER(TRIM(COALESCE(pending.group_name,'')))='pending group')
+          ORDER BY pending.id LIMIT 1)
+      ORDER BY p.promoted_roll, s.id`, [eventId, class8Id]);
+  const ranked = [];
+  for (const row of rows) {
+    if (row.group_status === 'confirmed') continue;
+    const result = await computeResult(row.student_id, eventId);
+    if (!result) continue;
+    ranked.push({
+      student_id: row.student_id, name: row.name, student_code: row.student_code,
+      roll: row.promoted_roll, total_marks_obtained: Number(result.total_marks || 0),
+      final_gpa: Number(result.final_gpa || 0), final_grade: gradeBand(result.final_gpa), decision: row.decision,
+      eligible_groups: ['Arts', 'Commerce', 'Science'],
+    });
+  }
+  ranked.sort((a, b) => gradeBandRank(b.final_grade) - gradeBandRank(a.final_grade) ||
+    b.total_marks_obtained - a.total_marks_obtained ||
+    randomMeritKey(event.id, a.student_id).localeCompare(randomMeritKey(event.id, b.student_id)));
+  ranked.forEach((row, index) => { row.combined_rank = index + 1; });
+  return { total: ranked.length, students: ranked, class: cls, event };
+}
 
-  const poolRows = merit.rows.map(row => {
-    const famByName = new Map((row.families || []).map(f => [String(f.subject).toLowerCase(), f]));
-    const eligible = [];
-    for (const [group, rule] of rulesByGroup) {
-      const need = rule.mandatory_subjects || [];
-      let ok = true;
-      for (const subName of need) {
-        const fam = famByName.get(String(subName).toLowerCase());
-        if (!fam || fam.letter_grade === 'F') { ok = false; break; }
-        const min = Number((rule.min_marks || {})[subName] || 0);
-        if (min > 0 && Number(fam.total || 0) < min) { ok = false; break; }
-      }
-      if (ok) eligible.push(group);
-    }
-    return {
-      student_id: row.student_id, name: row.name, roll: row.old_roll,
-      total_marks_obtained: row.total_marks_obtained, final_gpa: row.final_gpa,
-      combined_rank: row.combined_rank, eligible_groups: eligible,
-    };
-  });
-  return { total: poolRows.length, students: poolRows };
+/** Shared Admin/Class 9-teacher queue, sorted once by the same merit rule. */
+async function pendingGroupApprovals() {
+  const [sources] = await pool.query(
+    `SELECT DISTINCT p.class_id AS from_class_id, p.event_id
+       FROM promotions p JOIN classes c ON c.id=p.class_id
+       JOIN students s ON s.id=p.student_id
+      WHERE LOWER(TRIM(c.name))='class 8'
+        AND s.class_id=(SELECT pending.id FROM classes pending WHERE LOWER(TRIM(pending.name))='class 9'
+          AND (LOWER(TRIM(COALESCE(pending.section,'')))='pending group' OR LOWER(TRIM(COALESCE(pending.group_name,'')))='pending group')
+          ORDER BY pending.id LIMIT 1)
+        AND p.decision IN ('promoted','conditional','grace_promoted','admin_override')
+        AND (p.destination_session_id IS NULL OR p.destination_session_id=s.session_id)
+        AND EXISTS (SELECT 1 FROM exam_events ev WHERE ev.id=p.event_id AND ev.is_published=1)
+        AND NOT EXISTS (SELECT 1 FROM group_selections gs WHERE gs.student_id=p.student_id
+                          AND gs.from_class_id=p.class_id AND gs.status='confirmed')
+      ORDER BY p.event_id DESC, p.class_id`);
+  const students = [];
+  for (const source of sources) {
+    const result = await groupPool(source.from_class_id, source.event_id);
+    for (const student of result.students) students.push({
+      ...student, from_class_id: source.from_class_id, event_id: source.event_id,
+      event: result.event,
+    });
+  }
+  students.sort((a, b) => gradeBandRank(b.final_grade) - gradeBandRank(a.final_grade) ||
+    Number(b.total_marks_obtained) - Number(a.total_marks_obtained) ||
+    randomMeritKey(a.event_id, a.student_id).localeCompare(randomMeritKey(b.event_id, b.student_id)));
+  students.forEach((row, index) => { row.combined_rank = index + 1; });
+  return { students, total: students.length };
+}
+
+function gradeBand(gpa) {
+  const value = Number(gpa || 0);
+  if (value >= 5) return 'A+';
+  if (value >= 4) return 'A';
+  if (value >= 3.5) return 'A-';
+  if (value >= 3) return 'B';
+  if (value >= 2) return 'C';
+  if (value >= 1) return 'D';
+  return 'F';
+}
+function gradeBandRank(value) { return ({ 'A+':7, A:6, 'A-':5, B:4, C:3, D:2, F:1 })[value] || 0; }
+// Stable pseudo-random tiebreak: equal-grade/equal-marks students are picked
+// without favoring roll/name, while every reload keeps the same published rank.
+function randomMeritKey(eventId, studentId) {
+  return crypto.createHash('sha256').update(`merit:${eventId}:${studentId}`).digest('hex');
 }
 
 /** Assign one student to a Class 9 group; returns destination class. */
-async function assignGroup(studentId, fromClassId, toGroup, userId) {
+async function assignGroup(studentId, fromClassId, toGroup, userId, choices = {}) {
+  const canonicalGroup = /arts|humanit/i.test(String(toGroup)) ? 'Arts'
+    : /commerce|business/i.test(String(toGroup)) ? 'Commerce'
+    : /science/i.test(String(toGroup)) ? 'Science' : null;
+  if (!canonicalGroup) throw Object.assign(new Error('Arts, Commerce অথবা Science group বেছে নিন।'), { status: 400 });
+  const aliases = canonicalGroup === 'Arts' ? ['%arts%', '%humanit%']
+    : canonicalGroup === 'Commerce' ? ['%commerce%', '%business%'] : ['%science%'];
   const [[dest]] = await pool.query(
     `SELECT id, name, section, group_name FROM classes
-      WHERE name='Class 9' AND (group_name=? OR section=?) ORDER BY id LIMIT 1`,
-    [toGroup, toGroup]);
+      WHERE name='Class 9' AND (
+        LOWER(COALESCE(group_name,'')) LIKE ? OR LOWER(COALESCE(section,'')) LIKE ? OR
+        LOWER(COALESCE(group_name,'')) LIKE ? OR LOWER(COALESCE(section,'')) LIKE ?
+      ) ORDER BY id LIMIT 1`,
+    [aliases[0], aliases[0], aliases[1] || aliases[0], aliases[1] || aliases[0]]);
   if (!dest) throw Object.assign(new Error('No Class 9 group "' + toGroup + '"'), { status: 400 });
-  await pool.query(
-    `INSERT INTO group_selections (student_id, from_class_id, to_group, to_class_id, selected_by, status)
-     VALUES (?,?,?,?,?, 'confirmed')
-     ON CONFLICT (student_id, from_class_id)
-     DO UPDATE SET to_group=EXCLUDED.to_group, to_class_id=EXCLUDED.to_class_id,
-                   selected_by=EXCLUDED.selected_by, selected_at=NOW(), status='confirmed'`,
-    [studentId, fromClassId, toGroup, dest.id, userId]);
-  return dest;
+  const curriculum = await validateStudentCurriculum(dest.id, choices);
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    // Serialize approvals that affect the same destination roster. This keeps
+    // unique (class_id, roll) safe while the whole stream is merit-ranked.
+    await conn.query('SELECT id FROM classes WHERE id=? FOR UPDATE', [dest.id]);
+    const [[student]] = await conn.query(
+      `SELECT s.id, s.class_id, s.session_id, s.religion, s.roll
+         FROM students s WHERE s.id=? FOR UPDATE`, [studentId]);
+    if (!student) throw Object.assign(new Error('Student not found'), { status: 404 });
+    const [[pendingClass]] = await conn.query(
+      `SELECT id FROM classes WHERE LOWER(TRIM(name))='class 9'
+        AND (LOWER(TRIM(COALESCE(section,'')))='pending group' OR LOWER(TRIM(COALESCE(group_name,'')))='pending group')
+        ORDER BY id LIMIT 1`);
+    if (!pendingClass || Number(student.class_id) !== Number(pendingClass.id)) {
+      const [[already]] = await conn.query(
+        `SELECT gs.to_group, gs.to_class_id, s.roll FROM group_selections gs
+           JOIN students s ON s.id=gs.student_id
+          WHERE gs.student_id=? AND gs.from_class_id=? AND gs.status='confirmed'`,
+        [studentId, fromClassId]);
+      if (already && already.to_group === canonicalGroup) {
+        await conn.commit();
+        return { id: already.to_class_id, group_name: canonicalGroup, roll: already.roll, already_approved: true };
+      }
+      throw Object.assign(new Error('শিক্ষার্থীকে আগে Pending Group Class 9-এ promote করতে হবে।'), { status: 409 });
+    }
+    const [[promotion]] = await conn.query(
+      `SELECT event_id, destination_session_id, decision FROM promotions
+        WHERE student_id=? AND class_id=? AND decision IN ('promoted','conditional','grace_promoted','admin_override')
+          AND (destination_session_id IS NULL OR destination_session_id=?)
+        ORDER BY id DESC LIMIT 1`, [studentId, fromClassId, student.session_id]);
+    if (!promotion || !['promoted','conditional','grace_promoted','admin_override'].includes(String(promotion.decision))) {
+      throw Object.assign(new Error('শুধু promoted Class 8 শিক্ষার্থীর group approval করা যাবে।'), { status: 409 });
+    }
+
+    // Keep prior-class enrollments as the immutable curriculum snapshot used
+    // by historical results; add destination-class choices without deleting it.
+    const [subjects] = await conn.query('SELECT id, name, is_optional, is_fourth_subject, is_elective FROM subjects WHERE class_id=?', [dest.id]);
+    const chosen = [];
+    for (const [choice, mandatory] of [[curriculum.compulsory_subject, true], [curriculum.optional_subject, false]]) {
+      if (!choice) continue;
+      const sub = subjects.find(item => canonicalSubject(item.name) === choice ||
+        (choice === 'Agriculture' && /agriculture/i.test(item.name)) ||
+        (choice === 'Higher Mathematics' && /higher\s*math/i.test(item.name)) ||
+        (choice === 'Home Science' && /home\s*(science|economics)/i.test(item.name)) ||
+        (choice === 'Civics' && /civics/i.test(item.name)) ||
+        (choice === 'Economics' && /economics/i.test(item.name)));
+      if (!sub) throw Object.assign(new Error(`Class 9 ${canonicalGroup}-এ ${choice} subject setup করা নেই।`), { status: 400 });
+      chosen.push({ ...sub, mandatory });
+    }
+    for (const sub of chosen) {
+      await conn.query(
+        `INSERT INTO student_subjects (student_id, subject_id, is_mandatory, is_fourth_subject, is_elective, assigned_by)
+         VALUES (?,?,?,?,?,?) ON CONFLICT (student_id,subject_id) DO UPDATE SET
+          is_mandatory=EXCLUDED.is_mandatory, is_fourth_subject=EXCLUDED.is_fourth_subject,
+          is_elective=EXCLUDED.is_elective, assigned_by=EXCLUDED.assigned_by`,
+        [studentId, sub.id, sub.mandatory ? 1 : 0, sub.mandatory ? 0 : 1, sub.mandatory ? 0 : 1, userId]);
+    }
+    // Preserve religion-specific subject enrollment in the destination class.
+    for (const sub of subjects.filter(s => /religion|islam|hindu|christian|buddh/i.test(s.name))) {
+      const n = String(sub.name).toLowerCase(), r = String(student.religion || '').toLowerCase();
+      const matches = /hindu/.test(n) ? /hindu/.test(r) : /christian/.test(n) ? /christian/.test(r)
+        : /buddh/.test(n) ? /buddh/.test(r) : /islam|muslim/.test(n) ? /islam|muslim/.test(r) : true;
+      if (matches) await conn.query(
+        `INSERT INTO student_subjects (student_id, subject_id, is_mandatory, is_fourth_subject, is_elective, assigned_by)
+         VALUES (?,?,1,0,0,?) ON CONFLICT (student_id,subject_id) DO NOTHING`, [studentId, sub.id, userId]);
+    }
+    const targetSessionId = promotion.destination_session_id || student.session_id;
+    await conn.query(
+      `UPDATE students SET class_id=?, section=?, roll=0, session_id=?, optional_subject=?, compulsory_subject=? WHERE id=?`,
+      [dest.id, dest.section || dest.group_name || canonicalGroup, targetSessionId, curriculum.optional_subject, curriculum.compulsory_subject, studentId]);
+    await conn.query(
+      `INSERT INTO group_selections (student_id, from_class_id, to_group, to_class_id, selected_by, status)
+       VALUES (?,?,?,?,?, 'confirmed') ON CONFLICT (student_id, from_class_id) DO UPDATE SET
+         to_group=EXCLUDED.to_group, to_class_id=EXCLUDED.to_class_id, selected_by=EXCLUDED.selected_by,
+         selected_at=NOW(), status='confirmed'`, [studentId, fromClassId, canonicalGroup, dest.id, userId]);
+
+    // Keep the promotion workflow dashboard aligned with the student's real
+    // destination after the second-stage group decision (the first-stage
+    // promotion correctly points to Pending Group until this moment).
+    if (targetSessionId) {
+      await conn.query(
+        `UPDATE student_promotion_status SET target_class_id=?, status='promoted', updated_at=NOW()
+          WHERE student_id=? AND target_session_id=?`, [dest.id, studentId, targetSessionId]);
+    }
+    await conn.query(
+      `UPDATE promotion_history SET to_class_id=?
+        WHERE id=(SELECT id FROM (SELECT id FROM promotion_history
+          WHERE student_id=? AND from_class_id=? ORDER BY id DESC LIMIT 1) latest)`, [dest.id, studentId, fromClassId]);
+
+    const [cohort] = await conn.query(
+      `SELECT s.id, s.roll, gs.from_class_id FROM students s
+       JOIN group_selections gs ON gs.student_id=s.id AND gs.to_group=? AND gs.status='confirmed'
+       WHERE s.class_id=?`, [canonicalGroup, dest.id]);
+    const ranked = [];
+    for (const row of cohort) {
+      const [[sourcePromotion]] = await conn.query(
+        `SELECT event_id FROM promotions WHERE student_id=? AND class_id=?
+          AND decision IN ('promoted','conditional','grace_promoted','admin_override') ORDER BY id DESC LIMIT 1`,
+        [row.id, row.from_class_id]);
+      const eventForStudent = sourcePromotion && sourcePromotion.event_id;
+      const result = eventForStudent ? await computeResult(row.id, eventForStudent, {
+        group_name: canonicalGroup,
+        compulsory_subject: row.id === Number(studentId) ? curriculum.compulsory_subject : undefined,
+        optional_subject: row.id === Number(studentId) ? curriculum.optional_subject : undefined,
+      }) : null;
+      const gpa = result ? Number(result.final_gpa || 0) : -1;
+      ranked.push({ id: row.id, roll: row.roll, gpa, grade: result ? gradeBand(gpa) : null,
+        total: result ? Number(result.total_marks || 0) : -1, event_id: eventForStudent, from_class_id: row.from_class_id });
+    }
+    ranked.sort((a,b) => gradeBandRank(b.grade) - gradeBandRank(a.grade) ||
+      b.total - a.total || randomMeritKey(a.event_id, a.id).localeCompare(randomMeritKey(b.event_id, b.id)));
+    for (let i = 0; i < ranked.length; i++) {
+      const row = ranked[i];
+      await conn.query('UPDATE students SET roll=? WHERE id=?', [-(i + 1), row.id]);
+    }
+    for (let i = 0; i < ranked.length; i++) {
+      const row = ranked[i], roll = i + 1;
+      await conn.query('UPDATE students SET roll=? WHERE id=?', [roll, row.id]);
+      if (row.event_id) await conn.query(
+        `UPDATE promotions SET to_class=?, to_section=?, promoted_roll=? WHERE student_id=? AND event_id=?`,
+        [dest.name, dest.group_name || dest.section || canonicalGroup, roll, row.id, row.event_id]);
+    }
+    await conn.commit();
+    return { ...dest, group_name: canonicalGroup, roll: ranked.find(r => r.id === Number(studentId)) ? ranked.findIndex(r => r.id === Number(studentId)) + 1 : null };
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally { conn.release(); }
 }
 
 /** Re-number rolls inside one class by current merit (marks-independent order preserved). */
@@ -486,8 +708,8 @@ async function transferGroup(studentId, toGroup, reason, userId) {
 }
 
 module.exports = {
-  isGroupedClass, promotionDestination, destinationSections,
+  isGroupedClass, promotionDestination, destinationSections, getPendingGroupClass9,
   computeMerit, decide, reviewPromotion,
   snakeAssign, balanceRun, executeRun,
-  groupPool, assignGroup, transferGroup, resequenceRolls,
+  groupPool, pendingGroupApprovals, assignGroup, transferGroup, resequenceRolls,
 };

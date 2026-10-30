@@ -3,9 +3,10 @@ REM ============================================================
 REM  School 24/7 - one-shot auto-start
 REM  Starts (in order, only if not already running):
 REM    1) MariaDB (project data dir)
-REM    2) Node backend on 0.0.0.0:5000
-REM    3) Public Cloudflare quick tunnel
-REM    4) Watchdog (keeps the whole stack alive)
+REM    2) Supabase -> local MariaDB mirror (immediate catch-up, then every 5 min)
+REM    3) Node backend on 0.0.0.0:5000
+REM    4) Public Cloudflare quick tunnel
+REM    5) Watchdog (keeps the whole stack alive)
 REM  Safe to run at every computer startup - it is idempotent.
 REM ============================================================
 setlocal
@@ -26,7 +27,13 @@ if errorlevel 1 (
   echo   - already running.
 )
 
-echo [2/4] Backend :5000 ...
+echo [2/5] Local mirror (Supabase -> MariaDB) ...
+if not exist "%ROOT%logs" mkdir "%ROOT%logs"
+start "School24x7_Mirror" /min cmd /c "cd /d %ROOT% && node scripts\local_db_mirror.js >nul 2>> %ROOT%logs\local_db_mirror_error.log"
+timeout /t 4 /nobreak >nul
+if exist "%ROOT%logs\local_db_mirror.pid" ( echo   - mirror service started; initial catch-up is running. ) else ( echo   - !! mirror not started yet - check logs\local_db_mirror.log )
+
+echo [3/5] Backend :5000 ...
 netstat -ano | findstr /R ":5000 .*LISTENING" >nul
 if errorlevel 1 (
   start "School24x7_API" /min cmd /c "cd /d %ROOT%backend && set PORT=5000 && node server.js >> %ROOT%logs\backend.log 2>&1"
@@ -34,7 +41,7 @@ if errorlevel 1 (
 )
 netstat -ano | findstr /R ":5000 .*LISTENING" >nul && echo   - API ready. || echo   !! API not listening yet - check logs\backend.log
 
-echo [3/4] Public tunnel (ngrok static domain) ...
+echo [4/5] Public tunnel (ngrok static domain) ...
 tasklist /FI "IMAGENAME eq ngrok.exe" 2>nul | find /I "ngrok.exe" >nul
 if errorlevel 1 (
   tasklist /FI "IMAGENAME eq ngrok" 2>nul | find /I "ngrok" >nul
@@ -48,7 +55,7 @@ if errorlevel 1 (
   echo   - ngrok already running.
 )
 
-echo [4/4] Watchdog ...
+echo [5/5] Watchdog ...
 tasklist /FI "WINDOWTITLE eq School24x7_Watchdog" 2>nul | find /I "cmd.exe" >nul
 if errorlevel 1 (
   start "School24x7_Watchdog" /min "%ROOT%watchdog.bat"

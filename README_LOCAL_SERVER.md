@@ -1,71 +1,76 @@
-# School 24/7 — Laptop সার্ভার সেটআপ (Bangla Guide)
+# School 24/7 — Laptop সার্ভার (সংক্ষিপ্ত বাংলা গাইড)
 
-Laptop থেকেই স্কুল সিস্টেম ২৪/৭ চালানোর সম্পূর্ণ নির্দেশনা। Vercel/Supabase আর লাগবে না —
-Database + Backend সব এই কম্পিউটারেই চলবে, মোবাইল ডাটা/বাইরে থেকে Cloudflare Tunnel দিয়ে ঢোকা যাবে।
+> পূর্ণ নির্দেশনা: [PROJECT_GUIDE_BN.md](PROJECT_GUIDE_BN.md) · Backup/restore: [docs/RESTORE_GUIDE_BN.md](docs/RESTORE_GUIDE_BN.md)
 
-## ১. যা যা তৈরি আছে
+## গুরুত্বপূর্ণ পরিবর্তন
 
-| জিনিস | অবস্থান |
-|---|---|
-| Database (MariaDB, `schooldb`, সব live data সহ) | `db\data` (project folder-এর ভেতর, চলছে port 3306) |
-| DB binaries | `runtime\mysql\bin` (project folder-এর ভেতর — XAMPP install লাগে না) |
-| Backend (Node, port **5000**) | `backend\start-local.bat` |
-| Public Tunnel (Cloudflare) | `backend\start-tunnel.bat` |
-| Auto-start (laptop on করলেই চালু) | Startup folder → `School24x7-AutoStart.bat` |
-| Teacher/Guardian APK | `backend\apks\TeacherApp.apk`, `GuardianApp.apk` |
-| Admin Panel | ব্রাউজারে `http://localhost:5000` (একই laptop) |
+আগের নথিতে লেখা ছিল "Vercel/Supabase লাগবে না"—এটি আর সঠিক নয়। বর্তমান architecture:
 
-Login: **admin / 123456#** • সব teacher: **username / 123456** (teacher app-এর Profile → Password পরিবর্তন থেকে নিজে বদলাতে পারবে)।
+- **Supabase PostgreSQL** হলো মূল database; তিন app-এর সব live write Vercel API দিয়ে এখানেই যায়।
+- **Vercel API** সবসময় online; laptop বন্ধ থাকলেও app চলে।
+- **Local MariaDB (`schooldb`)** শুধু Supabase-এর read-only mirror; laptop চালু থাকলে প্রতি ৫ মিনিটে sync হয়।
+- Local DB-তে app write করে না; local data Supabase-এ push করবেন না।
 
-## ২. প্রতিদিন চালানো (সাধারণত auto-start-ই যথেষ্ট)
+## চালানো
 
-1. Laptop on করুন → ৩০ সেকেন্ড অপেক্ষা করুন (DB + Backend + Tunnel নিজে চালু হবে)।
-2. Tunnel window-তে যে `https://....trycloudflare.com` লিংক দেখাবে — **এটাই public link** (মোবাইল ডাটা থেকে চলবে)।
-3. Admin panel: public link-এ ব্রাউজার থেকে খুলুন, অথবা laptop-এ `http://localhost:5000`।
+```bat
+start-all.bat
+```
 
-হাতে চালাতে হলে: `backend\start-local.bat` → তারপর `backend\start-tunnel.bat`।
+এটি MariaDB → mirror service → backend :5000 → tunnel → watchdog চালু করে। শুধু DB+mirror+API:
 
-## ৩. মোবাইলে App install + Server বসানো
+```bat
+backend\start-local.bat
+```
 
-1. মোবাইলের browser-এ public tunnel link খুলে `/apks/TeacherApp.apk` বা `/apks/GuardianApp.apk` download করে install করুন।
-   - সরাসরি: `https://....trycloudflare.com/apks/TeacherApp.apk`
-2. App-এর **Login screen → নিচে Server লেখা** → সেখানে tunnel link (অথবা wifi-তে থাকলে `http://192.168.0.112:5000`) বসিয়ে **Test → Save** চাপুন।
-3. তারপর login করুন। App **offline-ও চলবে** — net এলে data auto-sync হবে।
+Health: `http://localhost:5000/api/health`
 
-> ⚠️ Tunnel restart হলে link বদলায় — নতুন link app-এর Server setting-এ বসিয়ে নিন (rebuild লাগে না)। স্থায়ী একই link চাইলে নিচের ৬ নম্বর দেখুন।
+Windows login-এ `School24x7-AutoStart.vbs` / `start-local.bat` নিজে চালু হয়; `watchdog.bat` প্রতি ৬০ সেকেন্ডে mirror-ও restart করে।
 
-## ৪. Wifi (LAN) থেকে সরাসরি (tunnel ছাড়া)
+## Mirror দেখার কমান্ড
 
-- URL: `http://192.168.0.112:5000` (laptop-এর IP বদলালে `ipconfig` দিয়ে দেখে app-এ বসান)।
-- প্রথমবার Windows Firewall allow চাইতে পারে — **Admin password দিয়ে Allow** করুন (একবারই)। না করলে wifi-এর ফোন ঢুকতে পারবে না (tunnel দিয়ে তখনো চলবে)।
+```bat
+node scripts\local_db_mirror.js --check
+node scripts\local_db_mirror.js --verify --deep
+```
 
-## ৫. নতুন APK বানানো (code বদলালে)
+Log: `logs\local_db_mirror.log`। `SYNC OK` মানে count+constraint verified; `SYNC PARTIAL` মানে data গেছে কিন্তু repair/verification বাকি।
+
+## Backup
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\backup_database.ps1
+node scripts\backup_supabase_secure.cjs
+```
+
+Backup `database_backups/` ও `runtime/secure_backups/`-এ থাকে; Git/Vercel-এ যায় না। Restore কখনো production-এ নয়—isolated DB-তে; বিস্তারিত restore guide-এ।
+
+## App install / server URL
+
+- App-এর default API: `https://school-management-system-mobile-api.vercel.app`
+- LAN-এ local API ব্যবহার করতে চাইলে app-এর Server setting-এ `http://<laptop-ip>:5000` দিন; `localhost` দিলে ফোন নিজের localhost খোঁজে।
+- Tunnel চালু করলে তার HTTPS URL app-এর Server setting-এ দিন। Tunnel restart হলে URL বদলাতে পারে।
+
+## নতুন APK
 
 ```bat
 cd apps\teacher_app
-flutter build apk --release --dart-define=API_URL=http://192.168.0.112:5000
+flutter build apk --release
 copy build\app\outputs\flutter-apk\app-release.apk ..\..\backend\apks\TeacherApp.apk
 ```
-Guardian-এর জন্য `apps\guardian_app` + `GuardianApp.apk`। Version: `backend\server.js` → `APP_VERSIONS` বাড়ান (যেমন teacher `1.3.3` → `1.3.4`) — app নিজে থেকেই update চাইবে, browser লাগবে না।
 
-## ৬. স্থায়ী একই public link (optional, advanced)
+Admin/Guardian-এর জন্য সংশ্লিষ্ট folder ও APK নাম। Build/version/signing নিয়ম `PROJECT_GUIDE_BN.md`-এ।
 
-Quick tunnel প্রতিবার নতুন link দেয়। একই link সবসময় চাইলে (বছরে ~১ বার setup):
-1. cloudflare.com-এ free account + একটা domain (বা subdomain) নিন।
-2. `bin\cloudflared.exe tunnel login` (project folder থেকে) → browser-এ approve করুন।
-3. `cloudflared.exe tunnel create school` → `tunnel --hostname school.apnardomain.com` দিয়ে `backend\start-tunnel.bat`-এর লাইন বদলে দিন।
-
-## ৭. সমস্যা হলে
+## সমস্যা
 
 | সমস্যা | করণীয় |
 |---|---|
-| `localhost:5000` চলে না | `backend\start-local.bat` চালু আছে কিনা দেখুন; `runtime\mysql\bin\mysqladmin.exe -uroot ping` দিয়ে DB check |
-| Tunnel link কাজ করে না | Tunnel window খোলা আছে কিনা + link-টা নতুন কিনা দেখুন |
-| App-এ login হয় না | App-এর Server setting-এ **বর্তমান** tunnel link/LAN IP আছে কিনা দেখুন |
-| Laptop restart-এর পর | Startup folder-এর `School24x7-AutoStart.bat` আছে কিনা দেখুন |
-| পুরনো Supabase-এ ফেরত যেতে চাইলে | `backend\.env.supabase.bak` → `.env` নামে copy করে server restart |
+| API health fail | Vercel deployment Status, Supabase project status দেখুন |
+| Mirror বন্ধ | `logs\local_db_mirror.log` / `logs\local_db_mirror_error.log`; `logs\local_db_mirror.pid` |
+| Local DB বন্ধ | `runtime\mysql\bin\mysqladmin.exe -uroot ping`; `db\my.ini` |
+| App login fail | app-এর Server URL, Vercel API health, internet |
+| Laptop restart | Startup folder-এর `School24x7-AutoStart.vbs` আছে কিনা দেখুন |
 
-## ৮. Backup
+## নিরাপত্তা
 
-- Database backup: `runtime\mysql\bin\mysqldump.exe -uroot schooldb > backup.sql`
-- `.env` (password সহ) ও `backend\apks\` মাঝে মাঝে অন্য জায়গায় copy রাখুন।
+`.env`, `DATABASE_URL`, `JWT_SECRET`, `CRON_SECRET`, Supabase/backup key—কোথাও copy বা share করবেন না। Backup-এ ব্যক্তিগত data থাকে; access সীমিত রাখুন।

@@ -1,13 +1,10 @@
-import 'dart:typed_data';
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
-import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 
 import '../api.dart';
+import '../pdf/marksheet_template.dart';
 
 class MarksheetScreen extends StatefulWidget {
   final int studentId;
@@ -77,303 +74,119 @@ class _MarksheetScreenState extends State<MarksheetScreen> {
     }
   }
 
+  String _promotionLabel(Map promotion) {
+    if (promotion.isEmpty) return '';
+    final parts = <String>[];
+    final status = '${promotion['status_bn'] ?? ''}'.trim();
+    if (status.isNotEmpty) parts.add(status);
+    final target = '${promotion['to_class'] ?? ''}'.trim();
+    if (target.isNotEmpty) parts.add(target);
+    final roll = '${promotion['promoted_roll'] ?? ''}'.trim();
+    if (roll.isNotEmpty) parts.add('New roll $roll');
+    return parts.join(' • ');
+  }
+
   Future<void> _downloadPdf() async {
     if (_data == null) return;
-    final doc = pw.Document();
-    final student = _data!['student'] ?? {};
-    final event = _data!['event'] ?? {};
-    final result = _data!['result'] ?? {};
-    final settings = _data!['settings'] ?? {};
-    final promotion = _data!['promotion'];
-    final position = _data!['position'];
-    final attendance = _data!['attendance'];
-    final signatures = _data!['signatures'] is Map
-        ? _data!['signatures'] as Map
+    final data = _data!;
+    final student = data['student'] is Map ? data['student'] as Map : const {};
+    final event = data['event'] is Map ? data['event'] as Map : const {};
+    final settings = data['settings'] is Map
+        ? data['settings'] as Map
         : const {};
-
-    final ByteData fontData = await rootBundle.load(
-      'assets/fonts/Kalpurush.ttf',
-    );
-    final pw.Font bn = pw.Font.ttf(fontData);
-    final ByteData logoData = await rootBundle.load('assets/school_logo.png');
-    final logo = pw.MemoryImage(logoData.buffer.asUint8List());
-    final direct = pw.TextStyle(font: bn);
-
-    pw.Widget signatory(Map? signer, String fallback) {
-      pw.Widget? stamp;
-      final encoded = signer?['data_base64']?.toString();
-      if (encoded != null && encoded.isNotEmpty) {
-        try {
-          stamp = pw.Image(
-            pw.MemoryImage(base64Decode(encoded)),
-            width: 105,
-            height: 28,
-            fit: pw.BoxFit.contain,
-          );
-        } catch (_) {}
-      }
-      return pw.Expanded(
-        child: pw.Column(
-          mainAxisSize: pw.MainAxisSize.min,
-          children: [
-            pw.SizedBox(height: 28, child: stamp ?? pw.SizedBox()),
-            pw.Container(width: 150, height: 0.6, color: PdfColors.black),
-            if ('${signer?['name'] ?? ''}'.trim().isNotEmpty)
-              pw.Padding(
-                padding: const pw.EdgeInsets.only(top: 3),
-                child: pw.Text(
-                  '${signer?['name']}',
-                  textAlign: pw.TextAlign.center,
-                  maxLines: 1,
-                  style: pw.TextStyle(font: pw.Font.timesBold(), fontSize: 8.5),
-                ),
-              ),
-            pw.Text(
-              '${signer?['designation'] ?? fallback}',
-              textAlign: pw.TextAlign.center,
-              maxLines: 1,
-              style: pw.TextStyle(font: bn, fontSize: 8),
-            ),
-          ],
-        ),
-      );
+    final promotion = data['promotion'] is Map
+        ? data['promotion'] as Map
+        : const {};
+    final signatures = data['signatures'] is Map
+        ? data['signatures'] as Map
+        : const {};
+    final hidden = data['marksheet_hidden'] == true;
+    final result = !hidden && data['result'] is Map
+        ? data['result'] as Map
+        : const {};
+    final families = hidden
+        ? <dynamic>[]
+        : (result['families'] is List
+              ? result['families'] as List
+              : <dynamic>[]);
+    final attendance = data['attendance'] is Map
+        ? data['attendance'] as Map
+        : const {};
+    final position = data['position'] is Map
+        ? data['position'] as Map
+        : const {};
+    final dual = data['dual_position'] is Map
+        ? data['dual_position'] as Map
+        : const {};
+    String attendanceText = '';
+    if (attendance['percentage'] != null) {
+      attendanceText =
+          '${attendance['percentage']}% (${attendance['present_days']}/${attendance['total_days']} days)';
+    }
+    String positionText = '';
+    if (dual.isNotEmpty &&
+        (dual['section'] != null || dual['combined'] != null)) {
+      positionText =
+          'Section ${dual['section'] ?? '-'}/${dual['section_of'] ?? '-'} | All sections ${dual['combined'] ?? '-'}/${dual['combined_of'] ?? '-'}';
+    } else if (position.isNotEmpty) {
+      positionText = '${position['rank'] ?? '-'}/${position['of'] ?? '-'}';
     }
 
+    final bnData = await rootBundle.load('assets/fonts/Kalpurush.ttf');
+    final bn = pw.Font.ttf(bnData);
+    final logoData = await rootBundle.load('assets/school_logo.png');
+    final logo = pw.MemoryImage(logoData.buffer.asUint8List());
+    final watermark = await MarksheetTemplate.loadWatermark();
+    final script = await MarksheetTemplate.loadScriptFont();
+    final doc = pw.Document();
     doc.addPage(
       pw.Page(
-        pageTheme: pw.PageTheme(
-          pageFormat: PdfPageFormat.a4,
-          margin: const pw.EdgeInsets.all(36),
-          buildBackground: (_) => pw.FullPage(
-            ignoreMargins: true,
-            child: pw.Stack(
-              children: [
-                pw.Positioned.fill(
-                  child: pw.Container(color: PdfColor.fromHex('#fffefb')),
-                ),
-                pw.Positioned.fill(
-                  child: pw.Container(
-                    margin: const pw.EdgeInsets.all(12),
-                    decoration: pw.BoxDecoration(
-                      border: pw.Border.all(
-                        color: PdfColors.grey800,
-                        width: 0.8,
-                      ),
-                    ),
-                    child: pw.Container(
-                      margin: const pw.EdgeInsets.all(4),
-                      decoration: pw.BoxDecoration(
-                        border: pw.Border.all(
-                          color: PdfColors.grey600,
-                          width: 0.4,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                pw.Center(
-                  child: pw.Opacity(
-                    opacity: 0.06,
-                    child: pw.Image(logo, width: 240, height: 240),
-                  ),
-                ),
-              ],
-            ),
-          ),
+        pageTheme: MarksheetTemplate.pageTheme(
+          watermark: watermark,
+          margin: 32,
         ),
-        build: (ctx) => pw.Column(
-          crossAxisAlignment: pw.CrossAxisAlignment.start,
-          children: [
-            pw.Center(
-              child: pw.Text(
-                settings['school_name'] ?? 'Nazirhat Collegiate High School',
-                style: pw.TextStyle(
-                  font: pw.Font.timesBold(),
-                  fontSize: 18,
-                  fontWeight: pw.FontWeight.bold,
-                ),
-              ),
-            ),
-            pw.Center(
-              child: pw.Text(
-                settings['school_name_bn'] ??
-                    'নাজিরহাট কলেজিয়েট উচ্চ বিদ্যালয়',
-                style: pw.TextStyle(
-                  font: bn,
-                  fontSize: 11,
-                  fontWeight: pw.FontWeight.bold,
-                ),
-              ),
-            ),
-            pw.Center(
-              child: pw.Text(
-                (settings['school_address'] ?? '').toString(),
-                style: pw.TextStyle(
-                  font: pw.Font.times(),
-                  fontSize: 8,
-                  color: PdfColors.grey700,
-                ),
-              ),
-            ),
-            pw.Center(
-              child: pw.Container(
-                width: 52,
-                height: 52,
-                margin: const pw.EdgeInsets.only(top: 3, bottom: 2),
-                child: pw.Image(logo, fit: pw.BoxFit.contain),
-              ),
-            ),
-            pw.SizedBox(height: 6),
-            pw.Divider(),
-            pw.SizedBox(height: 4),
-            pw.Center(
-              child: pw.Text(
-                '${event['name'] ?? ''}',
-                style: pw.TextStyle(
-                  font: bn,
-                  fontSize: 14,
-                  fontWeight: pw.FontWeight.bold,
-                ),
-              ),
-            ),
-            pw.Center(
-              child: pw.Text(
-                'ACADEMIC MARKSHEET',
-                style: pw.TextStyle(
-                  font: pw.Font.timesBold(),
-                  fontSize: 13,
-                  letterSpacing: 1.5,
-                ),
-              ),
-            ),
-            if (promotion != null) ...[
-              pw.SizedBox(height: 8),
-              pw.Container(
-                padding: const pw.EdgeInsets.all(8),
-                decoration: pw.BoxDecoration(
-                  color: PdfColors.grey100,
-                  borderRadius: pw.BorderRadius.circular(6),
-                ),
-                child: pw.Row(
-                  children: [
-                    pw.Text(
-                      (promotion['status_bn']?.toString() ?? '').isEmpty
-                          ? 'উত্তীর্ণ'
-                          : promotion['status_bn'].toString(),
-                      style: pw.TextStyle(
-                        font: bn,
-                        fontWeight: pw.FontWeight.bold,
-                        color: PdfColors.grey900,
-                      ),
-                    ),
-                    if (promotion['promoted'] == true &&
-                        promotion['promoted_roll'] != null)
-                      pw.Padding(
-                        padding: const pw.EdgeInsets.only(left: 10),
-                        child: pw.Text(
-                          '${promotion['to_class'] ?? 'SSC Batch'}-new Roll: ${promotion['promoted_roll']}',
-                          style: pw.TextStyle(
-                            font: bn,
-                            color: PdfColors.grey900,
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ],
-            pw.SizedBox(height: 8),
-            pw.Row(
-              children: [
-                if (position != null)
-                  pw.Expanded(
-                    child: pw.Text(
-                      'মেধা স্থান: ${position['rank']}/${position['of']} জন',
-                      style: pw.TextStyle(
-                        font: bn,
-                        fontWeight: pw.FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                if (attendance != null && attendance['percentage'] != null)
-                  pw.Expanded(
-                    child: pw.Text(
-                      'উপস্থিতি: ${attendance['percentage']}% (${attendance['present_days']}/${attendance['total_days']} দিন)',
-                      style: pw.TextStyle(font: bn),
-                    ),
-                  ),
-              ],
-            ),
-            pw.SizedBox(height: 8),
-            pw.RichText(
-              text: pw.TextSpan(
-                children: [
-                  pw.TextSpan(text: 'নাম: ', style: direct),
-                  pw.TextSpan(text: student['name']?.toString() ?? ''),
-                  pw.TextSpan(text: '   শ্রেণি: ', style: direct),
-                  pw.TextSpan(
-                    text:
-                        '${student['class_name'] ?? ''} (${student['section'] ?? ''})',
-                  ),
-                  pw.TextSpan(text: '   রোল: ', style: direct),
-                  pw.TextSpan(text: student['roll']?.toString() ?? ''),
-                ],
-              ),
-            ),
-            pw.SizedBox(height: 8),
-            pw.TableHelper.fromTextArray(
-              headers: ['বিষয়', 'নম্বর', 'সর্বোচ্চ', 'গ্রেড', 'GPA'],
-              data: [
-                for (final f in _families ?? [])
-                  [
-                    f['subject']?.toString() ?? '',
-                    '${f['total'] ?? 0}/${f['full'] ?? 0}',
-                    (_data!['subject_highest'] is Map
-                        ? ((_data!['subject_highest']
-                                      as Map)[f['subject']?.toString() ?? '']
-                                  ?.toString() ??
-                              '—')
-                        : '—'),
-                    f['letter_grade']?.toString() ?? '',
-                    f['grade_point']?.toString() ?? '',
-                  ],
-              ],
-              border: pw.TableBorder.all(),
-              cellAlignment: pw.Alignment.centerLeft,
-              headerStyle: pw.TextStyle(
-                font: bn,
-                fontWeight: pw.FontWeight.bold,
-                color: PdfColors.white,
-              ),
-              headerDecoration: pw.BoxDecoration(color: PdfColors.grey700),
-              cellPadding: const pw.EdgeInsets.all(6),
-            ),
-            pw.SizedBox(height: 10),
-            pw.RichText(
-              text: pw.TextSpan(
-                children: [
-                  pw.TextSpan(text: 'ফলাফল: ', style: direct),
-                  pw.TextSpan(text: result['result_status']?.toString() ?? ''),
-                  pw.TextSpan(text: '    GPA: ', style: direct),
-                  pw.TextSpan(text: result['final_gpa']?.toString() ?? ''),
-                ],
-              ),
-            ),
-            if ((_data!['remarks'] ?? '') != '')
-              pw.Padding(
-                padding: const pw.EdgeInsets.only(top: 8),
-                child: pw.Text('শিক্ষকের মন্তব্য: ${_data!['remarks']}'),
-              ),
-            pw.Spacer(),
-            pw.Row(
-              crossAxisAlignment: pw.CrossAxisAlignment.end,
-              children: [
-                signatory(signatures['class_teacher'] as Map?, 'শ্রেণি শিক্ষক'),
-                pw.SizedBox(width: 20),
-                signatory(signatures['head_teacher'] as Map?, 'প্রধান শিক্ষক'),
-              ],
-            ),
-          ],
+        build: (_) => MarksheetTemplate.build(
+          banglaFont: bn,
+          scriptFont: script,
+          logo: logo,
+          schoolName:
+              '${settings['school_name'] ?? 'Nazirhat Collegiate High School'}',
+          schoolAddress:
+              '${settings['school_address'] ?? settings['address'] ?? ''}',
+          eventName: '${event['name'] ?? ''}',
+          student: student,
+          event: event,
+          result: result,
+          families: families,
+          serialNo: '${data['serial_no'] ?? ''}',
+          attendanceText: attendanceText,
+          positionText: positionText,
+          classHighestGpa: '${data['class_highest_gpa'] ?? ''}',
+          remarks: '${data['remarks'] ?? ''}',
+          promotionText: _promotionLabel(promotion),
+          signatures: signatures,
+        ),
+      ),
+    );
+    doc.addPage(
+      pw.MultiPage(
+        maxPages: 200,
+        pageTheme: MarksheetTemplate.pageTheme(
+          watermark: watermark,
+          margin: 32,
+        ),
+        build: (_) => MarksheetTemplate.buildActivitiesPage(
+          banglaFont: bn,
+          schoolName:
+              '${settings['school_name'] ?? 'Nazirhat Collegiate High School'}',
+          eventName: '${event['name'] ?? ''}',
+          student: student,
+          activities: data['activities'] is Map
+              ? data['activities'] as Map
+              : const {},
+          activityPeriod: data['activity_period'] is Map
+              ? data['activity_period'] as Map
+              : const {},
         ),
       ),
     );
@@ -387,7 +200,7 @@ class _MarksheetScreenState extends State<MarksheetScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Result Card & Marksheet'),
+        title: const Text('সেশনভিত্তিক ফলাফল'),
         actions: [
           if (_data != null)
             IconButton(
@@ -421,19 +234,41 @@ class _MarksheetScreenState extends State<MarksheetScreen> {
           : Column(
               children: [
                 if (_events != null && _events!.isNotEmpty)
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(12, 12, 12, 0),
+                    child: Row(
+                      children: [
+                        Icon(Icons.archive_outlined, size: 18),
+                        SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'আগের সেশনের প্রকাশিত ফল, মার্কশিট ও কার্যক্রমের রেকর্ড',
+                            style: TextStyle(fontSize: 13),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                if (_events != null && _events!.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.all(12),
                     child: DropdownButtonFormField<String>(
                       initialValue: _selectedEventId,
                       decoration: const InputDecoration(
-                        labelText: 'পরীক্ষা নির্বাচন করুন',
+                        labelText: 'সেশন / শ্রেণি / পরীক্ষা নির্বাচন করুন',
                         border: OutlineInputBorder(),
                       ),
                       items: [
                         for (final ev in _events!)
                           DropdownMenuItem(
                             value: ev['id'].toString(),
-                            child: Text('${ev['name']}'),
+                            child: Text(
+                              '${ev['session_name'] ?? ev['year'] ?? ''} • '
+                              '${ev['result_class_name'] ?? ''} '
+                              '${ev['result_section'] ?? ''} • ${ev['name'] ?? ''}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
                           ),
                       ],
                       onChanged: (v) {
@@ -465,6 +300,9 @@ class _MarksheetScreenState extends State<MarksheetScreen> {
     final dual = _data!['dual_position'];
     final attendance = _data!['attendance'];
     final hidden = _data!['marksheet_hidden'] == true;
+    final activities = _data!['activities'] is Map
+        ? _data!['activities'] as Map
+        : const {};
     // Q9 dual merit: section position AND combined class position.
     final secPos = dual?['section'];
     final combPos = dual?['combined'];
@@ -476,7 +314,10 @@ class _MarksheetScreenState extends State<MarksheetScreen> {
             leading: const Icon(Icons.school, color: Colors.indigo),
             title: Text(student['name']?.toString() ?? ''),
             subtitle: Text(
-              '${student['class_name'] ?? ''} (${student['section'] ?? ''}) • Roll ${student['roll'] ?? ''}\n${event['name'] ?? ''}',
+              '${event['result_class_name'] ?? student['class_name'] ?? ''} '
+              '(${event['result_section'] ?? student['section'] ?? ''}) • '
+              'Roll ${event['result_roll'] ?? student['roll'] ?? promotion?['promoted_roll'] ?? ''}\n'
+              '${event['session_name'] ?? event['year'] ?? ''} • ${event['name'] ?? ''}',
             ),
             isThreeLine: true,
           ),
@@ -537,7 +378,7 @@ class _MarksheetScreenState extends State<MarksheetScreen> {
                         const SizedBox(width: 4),
                         Text(
                           (combPos != null || secPos != null)
-                              ? 'মেধা: ${secPos ?? '-'} (শাখা) • ${combPos ?? '-'} (সমন্বিত)'
+                              ? 'মেধা: ${secPos ?? '-'} / ${dual['section_of'] ?? '-'} (নিজ শাখা) • ${combPos ?? '-'} / ${dual['combined_of'] ?? '-'} (সব শাখা)'
                               : (position != null
                                     ? 'মেধা স্থান: ${position['rank']}/${position['of']}'
                                     : 'মেধা স্থান: —'),
@@ -749,16 +590,45 @@ class _MarksheetScreenState extends State<MarksheetScreen> {
               subtitle: Text('${_data!['remarks']}'),
             ),
           ),
+        Card(
+          child: ExpansionTile(
+            leading: const Icon(Icons.timeline),
+            title: const Text('এই সেশনের কার্যক্রম'),
+            subtitle: Text(
+              '${activities['from'] ?? ''} – ${activities['to'] ?? ''}',
+            ),
+            children: [
+              for (final entry in [
+                ['উপস্থিতি', 'attendance'],
+                ['দৈনিক অগ্রগতি', 'daily_reports'],
+                ['শ্রেণি পরীক্ষা', 'class_tests'],
+                ['বাড়ির কাজ', 'homework'],
+              ])
+                if (activities[entry[1]] is List)
+                  for (final item in (activities[entry[1]] as List).take(12))
+                    if (item is Map)
+                      ListTile(
+                        dense: true,
+                        title: Text(
+                          '${item['subject_name'] ?? item['exam_name'] ?? item['title'] ?? entry[0]}',
+                        ),
+                        subtitle: Text(
+                          '${item['date'] ?? item['report_date'] ?? item['due_date'] ?? ''} • ${item['final_state'] ?? item['status'] ?? item['learning_status'] ?? item['marks'] ?? ''}',
+                        ),
+                      ),
+            ],
+          ),
+        ),
         const SizedBox(height: 8),
         Center(
           child: TextButton.icon(
             icon: const Icon(Icons.description_outlined),
             label: Text(
               hidden
-                  ? 'PDF পাওয়া যাবে না'
+                  ? 'ফলাফল ও কার্যক্রমের PDF দেখুন'
                   : 'Result Card দেখুন (PDF ডাউনলোড সহ)',
             ),
-            onPressed: hidden ? null : _showResultCard,
+            onPressed: _showResultCard,
           ),
         ),
       ],

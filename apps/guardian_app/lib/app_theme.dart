@@ -102,8 +102,9 @@ class AppTheme {
           const TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
         ),
         iconTheme: WidgetStateProperty.resolveWith((states) {
-          if (states.contains(WidgetState.selected))
+          if (states.contains(WidgetState.selected)) {
             return const IconThemeData(color: Color(0xFF1E1B4B));
+          }
           return IconThemeData(color: Colors.grey.shade500);
         }),
       ),

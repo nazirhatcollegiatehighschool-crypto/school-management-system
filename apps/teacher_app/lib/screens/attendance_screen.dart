@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
 import '../api.dart';
 import 'attendance_analytics_screen.dart';
+import 'attendance_access_screen.dart';
 
 /// Attendance v2 — today's pending list + per-session entry + history browse.
 class AttendanceScreen extends StatefulWidget {
@@ -59,6 +60,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       appBar: AppBar(
         title: Text('হাজিরা · ${_dateStr}'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.swap_horiz_rounded),
+            tooltip: 'অনুমতি, delegation ও history',
+            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AttendanceAccessScreen())).then((_) => _load()),
+          ),
           IconButton(icon: const Icon(Icons.calendar_month), onPressed: _pickDate, tooltip: 'তারিখ'),
           IconButton(
             icon: const Icon(Icons.analytics),
@@ -249,7 +255,22 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text('$sessBn — $reasonBn',
                   style: TextStyle(fontWeight: FontWeight.w600, color: color, fontSize: 13)),
-              if (taken) Text('$present উপস্থিত · $absent অনুপস্থিত · $total মোট',
+              if (taken && sess == 'p5') ...[
+                Text('মোট ${m['eligible'] ?? 0} জন যোগ্য',
+                    style: const TextStyle(fontSize: 11, color: Colors.black54)),
+                Wrap(spacing: 2, children: [
+                  TextButton(
+                    onPressed: () => _openEntry(c, sess, p5Filter: 'with_leave'),
+                    style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 4), minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                    child: Text('ছুটি নিয়ে ${m['with_leave'] ?? 0} জন', style: const TextStyle(fontSize: 11, color: Colors.purple)),
+                  ),
+                  TextButton(
+                    onPressed: () => _openEntry(c, sess, p5Filter: 'without_leave'),
+                    style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 4), minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                    child: Text('ছুটি ছাড়া ${m['without_leave'] ?? 0} জন', style: const TextStyle(fontSize: 11, color: Colors.brown)),
+                  ),
+                ]),
+              ] else if (taken) Text('$present উপস্থিত · $absent অনুপস্থিত · $total মোট',
                   style: const TextStyle(fontSize: 11, color: Colors.black54)),
               if (taken && takenAt != null) Text('নেওয়া: ${takenAt.substring(0, 16)}',
                   style: const TextStyle(fontSize: 10, color: Colors.black38)),
@@ -261,7 +282,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     );
   }
 
-  void _openEntry(Map c, String sess) {
+  void _openEntry(Map c, String sess, {String? p5Filter}) {
     Navigator.push(context, MaterialPageRoute(
       builder: (_) => _EntryScreen(
         classId: c['class_id'] as int,
@@ -269,6 +290,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         session: sess,
         date: _dateStr,
         canSubmit: true,
+        p5Filter: p5Filter,
       ),
     )).then((_) => _load());
   }
@@ -281,8 +303,9 @@ class _EntryScreen extends StatefulWidget {
   final String session;
   final String date;
   final bool canSubmit;
+  final String? p5Filter;
   const _EntryScreen({required this.classId, required this.className,
-    required this.session, required this.date, required this.canSubmit});
+    required this.session, required this.date, required this.canSubmit, this.p5Filter});
 
   @override
   State<_EntryScreen> createState() => _EntryScreenState();
@@ -295,6 +318,7 @@ class _EntryScreenState extends State<_EntryScreen> {
   Map? _meta;
   bool _loading = true;
   bool _saving = false;
+  bool _submitted = false;
   String? _error;
   String _search = '';
   final _searchCtl = TextEditingController();
@@ -348,8 +372,19 @@ class _EntryScreenState extends State<_EntryScreen> {
       ? _students.where((s) => s['p5_eligible'] == true).toList()
       : _students;
 
+  bool get _readOnly {
+    final state = _meta?['state'];
+    return _submitted || _meta?['can_take'] != true ||
+        (state is Map && state['open'] != true);
+  }
+
   List get _filtered {
-    final base = _visibleStudents;
+    var base = _visibleStudents;
+    if (widget.p5Filter == 'with_leave') {
+      base = base.where((s) => (s['p5_outcome'] ?? s['status']) == 'early_departure_with_leave').toList();
+    } else if (widget.p5Filter == 'without_leave') {
+      base = base.where((s) => (s['p5_outcome'] ?? s['status']) == 'early_departure_no_leave').toList();
+    }
     if (_search.isEmpty) return base;
     final q = _search.toLowerCase();
     return base.where((s) {
@@ -388,14 +423,17 @@ class _EntryScreenState extends State<_EntryScreen> {
         };
       }).toList();
       final idem = const Uuid().v4();
-      await Api.postOptimistic(
+      final result = await Api.postOptimistic(
           '/attendance/class/${widget.classId}',
           {'date': widget.date, 'session': widget.session, 'records': records, 'idem_key': idem},
           {});
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('$_sessBn হাজিরা জমা হয়েছে')));
-      Navigator.pop(context);
+          SnackBar(content: Text(Api.isQueued(result)
+              ? '$_sessBn হাজিরা ফোনে সেভ হয়েছে; online হলে পাঠানো হবে'
+              : '$_sessBn হাজিরা জমা হয়েছে')));
+      setState(() { _submitted = true; _saving = false; });
+      if (!Api.isQueued(result)) await _load();
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
@@ -508,17 +546,29 @@ class _EntryScreenState extends State<_EntryScreen> {
             borderRadius: BorderRadius.circular(12),
             border: Border.all(color: const Color(0xFFE2E8F0)),
           ),
-          child: Wrap(spacing: 14, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: [
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(
+              widget.session == 'p5'
+                  ? '৫ম পিরিয়ড: ${_visibleStudents.length} জন যোগ্য শিক্ষার্থীর মধ্যে ${_count('early_departure_with_leave') + _count('early_departure_no_leave')} জনের প্রস্থান রেকর্ড'
+                  : '${_visibleStudents.length} জনের মধ্যে ${_count('present') + _count('late')} জন উপস্থিত, ${_count('absent')} জন অনুপস্থিত',
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: Color(0xFF1E293B)),
+            ),
+            const SizedBox(height: 8),
+            Wrap(spacing: 14, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: [
             if (widget.session == 'p5') ...[
+              _sumChip('মোট যোগ্য ${_visibleStudents.length} জনের মধ্যে', _visibleStudents.length, Colors.indigo),
               _sumChip('ছুটি নিয়ে প্রস্থান', _count('early_departure_with_leave'), Colors.purple),
               _sumChip('ছুটি ছাড়া প্রস্থান', _count('early_departure_no_leave'), Colors.brown),
             ] else ...[
-              _sumChip('উপস্থিত', _count('present'), Colors.green),
+              _sumChip('মোট শিক্ষার্থী', _visibleStudents.length, Colors.indigo),
+              _sumChip('উপস্থিত', _count('present') + _count('late'), Colors.green),
               _sumChip('অনুপস্থিত', _count('absent'), Colors.red),
-              _sumChip('দেরি', _count('late'), Colors.orange),
-              _sumChip('ছুটি', _count('leave'), Colors.blue),
+              if (_count('late') > 0) _sumChip('দেরি', _count('late'), Colors.orange),
+              if (_count('leave') > 0) _sumChip('ছুটি', _count('leave'), Colors.blue),
             ],
+            if (_submitted) const Text('জমা সম্পন্ন', style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
             if (holiday) Text('📅 ${occ ?? 'ছুটি'}', style: const TextStyle(color: Colors.orange, fontWeight: FontWeight.w600)),
+            ]),
           ]),
         ),
         // quick actions
@@ -535,7 +585,7 @@ class _EntryScreenState extends State<_EntryScreen> {
               }),
               const SizedBox(width: 8),
             ],
-            _quickBtn('Reopen চাই', Icons.lock_open, Colors.orange, _requestReopen),
+            if (canTake) _quickBtn('Reopen চাই', Icons.lock_open, Colors.orange, _requestReopen),
           ]),
         ),
         if (!open && _meta?['taken'] == true)
@@ -588,7 +638,7 @@ class _EntryScreenState extends State<_EntryScreen> {
         child: Padding(
           padding: const EdgeInsets.all(12),
           child: FilledButton.icon(
-            onPressed: (open && canTake && !_saving) ? _save : null,
+            onPressed: (open && canTake && !_saving && !_submitted) ? _save : null,
             icon: _saving
                 ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                 : const Icon(Icons.save),
@@ -648,7 +698,7 @@ class _EntryScreenState extends State<_EntryScreen> {
                 child: Text('সকাল: ${_statusBn(morning)}',
                     style: const TextStyle(fontSize: 10, color: Colors.black45)),
               ),
-            IconButton(
+            if (!_readOnly) IconButton(
               visualDensity: VisualDensity.compact,
               tooltip: 'নোট / কারণ',
               icon: Icon(
@@ -665,7 +715,16 @@ class _EntryScreenState extends State<_EntryScreen> {
               child: Text('নোট: $note', style: const TextStyle(fontSize: 11, color: Colors.black54)),
             ),
           const SizedBox(height: 2),
-          Wrap(spacing: 6, runSpacing: 6, children: widget.session == 'p5'
+          if (_readOnly && widget.session == 'p5')
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                  (s['p5_outcome'] ?? s['status']) == null && _meta?['taken'] != true
+                      ? '৫ম পিরিয়ডের হাজিরা এখনো জমা হয়নি'
+                      : _statusBn((s['p5_outcome'] ?? s['status'] ?? '').toString()),
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.black54)),
+            )
+          else Wrap(spacing: 6, runSpacing: 6, children: widget.session == 'p5'
               ? [
                   _statusChip(sid, 'early_departure_with_leave', 'ছুটি নিয়ে প্রস্থান', Colors.purple),
                   _statusChip(sid, 'early_departure_no_leave', 'ছুটি ছাড়া প্রস্থান', Colors.brown),
@@ -688,13 +747,15 @@ class _EntryScreenState extends State<_EntryScreen> {
     'leave' => 'ছুটি',
     'early_departure_with_leave' => 'ছুটি নিয়ে প্রস্থান',
     'early_departure_no_leave' => 'ছুটি ছাড়া প্রস্থান',
+    'p5_stayed' => '৫ম পিরিয়ড পর্যন্ত স্কুলে ছিলেন',
+    '' => 'প্রস্থান রেকর্ড নেই',
     _ => st,
   };
 
   Widget _statusChip(int sid, String value, String label, Color color) {
     final sel = _status[sid] == value;
     return InkWell(
-      onTap: () {
+      onTap: _readOnly ? null : () {
         setState(() => _status[sid] = value);
         if (value == 'leave' ||
             value == 'early_departure_with_leave' ||

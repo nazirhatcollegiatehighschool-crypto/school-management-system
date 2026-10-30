@@ -14,7 +14,6 @@ class _ResultsScreenState extends State<ResultsScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabs;
   List _events = [];
-  Map<int, bool> _classPublishStatus = {}; // classId -> published status
   bool _loading = true;
   String? _error;
   // Drill state: event -> class -> students -> open student subjects.
@@ -59,7 +58,11 @@ class _ResultsScreenState extends State<ResultsScreen>
     }
   }
 
-  List get _running => _events.where((e) => e['is_published'] != 1).toList();
+  // Running means an administrator has unlocked at least one subject. Locked
+  // events remain manageable from the exam dashboard and cannot be published.
+  List get _running => _events
+      .where((e) => e['is_published'] != 1 && (e['entry_open_count'] ?? 0) > 0)
+      .toList();
   List get _published => _events.where((e) => e['is_published'] == 1).toList();
   // Result Publication: only unlocked (entry_open) and unpublished events
   List get _publicationReady => _events
@@ -109,13 +112,24 @@ class _ResultsScreenState extends State<ResultsScreen>
       });
       if (!mounted) return;
       _load();
+      final promotionRows = (r['auto_promotions'] as List?) ?? const [];
+      final promotionErrors = promotionRows
+          .whereType<Map>()
+          .where((row) => row['error'] != null)
+          .toList();
       final already = r['already_notified'] == true;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          backgroundColor: Colors.green,
+          backgroundColor: promotionErrors.isEmpty
+              ? Colors.green
+              : Colors.orange,
           content: Text(
-            already
-                ? '"${ev['name']}" Published-এ গেছে (আগেই notify পাঠানো ছিল — duplicate যায়নি)।'
+            r['already_published'] == true
+                ? '"${ev['name']}" আগে থেকেই Published।'
+                : promotionErrors.isNotEmpty
+                ? 'Result Published হয়েছে, তবে ${promotionErrors.length}টি class-এর promotion শেষ হয়নি; Promotion Review থেকে যাচাই করুন।'
+                : already
+                ? '"${ev['name']}" Published-এ গেছে (Guardian notification আগেই complete ছিল)।'
                 : '"${ev['name']}" Published-এ গেছে।${notify ? ' Guardian-কে পাঠানো হয়েছে (${r['notified']} জন — শুধু linked সন্তানের result)।' : ''}',
           ),
         ),
@@ -280,6 +294,7 @@ class _ResultsScreenState extends State<ResultsScreen>
       final bytes = await AdminPdfs.classResultCards(
         {'subjects': subjects, 'rows': rows},
         eventName: '${_drill!['name'] ?? ''}',
+        event: _drill,
         cls: _classById(_drillClass!) ?? const {},
         settings: settings is Map ? settings : const {},
         signatures: signatures is Map ? signatures : const {},
@@ -314,150 +329,44 @@ class _ResultsScreenState extends State<ResultsScreen>
 
   // ==================== RESULT PUBLICATION CARD ====================
   Widget _publicationEventCard(Map ev) {
-    final entryOpen = (ev['entry_open_count'] ?? 0) > 0;
-    final classProgress =
-        (ev['classes'] as List?)?.map((c) {
-          final total =
-              (c['assigned_subjects'] as num? ??
-                      c['subject_count'] as num? ??
-                      0)
-                  .toInt();
-          final done = (c['subjects_with_marks'] as num? ?? 0).toInt();
-          final pct = total > 0 ? (done / total * 100).round() : 0;
-          return {
-            'class_id': c['class_id'],
-            'class_name': c['class_name'],
-            'section': c['section'],
-            'group_name': c['group_name'],
-            'total': total,
-            'done': done,
-            'pct': pct,
-          };
-        }).toList() ??
-        [];
-
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 6),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    '${ev['name']}',
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w800,
-                      fontSize: 15,
+      child: Column(
+        children: [
+          InkWell(
+            onTap: () => _openDrill(ev),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  const Icon(Icons.assignment_rounded, color: Colors.indigo),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      '${ev['name']}',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 15,
+                      ),
                     ),
                   ),
-                ),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 3,
-                  ),
-                  decoration: BoxDecoration(
-                    color: entryOpen
-                        ? Colors.green.shade100
-                        : Colors.red.shade100,
-                    borderRadius: BorderRadius.circular(99),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        entryOpen ? Icons.lock_open : Icons.lock,
-                        size: 14,
-                        color: entryOpen ? Colors.green : Colors.red,
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        entryOpen ? 'Unlocked' : 'Locked',
-                        style: TextStyle(
-                          fontSize: 10.5,
-                          fontWeight: FontWeight.bold,
-                          color: entryOpen
-                              ? Colors.green.shade800
-                              : Colors.red.shade800,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            // Class-wise progress (read-only)
-            if (classProgress.isNotEmpty) ...[
-              const Text(
-                'Class-wise Result Progress:',
-                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                  const Icon(Icons.expand_more_rounded),
+                ],
               ),
-              const SizedBox(height: 4),
-              for (final c in classProgress)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 2),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          '${c['class_name']} (${c['group_name'] ?? c['section'] ?? ''})',
-                          style: const TextStyle(fontSize: 11),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Container(
-                        width: 80,
-                        child: LinearProgressIndicator(
-                          value: c['pct'] / 100,
-                          minHeight: 6,
-                          backgroundColor: Colors.grey.shade200,
-                          color: c['pct'] == 100 ? Colors.green : Colors.blue,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        '${c['pct']}%',
-                        style: const TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              const SizedBox(height: 12),
-            ] else ...[
-              const Text(
-                'Class data not loaded. Tap "খুলুন" to load.',
-                style: TextStyle(fontSize: 11, color: Colors.grey),
-              ),
-              const SizedBox(height: 12),
-            ],
-            Wrap(
-              spacing: 8,
-              runSpacing: 6,
-              children: [
-                OutlinedButton.icon(
-                  icon: const Icon(Icons.search, size: 16),
-                  label: const Text('খুলুন', style: TextStyle(fontSize: 12)),
-                  onPressed: () => _openDrill(ev),
-                ),
-                FilledButton.icon(
-                  icon: const Icon(Icons.publish_rounded, size: 16),
-                  label: const Text(
-                    'Publish ✓',
-                    style: TextStyle(fontSize: 12),
-                  ),
-                  onPressed: () => _askPublish(ev),
-                ),
-              ],
             ),
-          ],
-        ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            child: SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                icon: const Icon(Icons.publish_rounded, size: 16),
+                label: const Text('Publish'),
+                onPressed: () => _askPublish(ev),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -598,7 +507,7 @@ class _ResultsScreenState extends State<ResultsScreen>
                                     padding: EdgeInsets.all(32),
                                     child: Center(
                                       child: Text(
-                                        'কোনো running exam নেই। Results → New Event থেকে তৈরি করুন।',
+                                        'কোনো unlocked running exam নেই। Exam Dashboard থেকে exam unlock করুন।',
                                       ),
                                     ),
                                   ),
@@ -795,7 +704,11 @@ class _ResultsScreenState extends State<ResultsScreen>
                                                   ),
                                                 ),
                                                 subtitle: Text(
-                                                  'GPA ${s['final_gpa'] ?? '-'} • ${s['result_status'] ?? '-'}${s['position'] != null ? ' • #${s['position']}' : ''}',
+                                                  'GPA ${s['final_gpa'] ?? '-'} • ${s['result_status'] ?? '-'}${s['section_position'] != null || s['combined_position'] != null
+                                                      ? ' • শাখা ${s['section_position'] ?? '-'} / ${s['section_of'] ?? '-'} • সব শাখা ${s['combined_position'] ?? '-'} / ${s['combined_of'] ?? '-'}'
+                                                      : s['position'] != null
+                                                      ? ' • #${s['position']}'
+                                                      : ''}',
                                                   style: const TextStyle(
                                                     fontSize: 11.5,
                                                   ),

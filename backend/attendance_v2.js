@@ -83,6 +83,13 @@ async function getSetting(key, def) {
   } catch { return def; }
 }
 
+async function getGlobalHoliday(date) {
+  try {
+    const [[row]] = await pool.query('SELECT title FROM holidays WHERE date=?', [date]);
+    return row ? { holiday: true, title: row.title || null } : { holiday: false, title: null };
+  } catch (_) { return { holiday: false, title: null }; }
+}
+
 async function getTeacherTokens(userIds) {
   const ids = [...new Set((userIds || []).filter(Boolean))];
   if (!ids.length) return [];
@@ -177,6 +184,14 @@ async function rebuildSummary(studentId, year, month) {
     `SELECT date, session, status FROM attendance
      WHERE student_id=? AND date >= ?::date AND date < (?::date + INTERVAL '1 month')`,
     [studentId, from, from]);
+  let holidayDates = new Set();
+  try {
+    const [year, month] = String(from).slice(0, 7).split('-').map(Number);
+    const monthEnd = new Date(Date.UTC(year, month, 0)).toISOString().slice(0, 10);
+    const monthStart = `${year}-${String(month).padStart(2, '0')}-01`;
+    const [holidays] = await pool.query('SELECT date FROM holidays WHERE date BETWEEN ? AND ?', [monthStart, monthEnd]);
+    holidayDates = new Set(holidays.map(h => ymd(h.date)));
+  } catch (_) {}
   let classId = null;
   try {
     const [[st]] = await pool.query(`SELECT class_id FROM students WHERE id=?`, [studentId]);
@@ -195,6 +210,7 @@ async function rebuildSummary(studentId, year, month) {
   }
   let present = 0, late = 0, leave = 0, earlyWithLeave = 0, earlyNoLeave = 0, absent = 0, school = 0;
   for (const [d, s] of byDay) {
+    if (holidayDates.has(d)) continue;
     const f = dayFinal(s.morning || null, s.p5 || null, await known(d));
     if (f === null) continue;
     school++;
@@ -227,6 +243,7 @@ await pool.query(
 async function runReminders() {
   const today = dhakaDate();
   if (isWeekend(today)) return 0;
+  if ((await getGlobalHoliday(today)).holiday) return 0;
   const now = new Date();
   const cur = nowDhakaMinutes(now);
   const rTime = hmToMin(await getSetting('reminder_time', '10:30'));
@@ -318,6 +335,7 @@ async function runRollup() {
 module.exports = {
   dhakaDate, dow, isWeekend, nowDhakaMinutes, hmToMin, hhmm,
   getSlots, sessionWindows, inWindow, percent, getSetting,
+  getGlobalHoliday,
   getTeacherTokens, getAdminTokens, fifthPeriodTeachers, p5Applicable,
   dayFinal, rebuildSummary, runReminders, runRollup,
 };

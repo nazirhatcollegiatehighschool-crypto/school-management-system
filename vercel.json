@@ -7,7 +7,10 @@
       "use": "@vercel/node",
       "config": {
         "includeFiles": [
-          "backend/dist/**"
+          "backend/dist/**",
+          "backend/apks/AdminApp.apk",
+          "backend/apks/TeacherApp.apk",
+          "backend/apks/GuardianApp.apk"
         ]
       }
     }
@@ -19,7 +22,9 @@
     }
   ],
   "crons": [
+    { "path": "/api/cron/attendance-access-expiry", "schedule": "* * * * *" },
     { "path": "/api/cron/attendance-reminders", "schedule": "0 9 * * *" },
-    { "path": "/api/cron/attendance-rollup", "schedule": "0 16 * * *" }
+    { "path": "/api/cron/attendance-rollup", "schedule": "0 16 * * *" },
+    { "path": "/api/cron/academic-session", "schedule": "5 18 * * *" }
   ]
 }

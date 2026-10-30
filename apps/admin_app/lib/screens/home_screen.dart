@@ -12,6 +12,7 @@ import 'routines_screen.dart';
 import 'attendance_screen.dart';
 import 'login_screen.dart';
 import 'exam_center_screen.dart';
+import 'approvals_screen.dart';
 import 'delete_logs_screen.dart';
 import '../widgets/offline_sync_banner.dart';
 
@@ -138,6 +139,13 @@ class _HomeScreenState extends State<HomeScreen> {
         icon: Icons.school_rounded,
         color: const Color(0xFF675DEB),
         screen: const ExamCenterScreen(),
+      ),
+      (
+        title: 'পরীক্ষা অনুমোদন',
+        subtitle: 'Submitted marks ও re-entry request',
+        icon: Icons.fact_check_rounded,
+        color: const Color(0xFF0F8B72),
+        screen: const ApprovalsScreen(),
       ),
       (
         title: 'Routines',

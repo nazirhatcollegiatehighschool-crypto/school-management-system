@@ -11,6 +11,7 @@ class StudentsScreen extends StatefulWidget {
 class _StudentsScreenState extends State<StudentsScreen> {
   List _rows = [];
   List _classes = [];
+  List<String> _religions = [];
   bool _loading = true;
   String? _error;
   String _search = '';
@@ -23,6 +24,24 @@ class _StudentsScreenState extends State<StudentsScreen> {
     super.initState();
     _load();
     _loadClasses();
+    _loadReligions();
+  }
+
+  Future<void> _loadReligions() async {
+    try {
+      final response = await Api.get('/admin/meta/religions');
+      if (mounted && response is List) {
+        setState(
+          () => _religions = response
+              .map((value) => value.toString().trim())
+              .where((value) => value.isNotEmpty)
+              .toSet()
+              .toList(),
+        );
+      }
+    } catch (_) {
+      // Existing student values remain selectable if the options request fails.
+    }
   }
 
   Future<void> _loadClasses() async {
@@ -38,11 +57,12 @@ class _StudentsScreenState extends State<StudentsScreen> {
     });
     try {
       final r = await Api.get('/admin/students');
-      if (mounted)
+      if (mounted) {
         setState(() {
           _rows = r;
           _loading = false;
         });
+      }
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -173,6 +193,7 @@ class _StudentsScreenState extends State<StudentsScreen> {
   }
 
   void _showForm([dynamic s]) {
+    final messenger = ScaffoldMessenger.of(context);
     final code = TextEditingController(text: s?['student_code'] ?? '');
     final name = TextEditingController(text: s?['name'] ?? '');
     final roll = TextEditingController(text: s?['roll']?.toString() ?? '');
@@ -182,11 +203,28 @@ class _StudentsScreenState extends State<StudentsScreen> {
     );
     final gname = TextEditingController(text: s?['guardian_name'] ?? '');
     final phone = TextEditingController(text: s?['guardian_phone'] ?? '');
+    final father = TextEditingController(text: s?['father_name'] ?? '');
+    final mother = TextEditingController(text: s?['mother_name'] ?? '');
+    final guardianEmail = TextEditingController(
+      text: s?['guardian_email'] ?? '',
+    );
+    final studentPhone = TextEditingController(text: s?['phone'] ?? '');
+    final studentEmail = TextEditingController(text: s?['email'] ?? '');
+    String? religionValue = (s?['religion'] ?? '').toString().trim();
+    if (religionValue.isEmpty) religionValue = null;
+    String? genderValue = (s?['gender'] ?? '').toString().trim();
+    if (genderValue.isEmpty) genderValue = null;
+    final bloodGroup = TextEditingController(text: s?['blood_group'] ?? '');
+    final address = TextEditingController(text: s?['address'] ?? '');
+    final birthCert = TextEditingController(text: s?['birth_cert_no'] ?? '');
     int? classId = s?['class_id'];
     String? cls = s?['class_name'];
     String? sec = s?['section'];
+    String? compulsorySubject = s?['compulsory_subject']?.toString();
+    String? optionalSubject = s?['optional_subject']?.toString();
     bool scholarship =
         s?['receives_scholarship'] == true || s?['receives_scholarship'] == 1;
+    bool isSaving = false;
 
     showModalBottomSheet(
       context: context,
@@ -201,6 +239,16 @@ class _StudentsScreenState extends State<StudentsScreen> {
               .where((c) => c['name'] == cls)
               .toList();
           final isGroup = selectedClasses.any((c) => c['group_name'] != null);
+          final classLevel =
+              int.tryParse(
+                RegExp(r'\d+').firstMatch(cls ?? '')?.group(0) ?? '0',
+              ) ??
+              0;
+          final groupText = (sec ?? '').toLowerCase();
+          final isGradeNineTen = classLevel == 9 || classLevel == 10;
+          final isArts =
+              groupText.contains('arts') || groupText.contains('humanit');
+          final isScience = groupText.contains('science');
           final sectionOpts =
               (isGroup
                       ? selectedClasses
@@ -243,6 +291,8 @@ class _StudentsScreenState extends State<StudentsScreen> {
               cls = name;
               sec = null;
               classId = null;
+              compulsorySubject = null;
+              optionalSubject = null;
               if (_classes.any((c) => c['name'] == name)) {
                 final group = _classes.any(
                   (c) => c['name'] == name && c['group_name'] != null,
@@ -263,6 +313,8 @@ class _StudentsScreenState extends State<StudentsScreen> {
           void pickSection(String? v) {
             setSheet(() {
               sec = v;
+              compulsorySubject = null;
+              optionalSubject = null;
               final group = _classes.any(
                 (c) => c['name'] == cls && c['group_name'] != null,
               );
@@ -332,8 +384,10 @@ class _StudentsScreenState extends State<StudentsScreen> {
                   const SizedBox(height: 12),
 
                   Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Expanded(
+                        flex: 3,
                         child: TextField(
                           controller: roll,
                           keyboardType: TextInputType.number,
@@ -345,13 +399,36 @@ class _StudentsScreenState extends State<StudentsScreen> {
                           ),
                         ),
                       ),
-                      const SizedBox(width: 10),
+                      const SizedBox(width: 8),
                       Expanded(
+                        flex: 4,
+                        child: TextField(
+                          controller: birthCert,
+                          keyboardType: TextInputType.number,
+                          decoration: InputDecoration(
+                            labelText: s == null
+                                ? 'জন্মনিবন্ধন *'
+                                : 'জন্মনিবন্ধন',
+                            helperText:
+                                s?['birth_cert_placeholder'] == true ||
+                                    s?['birth_cert_placeholder'] == 1
+                                ? 'অস্থায়ী নম্বর'
+                                : null,
+                            prefixIcon: const Icon(
+                              Icons.badge_outlined,
+                              size: 18,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        flex: 4,
                         child: TextField(
                           controller: dob,
                           readOnly: true,
                           decoration: const InputDecoration(
-                            labelText: 'Date of Birth',
+                            labelText: 'জন্মতারিখ',
                             prefixIcon: Icon(
                               Icons.calendar_today_rounded,
                               size: 18,
@@ -373,7 +450,6 @@ class _StudentsScreenState extends State<StudentsScreen> {
                     ],
                   ),
                   const SizedBox(height: 12),
-
                   Row(
                     children: [
                       Expanded(
@@ -419,6 +495,44 @@ class _StudentsScreenState extends State<StudentsScreen> {
                     ],
                   ),
                   const SizedBox(height: 12),
+                  if (isGradeNineTen && isGroup && isArts) ...[
+                    DropdownButtonFormField<String>(
+                      initialValue: compulsorySubject,
+                      decoration: const InputDecoration(
+                        labelText: 'Compulsory subject *',
+                      ),
+                      items: const ['Civics', 'Economics']
+                          .map(
+                            (v) => DropdownMenuItem(value: v, child: Text(v)),
+                          )
+                          .toList(),
+                      onChanged: (v) => setSheet(() => compulsorySubject = v),
+                    ),
+                    const SizedBox(height: 12),
+                  ],
+                  if (isGradeNineTen && isGroup) ...[
+                    DropdownButtonFormField<String>(
+                      initialValue: optionalSubject,
+                      decoration: const InputDecoration(
+                        labelText: 'Optional subject *',
+                      ),
+                      items:
+                          (isScience
+                                  ? const [
+                                      'Higher Mathematics',
+                                      'Agriculture',
+                                      'Home Science',
+                                    ]
+                                  : const ['Agriculture', 'Home Science'])
+                              .map(
+                                (v) =>
+                                    DropdownMenuItem(value: v, child: Text(v)),
+                              )
+                              .toList(),
+                      onChanged: (v) => setSheet(() => optionalSubject = v),
+                    ),
+                    const SizedBox(height: 12),
+                  ],
 
                   TextField(
                     controller: gname,
@@ -438,6 +552,104 @@ class _StudentsScreenState extends State<StudentsScreen> {
                       prefixIcon: Icon(Icons.phone_outlined, size: 20),
                     ),
                   ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: father,
+                    textCapitalization: TextCapitalization.words,
+                    decoration: const InputDecoration(labelText: 'পিতার নাম'),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: mother,
+                    textCapitalization: TextCapitalization.words,
+                    decoration: const InputDecoration(labelText: 'মাতার নাম'),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: guardianEmail,
+                    keyboardType: TextInputType.emailAddress,
+                    decoration: const InputDecoration(
+                      labelText: 'অভিভাবকের ইমেইল',
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue: religionValue,
+                    decoration: InputDecoration(
+                      labelText: 'ধর্ম',
+                      helperText: _religions.isEmpty
+                          ? 'Database থেকে ধর্মের তালিকা লোড হচ্ছে বা পাওয়া যায়নি'
+                          : null,
+                    ),
+                    hint: const Text('ধর্ম নির্বাচন করুন'),
+                    items: {..._religions, ?religionValue}
+                        .map(
+                          (value) => DropdownMenuItem(
+                            value: value,
+                            child: Text(value),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (value) => setSheet(() => religionValue = value),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: DropdownButtonFormField<String>(
+                          initialValue: genderValue,
+                          decoration: const InputDecoration(labelText: 'লিঙ্গ'),
+                          items: <String>{
+                            'Male',
+                            'Female',
+                            'Other',
+                            if (genderValue != null) genderValue!,
+                          }
+                              .map(
+                                (v) => DropdownMenuItem<String>(
+                                  value: v,
+                                  child: Text(v),
+                                ),
+                              )
+                              .toList(),
+                          onChanged: (v) =>
+                              setSheet(() => genderValue = v),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: TextField(
+                          controller: bloodGroup,
+                          textCapitalization: TextCapitalization.characters,
+                          decoration: const InputDecoration(
+                            labelText: 'রক্তের গ্রুপ',
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: studentPhone,
+                    keyboardType: TextInputType.phone,
+                    decoration: const InputDecoration(
+                      labelText: 'শিক্ষার্থীর ফোন',
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: studentEmail,
+                    keyboardType: TextInputType.emailAddress,
+                    decoration: const InputDecoration(
+                      labelText: 'শিক্ষার্থীর ইমেইল',
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: address,
+                    maxLines: 2,
+                    decoration: const InputDecoration(labelText: 'ঠিকানা'),
+                  ),
                   const SizedBox(height: 20),
 
                   SwitchListTile(
@@ -451,68 +663,173 @@ class _StudentsScreenState extends State<StudentsScreen> {
                     style: FilledButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 14),
                     ),
-                    onPressed: () async {
-                      if (name.text.trim().isEmpty ||
-                          roll.text.trim().isEmpty ||
-                          classId == null) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text(
-                              'Please fill required fields (Name, Roll, Class)',
-                            ),
-                          ),
-                        );
-                        return;
-                      }
-                      if (dupErr != null) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            backgroundColor: Colors.redAccent,
-                            content: Text(dupErr!),
-                          ),
-                        );
-                        return;
-                      }
+                    onPressed: isSaving
+                        ? null
+                        : () async {
+                            if (name.text.trim().isEmpty ||
+                                roll.text.trim().isEmpty ||
+                                classId == null ||
+                                (s == null && birthCert.text.trim().isEmpty) ||
+                                (isGradeNineTen &&
+                                    isArts &&
+                                    compulsorySubject == null) ||
+                                (isGradeNineTen &&
+                                    isGroup &&
+                                    optionalSubject == null)) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    s == null
+                                        ? 'Name, Roll, Class ও জন্মনিবন্ধন নম্বর পূরণ করুন'
+                                        : 'Name, Roll ও Class পূরণ করুন',
+                                  ),
+                                ),
+                              );
+                              return;
+                            }
+                            if (dupErr != null) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  backgroundColor: Colors.redAccent,
+                                  content: Text(dupErr!),
+                                ),
+                              );
+                              return;
+                            }
+                            setSheet(() => isSaving = true);
 
-                      final body = {
-                        'name': name.text.trim(),
-                        'roll': int.tryParse(roll.text.trim()) ?? 0,
-                        'class_id': classId,
-                        'dob': dob.text.trim().isEmpty ? null : dob.text.trim(),
-                        'guardian_name': gname.text.trim().isEmpty
-                            ? null
-                            : gname.text.trim(),
-                        'guardian_phone': phone.text.trim().isEmpty
-                            ? null
-                            : phone.text.trim(),
-                        'receives_scholarship': scholarship,
-                      };
+                            final body = {
+                              // The update API historically treated PUT as a full
+                              // replacement. Send untouched profile fields too so
+                              // older deployments do not blank them during an edit.
+                              if (s != null) ...{
+                                'student_code': s['student_code'],
+                                'guardian_id': s['guardian_id'],
+                                'status': s['status'],
+                              },
+                              'name': name.text.trim(),
+                              'roll': int.tryParse(roll.text.trim()) ?? 0,
+                              if (s == null || classId != s['class_id'])
+                                'class_id': classId,
+                              'dob': dob.text.trim().isEmpty
+                                  ? null
+                                  : dob.text.trim(),
+                              'guardian_name': gname.text.trim().isEmpty
+                                  ? null
+                                  : gname.text.trim(),
+                              'guardian_phone': phone.text.trim().isEmpty
+                                  ? null
+                                  : phone.text.trim(),
+                              'father_name': father.text.trim().isEmpty
+                                  ? null
+                                  : father.text.trim(),
+                              'mother_name': mother.text.trim().isEmpty
+                                  ? null
+                                  : mother.text.trim(),
+                              'guardian_email':
+                                  guardianEmail.text.trim().isEmpty
+                                  ? null
+                                  : guardianEmail.text.trim(),
+                              'religion': religionValue,
+                              'gender': genderValue,
+                              'blood_group': bloodGroup.text.trim().isEmpty
+                                  ? null
+                                  : bloodGroup.text.trim(),
+                              'phone': studentPhone.text.trim().isEmpty
+                                  ? null
+                                  : studentPhone.text.trim(),
+                              'email': studentEmail.text.trim().isEmpty
+                                  ? null
+                                  : studentEmail.text.trim(),
+                              'address': address.text.trim().isEmpty
+                                  ? null
+                                  : address.text.trim(),
+                              if (birthCert.text.trim().isNotEmpty ||
+                                  (s != null &&
+                                      (s['birth_cert_no'] ?? '')
+                                          .toString()
+                                          .isNotEmpty))
+                                'birth_cert_no': birthCert.text.trim(),
+                              'compulsory_subject': compulsorySubject,
+                              'optional_subject': optionalSubject,
+                              'receives_scholarship': scholarship,
+                            };
 
-                      try {
-                        if (s == null) {
-                          await Api.post('/admin/students', body);
-                        } else {
-                          await Api.put('/admin/students/${s['id']}', body);
-                        }
-                        if (!mounted) return;
-                        Navigator.pop(context);
-                        _load();
-                      } catch (e) {
-                        if (!mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            backgroundColor: Colors.redAccent,
-                            content: Text(
-                              e.toString().replaceFirst('Exception: ', ''),
-                            ),
+                            try {
+                              dynamic result;
+                              if (s == null) {
+                                result = await Api.post(
+                                  '/admin/students',
+                                  body,
+                                );
+                              } else {
+                                result = await Api.put(
+                                  '/admin/students/${s['id']}',
+                                  body,
+                                );
+                              }
+                              if (!ctx.mounted || !mounted) return;
+                              Navigator.pop(ctx);
+                              await _load();
+                              final offlineQueued =
+                                  result is Map &&
+                                  result['offline_queued'] == true;
+                              final assignmentWarning =
+                                  result is Map &&
+                                  result['subject_assignment_warning'] == true;
+                              final message = offlineQueued
+                                  ? 'ইন্টারনেট নেই—তথ্য ফোনে রাখা হয়েছে; সংযোগ এলে পাঠানো হবে।'
+                                  : assignmentWarning
+                                  ? 'শিক্ষার্থীর তথ্য সংরক্ষিত হয়েছে; subject assignment যাচাই দরকার।'
+                                  : s == null
+                                  ? 'শিক্ষার্থী যোগ হয়েছে।'
+                                  : 'শিক্ষার্থীর তথ্য আপডেট হয়েছে।';
+                              if (mounted) {
+                                messenger
+                                  ..hideCurrentSnackBar()
+                                  ..showSnackBar(
+                                    SnackBar(content: Text(message)),
+                                  );
+                              }
+                            } catch (e) {
+                              if (ctx.mounted) setSheet(() => isSaving = false);
+                              if (!mounted) return;
+                              await _load();
+                              if (!mounted) return;
+                              final detail = e.toString().replaceFirst(
+                                'Exception: ',
+                                '',
+                              );
+                              final message = detail == 'Server error'
+                                  ? 'Server update ব্যর্থ। তালিকা refresh করেছি—আবার চেষ্টা করার আগে তথ্য মিলিয়ে নিন।'
+                                  : detail;
+                              messenger.showSnackBar(
+                                SnackBar(
+                                  backgroundColor: Colors.redAccent,
+                                  content: Text(message),
+                                ),
+                              );
+                            }
+                          },
+                    child: isSaving
+                        ? const Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              ),
+                              SizedBox(width: 10),
+                              Text('Updating…'),
+                            ],
+                          )
+                        : Text(
+                            s == null ? 'Save Student' : 'Update Student',
+                            style: const TextStyle(fontWeight: FontWeight.bold),
                           ),
-                        );
-                      }
-                    },
-                    child: Text(
-                      s == null ? 'Save Student' : 'Update Student',
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
                   ),
                 ],
               ),

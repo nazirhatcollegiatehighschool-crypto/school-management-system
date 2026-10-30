@@ -2,7 +2,7 @@
 REM ============================================================
 REM  School 24/7 watchdog - keeps the full stack alive.
 REM  Started automatically (start-all.bat / Windows Startup).
-REM  Every 60s checks: DB, backend :5000, tunnel, URL file.
+REM  Every 60s checks: DB, mirror, backend :5000, tunnel, URL file.
 REM  Restarts whatever is down. Logs to logs\watchdog.log
 REM ============================================================
 setlocal
@@ -24,7 +24,20 @@ if errorlevel 1 (
   timeout /t 12 /nobreak >nul
 )
 
-REM --- 2. Backend ---
+REM --- 2. Supabase -> local mirror ---
+set "MPID="
+if exist "%ROOT%\logs\local_db_mirror.pid" set /p MPID=<"%ROOT%\logs\local_db_mirror.pid"
+if defined MPID (
+  tasklist /FI "PID eq %MPID%" 2>nul | find "%MPID%" >nul
+  if errorlevel 1 set "MPID="
+)
+if not defined MPID (
+  >> "%LOG%" echo [%date% %time%] mirror DOWN - restarting
+  del "%ROOT%\logs\local_db_mirror.pid" >nul 2>&1
+  start "School24x7_Mirror" /min cmd /c "cd /d %ROOT% && node scripts\local_db_mirror.js >nul 2>> %ROOT%\logs\local_db_mirror_error.log"
+)
+
+REM --- 3. Backend ---
 netstat -ano | findstr /R ":5000 .*LISTENING" >nul
 if errorlevel 1 (
   >> "%LOG%" echo [%date% %time%] backend DOWN - restarting
@@ -32,7 +45,7 @@ if errorlevel 1 (
   timeout /t 12 /nobreak >nul
 )
 
-REM --- 3. Tunnel (ngrok static-domain tunnel; cloudflared kept as fallback) ---
+REM --- 4. Tunnel (ngrok static-domain tunnel; cloudflared kept as fallback) ---
 tasklist /FI "IMAGENAME eq ngrok.exe" 2>nul | find /I "ngrok.exe" >nul
 if errorlevel 1 (
   tasklist /FI "IMAGENAME eq ngrok" 2>nul | find /I "ngrok" >nul
@@ -43,7 +56,7 @@ if errorlevel 1 (
   )
 )
 
-REM --- 4. Refresh published URL file ---
+REM --- 5. Refresh published URL file ---
 call "%ROOT%\backend\refresh-ngrok-url.bat" >nul 2>&1
 if not exist "%URLFILE%" call "%ROOT%\backend\refresh-tunnel-url.bat" >nul 2>&1
 goto loop

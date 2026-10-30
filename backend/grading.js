@@ -86,12 +86,17 @@ function gradePaper(classLevel, row, subject, maxes) {
   };
 }
 
-async function computeResult(studentId, eventId) {
+async function computeResult(studentId, eventId, options = {}) {
   const [[stu]] = await pool.query(
-    `SELECT s.id, s.class_id, c.name AS class_name, c.group_name
+    `SELECT s.id, s.class_id, s.optional_subject, s.compulsory_subject, s.religion, c.name AS class_name, c.group_name
      FROM students s JOIN classes c ON s.class_id = c.id WHERE s.id = ?`, [studentId]);
   if (!stu) return null;
-  const cls = classLevelOf(stu.class_name);
+  const [[eventClass]] = await pool.query(
+    `SELECT c.name AS class_name, c.group_name, c.section
+       FROM marks m JOIN exams e ON e.id=m.exam_id JOIN classes c ON c.id=e.class_id
+      WHERE m.student_id=? AND e.event_id=? ORDER BY e.id LIMIT 1`, [studentId, eventId]);
+  const resultClassName = options.class_name || (eventClass && eventClass.class_name) || stu.class_name;
+  const cls = options.class_level || classLevelOf(resultClassName);
 
   // Marks follow the STUDENT, not their current class: after a promotion
   // the papers live under the old class's exams, and the marksheet must
@@ -103,7 +108,8 @@ async function computeResult(studentId, eventId) {
      FROM marks m
      JOIN exams e ON m.exam_id = e.id
      JOIN subjects sub ON e.subject_id = sub.id
-     WHERE m.student_id = ? AND e.event_id = ?`,
+     WHERE m.student_id = ? AND e.event_id = ?
+       AND (e.entry_open=1 OR e.status='published')`,
     [studentId, eventId]
   );
   if (papers.length === 0) return null;
@@ -116,13 +122,57 @@ async function computeResult(studentId, eventId) {
   const subMap = new Map(mapRows.map(r => [r.subject_id, r]));
   const hasMap = mapRows.length > 0;
 
+  // In Classes 9–10 Arts, only the student's selected Civics/Economics paper
+  // is compulsory. Across all three groups, only the selected fourth subject
+  // participates in the individual result. This also prevents an unchosen
+  // parallel paper from appearing in marksheets or affecting GPA.
+  const levelNumber = Number(cls);
+  const groupKey = String(options.group_name || (eventClass && (eventClass.group_name || eventClass.section)) || stu.group_name || '').toLowerCase();
+  const isSeniorGroup = (levelNumber === 9 || levelNumber === 10) &&
+    /arts|humanit|commerce|business|science/.test(groupKey);
+  const selectedCompulsory = String(options.compulsory_subject || stu.compulsory_subject || '').toLowerCase();
+  const selectedOptional = String(options.optional_subject || stu.optional_subject || '').toLowerCase().replace(/[^a-z]/g, '');
+  const normalized = value => String(value || '').toLowerCase().replace(/[^a-z]/g, '');
+  const matchesChoice = (name, selected) => {
+    const n = normalized(name);
+    if (selected === 'agriculture') return n.includes('agriculture');
+    if (selected === 'homescience') return n.includes('homescience') || n.includes('homeeconomics');
+    if (selected === 'highermathematics') return n.includes('highermath');
+    if (selected === 'civics') return n.includes('civics');
+    if (selected === 'economics') return n.includes('economics');
+    return n === normalized(selected);
+  };
+  const resultPapers = isSeniorGroup ? papers.filter(p => {
+    const allocation = subMap.get(p.subject_id);
+    if (p.is_optional) {
+      if (allocation) return !!allocation.is_fourth_subject;
+      return selectedOptional ? matchesChoice(p.subject_name, selectedOptional) : false;
+    }
+    if (/civics|economics/i.test(String(p.subject_name || ''))) {
+      if (allocation) return !!allocation.is_mandatory;
+      return selectedCompulsory ? matchesChoice(p.subject_name, selectedCompulsory) : false;
+    }
+    return true;
+  }) : papers;
+  const religionKey = String(stu.religion || '').toLowerCase();
+  const religionPapers = resultPapers.filter(p => {
+    const name = String(p.subject_name || '').toLowerCase();
+    if (!/religion|islam|hindu|christian|buddh|moral education/.test(name)) return true;
+    if (/hindu/.test(name)) return /hindu/.test(religionKey);
+    if (/christian/.test(name)) return /christian/.test(religionKey);
+    if (/buddh/.test(name)) return /buddh/.test(religionKey);
+    if (/islam|muslim/.test(name)) return /islam|muslim/.test(religionKey);
+    return true;
+  });
+  if (!religionPapers.length) return null;
+
   const fams = {};
-  papers.forEach(p => {
+  religionPapers.forEach(p => {
     const f = familyOf(p.subject_name);
     (fams[f] = fams[f] || []).push(p);
   });
 
-  let failed = false, fourthAbsent = false, mainPoints = 0, mainCount = 0, fourthGp = null;
+  let failed = false, mainPoints = 0, mainCount = 0, fourthGp = null;
   let grandTotal = 0, grandFull = 0, fourthScore = null;
   const familyRows = [];
 
@@ -139,7 +189,6 @@ async function computeResult(studentId, eventId) {
     });
     const present = rows.filter(r => !r.absent);
     if (!present.length) {
-      if (isFourth) fourthAbsent = true;
       familyRows.push({ subject: fam, total: 0, full: 0, scaled: 0, letter_grade: 'Absent', grade_point: 0, absent: true, is_optional: subj0.is_optional, papers: rows.map(r => r.subject_name) });
       continue;
     }
@@ -163,7 +212,8 @@ async function computeResult(studentId, eventId) {
     const letter = compFail ? 'F' : base.letter_grade;
     const gp = compFail ? 0.0 : base.grade_point;
     if (letter === 'F' && !isFourth) failed = true;
-    if (!isFourth) { grandTotal += total; grandFull += full; }
+    grandTotal += total;
+    grandFull += full;
     if (isFourth) {
       if (fourthGp == null || gp > fourthGp) fourthGp = gp;
       // Highest 4th-subject scaled score (tie-breaker).
@@ -177,12 +227,9 @@ async function computeResult(studentId, eventId) {
   }
 
   if (!mainCount) return null;
-  const optFams = Object.keys(fams).filter(f => fams[f].some(r => r.is_optional));
-  if (!fourthAbsent && optFams.length && !fams[optFams[0]]) fourthAbsent = true;
-
   const totalGpaWithout4th = +(mainPoints / mainCount).toFixed(2);
   const gpa4thBonus = fourthGp != null ? +Math.max(0, fourthGp - 2).toFixed(2) : 0;
-  const finalGpa = failed || fourthAbsent ? 0.0
+  const finalGpa = failed ? 0.0
     : Math.min(5.0, +((mainPoints + gpa4thBonus) / mainCount).toFixed(2));
 
   familyRows.sort((a, b) => (a.is_optional - b.is_optional) || a.subject.localeCompare(b.subject));
@@ -195,7 +242,7 @@ async function computeResult(studentId, eventId) {
     total_marks: +grandTotal.toFixed(2),
     total_full: +grandFull.toFixed(2),
     fourth_score: fourthScore,
-    result_status: failed ? 'FAILED' : (fourthAbsent ? 'ABSENT' : 'PASSED'),
+    result_status: failed ? 'FAILED' : 'PASSED',
     families: familyRows
   };
 }

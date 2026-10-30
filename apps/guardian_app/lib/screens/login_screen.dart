@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import '../api.dart';
 import '../fcm_service.dart';
 import '../update_check.dart';
@@ -13,52 +14,69 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   final _code = TextEditingController();
   final _dob = TextEditingController();
-  final _className = TextEditingController();
-  final _section = TextEditingController();
-  final _roll = TextEditingController();
   final _phone = TextEditingController();
+  final _birthCert = TextEditingController();
   bool _loading = false;
   String? _error;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => checkForUpdate(context, 'guardian'));
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => checkForUpdate(context, 'guardian'),
+    );
   }
 
   @override
   void dispose() {
     _code.dispose();
     _dob.dispose();
-    _className.dispose();
-    _section.dispose();
-    _roll.dispose();
     _phone.dispose();
+    _birthCert.dispose();
     super.dispose();
   }
 
   Future<void> _login() async {
-    setState(() { _loading = true; _error = null; });
+    if (_code.text.trim().isEmpty ||
+        _dob.text.trim().isEmpty ||
+        _phone.text.trim().isEmpty ||
+        _birthCert.text.trim().isEmpty) {
+      setState(() => _error = 'সবগুলো তথ্য পূরণ করুন।');
+      return;
+    }
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
     try {
       final r = await Api.post('/auth/guardian-login', {
         'student_code': _code.text.trim(),
         'dob': _dob.text.trim(),
-        'class_name': _className.text.trim(),
-        'section': _section.text.trim(),
-        'roll': num.tryParse(_roll.text.trim()) ?? 0,
         'phone': _phone.text.trim(),
+        'birth_cert_no': _birthCert.text.trim(),
       });
       if (r is! Map) {
         throw Exception('সার্ভার থেকে সঠিক উত্তর আসেনি। আবার চেষ্টা করুন।');
       }
       if (Api.isQueued(r)) {
-        throw Exception(Api.sync.isOffline
-            ? 'ইন্টারনেট নেই — login-এর জন্য ফোনে ইন্টারনেট দরকার।'
-            : 'School server-এ পৌঁছানো যাচ্ছে না — একটু পরে আবার চেষ্টা করুন।');
+        throw Exception(
+          Api.sync.isOffline
+              ? 'ইন্টারনেট নেই — login-এর জন্য ফোনে ইন্টারনেট দরকার।'
+              : 'School server-এ পৌঁছানো যাচ্ছে না — একটু পরে আবার চেষ্টা করুন।',
+        );
       }
       final dynamic token = r['token'];
       if (token is! String || token.isEmpty) {
         throw Exception('Login ব্যর্থ হয়েছে। তথ্যগুলো ঠিক আছে কিনা দেখুন।');
+      }
+      final user = r['user'];
+      if (user is! Map || user['role'] != 'guardian') {
+        throw Exception('Guardian account যাচাই করা যায়নি। আবার চেষ্টা করুন।');
+      }
+      if (r['students'] is! List || (r['students'] as List).isEmpty) {
+        throw Exception(
+          'এই guardian account-এর সঙ্গে কোনো শিক্ষার্থী যুক্ত নেই।',
+        );
       }
       Api.token = token;
       await Api.saveToken(token);
@@ -70,7 +88,10 @@ class _LoginScreenState extends State<LoginScreen> {
         MaterialPageRoute(builder: (_) => HomeScreen(students: r['students'])),
       );
     } catch (e) {
-      setState(() { _error = e.toString().replaceFirst('Exception: ', ''); _loading = false; });
+      setState(() {
+        _error = e.toString().replaceFirst('Exception: ', '');
+        _loading = false;
+      });
     }
   }
 
@@ -114,9 +135,15 @@ class _LoginScreenState extends State<LoginScreen> {
                       child: Container(
                         width: 62,
                         height: 62,
-                        decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
+                        decoration: const BoxDecoration(
+                          color: Colors.white,
+                          shape: BoxShape.circle,
+                        ),
                         padding: const EdgeInsets.all(7),
-                        child: Image.asset('assets/school_logo.png', fit: BoxFit.contain),
+                        child: Image.asset(
+                          'assets/school_logo.png',
+                          fit: BoxFit.contain,
+                        ),
                       ),
                     ),
                   ),
@@ -134,7 +161,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    'Student-এর admission-এর তথ্য দিয়ে login করুন',
+                    'Student ID, অভিভাবকের ফোন, জন্মনিবন্ধন ও জন্মতারিখ দিয়ে login করুন',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       fontSize: 13,
@@ -149,7 +176,9 @@ class _LoginScreenState extends State<LoginScreen> {
                     decoration: BoxDecoration(
                       color: Colors.white,
                       borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: Colors.grey.withValues(alpha: 0.15)),
+                      border: Border.all(
+                        color: Colors.grey.withValues(alpha: 0.15),
+                      ),
                       boxShadow: [
                         BoxShadow(
                           color: Colors.black.withValues(alpha: 0.04),
@@ -165,15 +194,24 @@ class _LoginScreenState extends State<LoginScreen> {
                         // Error message banner
                         if (_error != null) ...[
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                              vertical: 10,
+                            ),
                             decoration: BoxDecoration(
                               color: const Color(0xFFFEF2F2),
                               borderRadius: BorderRadius.circular(10),
-                              border: Border.all(color: const Color(0xFFFCA5A5)),
+                              border: Border.all(
+                                color: const Color(0xFFFCA5A5),
+                              ),
                             ),
                             child: Row(
                               children: [
-                                const Icon(Icons.error_outline_rounded, color: Color(0xFFDC2626), size: 20),
+                                const Icon(
+                                  Icons.error_outline_rounded,
+                                  color: Color(0xFFDC2626),
+                                  size: 20,
+                                ),
                                 const SizedBox(width: 10),
                                 Expanded(
                                   child: Text(
@@ -198,7 +236,11 @@ class _LoginScreenState extends State<LoginScreen> {
                           decoration: InputDecoration(
                             labelText: 'Student Unique ID *',
                             hintText: 'e.g. S-2026-001',
-                            prefixIcon: Icon(Icons.qr_code_rounded, color: indigo, size: 20),
+                            prefixIcon: Icon(
+                              Icons.qr_code_rounded,
+                              color: indigo,
+                              size: 20,
+                            ),
                           ),
                         ),
                         const SizedBox(height: 12),
@@ -210,8 +252,15 @@ class _LoginScreenState extends State<LoginScreen> {
                           decoration: InputDecoration(
                             labelText: 'Date of Birth *',
                             hintText: 'YYYY-MM-DD',
-                            prefixIcon: Icon(Icons.calendar_today_rounded, color: indigo, size: 18),
-                            suffixIcon: const Icon(Icons.arrow_drop_down, size: 24),
+                            prefixIcon: Icon(
+                              Icons.calendar_today_rounded,
+                              color: indigo,
+                              size: 18,
+                            ),
+                            suffixIcon: const Icon(
+                              Icons.arrow_drop_down,
+                              size: 24,
+                            ),
                           ),
                           onTap: () async {
                             final d = await showDatePicker(
@@ -227,70 +276,34 @@ class _LoginScreenState extends State<LoginScreen> {
                         ),
                         const SizedBox(height: 12),
 
-                        // Class & Section Row
-                        Row(
-                          children: [
-                            Expanded(
-                              child: TextField(
-                                controller: _className,
-                                keyboardType: TextInputType.number,
-                                textInputAction: TextInputAction.next,
-                                decoration: InputDecoration(
-                                  labelText: 'Class *',
-                                  hintText: 'e.g. 6',
-                                  prefixIcon: Icon(Icons.school_outlined, color: indigo, size: 20),
-                                ),
-                              ),
+                        TextField(
+                          controller: _phone,
+                          keyboardType: TextInputType.phone,
+                          textInputAction: TextInputAction.next,
+                          decoration: InputDecoration(
+                            labelText: 'Guardian Phone *',
+                            hintText: '01XXXXXXXXX',
+                            prefixIcon: Icon(
+                              Icons.phone_outlined,
+                              color: indigo,
+                              size: 20,
                             ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: TextField(
-                                controller: _section,
-                                textInputAction: TextInputAction.next,
-                                textCapitalization: TextCapitalization.characters,
-                                decoration: InputDecoration(
-                                  labelText: 'Section/Group *',
-                                  hintText: 'e.g. A',
-                                  prefixIcon: Icon(Icons.meeting_room_outlined, color: indigo, size: 20),
-                                ),
-                              ),
-                            ),
-                          ],
+                          ),
                         ),
                         const SizedBox(height: 12),
-
-                        // Roll & Admission Phone Row
-                        Row(
-                          children: [
-                            Expanded(
-                              flex: 4,
-                              child: TextField(
-                                controller: _roll,
-                                keyboardType: TextInputType.number,
-                                textInputAction: TextInputAction.next,
-                                decoration: InputDecoration(
-                                  labelText: 'Roll *',
-                                  hintText: '1',
-                                  prefixIcon: Icon(Icons.tag_rounded, color: indigo, size: 20),
-                                ),
-                              ),
+                        TextField(
+                          controller: _birthCert,
+                          keyboardType: TextInputType.number,
+                          textInputAction: TextInputAction.done,
+                          onSubmitted: (_) => _loading ? null : _login(),
+                          decoration: InputDecoration(
+                            labelText: 'Birth Registration Number *',
+                            prefixIcon: Icon(
+                              Icons.badge_outlined,
+                              color: indigo,
+                              size: 20,
                             ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              flex: 6,
-                              child: TextField(
-                                controller: _phone,
-                                keyboardType: TextInputType.phone,
-                                textInputAction: TextInputAction.done,
-                                onSubmitted: (_) => _loading ? null : _login(),
-                                decoration: InputDecoration(
-                                  labelText: 'Admission Phone *',
-                                  hintText: '01XXXXXXXXX',
-                                  prefixIcon: Icon(Icons.phone_outlined, color: indigo, size: 20),
-                                ),
-                              ),
-                            ),
-                          ],
+                          ),
                         ),
                         const SizedBox(height: 22),
 
