@@ -13,8 +13,11 @@ set URLFILE=%ROOT%\backend\data\tunnel-url.txt
 if not exist "%ROOT%\logs" mkdir "%ROOT%\logs"
 
 :loop
-timeout /t 60 /nobreak >nul
+timeout /t 60 /nobreak >nul 2>&1 || ping -n 61 127.0.0.1 >nul
 echo [%date% %time%] check >> "%LOG%"
+
+REM --- 0. keep the log from growing without bound ---
+for %%A in ("%LOG%") do if %%~zA GTR 5242880 move /y "%LOG%" "%LOG%.1" >nul 2>&1
 
 REM --- 1. MariaDB ---
 "%ROOT%\runtime\mysql\bin\mysqladmin.exe" -uroot ping >nul 2>&1
@@ -38,11 +41,13 @@ if not defined MPID (
 )
 
 REM --- 3. Backend ---
-netstat -ano | findstr /R ":5000 .*LISTENING" >nul
+REM NOTE: findstr treats a space-separated pattern as two OR-ed strings, which
+REM made every LISTENING line match. Use /C: so each fragment is one literal.
+netstat -ano | findstr /C:":5000 " | findstr /C:"LISTENING" >nul
 if errorlevel 1 (
   >> "%LOG%" echo [%date% %time%] backend DOWN - restarting
   start "School24x7_API" /min cmd /c "cd /d %ROOT%\backend && set PORT=5000 && node server.js >> %ROOT%\logs\backend.log 2>&1"
-  timeout /t 12 /nobreak >nul
+  timeout /t 12 /nobreak >nul 2>&1 || ping -n 13 127.0.0.1 >nul
 )
 
 REM --- 4. Tunnel (ngrok static-domain tunnel; cloudflared kept as fallback) ---
@@ -52,7 +57,7 @@ if errorlevel 1 (
   if errorlevel 1 (
     >> "%LOG%" echo [%date% %time%] ngrok DOWN - restarting
     start "School24x7_Tunnel" /min cmd /c "ngrok start --config C:\Users\WALTON\AppData\Local\ngrok\ngrok.yml school --log stdout >> %ROOT%\logs\ngrok.log 2>&1"
-    timeout /t 20 /nobreak >nul
+    timeout /t 20 /nobreak >nul 2>&1 || ping -n 21 127.0.0.1 >nul
   )
 )
 
