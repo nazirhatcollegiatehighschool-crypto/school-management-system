@@ -166,7 +166,7 @@ const crypto = require('crypto');
 // Keep the manifest aligned with the APK binaries packaged below. Bump these
 // build values together with those APKs when publishing an app update.
 const APP_VERSIONS = { teacher: '1.4.8', guardian: '1.4.5', admin: '1.4.7' };
-const APP_BUILDS = { teacher: 2003011, guardian: 14, admin: 13 };
+const APP_BUILDS = { teacher: 2003012, guardian: 14, admin: 14 };
 const APK_FILES = { teacher: 'TeacherApp.apk', guardian: 'GuardianApp.apk', admin: 'AdminApp.apk' };
 // SHA-256 of each APK, computed once at boot (integrity check for in-app
 // updates: the app refuses to install a corrupt/truncated download).

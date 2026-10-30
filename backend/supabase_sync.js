@@ -33,17 +33,13 @@ class SupabaseSync {
     await fs.mkdir(this.config.backupDir, { recursive: true });
     
     // Initialize MySQL connection
-    this.mysqlPool = mysql.createPool({
-      host: '127.0.0.1',
-      port: 3306,
-      user: 'root',
-      password: '',
-      database: 'schooldb',
-      charset: 'utf8mb4'
-    });
+    const mysqlUrl = process.env.MYSQL_SYNC_URL;
+    if (!mysqlUrl) throw new Error('Set MYSQL_SYNC_URL in the secure process environment.');
+    this.mysqlPool = mysql.createPool(mysqlUrl);
 
     // Initialize Supabase connection
-    const supabaseUrl = 'postgresql://postgres:Jewel@114070Jewel@114070@db.gqonldfvammlizljmtdk.supabase.co:5432/postgres';
+    const supabaseUrl = process.env.BACKUP_DATABASE_URL || process.env.DIRECT_URL || process.env.DATABASE_URL;
+    if (!supabaseUrl) throw new Error('Set BACKUP_DATABASE_URL in the secure process environment.');
     this.supabasePool = new Pool({
       connectionString: supabaseUrl,
       ssl: { rejectUnauthorized: false }
