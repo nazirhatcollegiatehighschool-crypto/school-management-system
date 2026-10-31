@@ -45,3 +45,5 @@ tmp_*
 .mcp.json
 
 database_backups/
+
+release_chunks/

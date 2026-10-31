@@ -1,0 +1,47 @@
+name: Publish School APK Release
+
+on:
+  push:
+    branches:
+      - codex/apk-release-chunks
+    paths:
+      - release_chunks/READY
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - name: Reassemble and verify APKs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for app in AdminApp TeacherApp GuardianApp; do
+            cat "release_chunks/${app}"/part-* > "$RUNNER_TEMP/${app}.apk"
+          done
+          printf '%s  %s\n' '160593bfb1be4b3ba10f8ef000dfa60847ad8c31e202d66779e56a05f814154c' "$RUNNER_TEMP/AdminApp.apk" | sha256sum -c -
+          printf '%s  %s\n' 'f824890f770de4b9dfdc34eef7afe85cd27ac27c046869dead7815981cad1423' "$RUNNER_TEMP/TeacherApp.apk" | sha256sum -c -
+          printf '%s  %s\n' '90e479e6389d131c08c46e8ae169318960d57962811b06a9e08fe222fcf1b927' "$RUNNER_TEMP/GuardianApp.apk" | sha256sum -c -
+      - name: Publish GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/release-notes.md" <<'EOF'
+          APKs are signed with the new School System release key.
+
+          **Before installing:** uninstall the previous app, and sync any pending offline data first. These APKs require a fresh install.
+          EOF
+          gh release create school-apps-2026-11-01-new-key \
+            "$RUNNER_TEMP/AdminApp.apk#AdminApp.apk" \
+            "$RUNNER_TEMP/TeacherApp.apk#TeacherApp.apk" \
+            "$RUNNER_TEMP/GuardianApp.apk#GuardianApp.apk" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target main \
+            --title "School System Apps 2026-11-01" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
