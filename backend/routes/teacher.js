@@ -294,10 +294,11 @@ function bangladeshNow() {
 
 router.get('/profile', async (req, res) => {
   try {
+    const routineSubjectScope = routineSubjectScopeSql();
     const [subjects] = await pool.query(
       `SELECT sub.id, sub.name, sub.class_id, c.name AS class_name, c.section
        FROM subjects sub JOIN classes c ON sub.class_id = c.id
-       WHERE sub.teacher_id = ? ORDER BY sub.class_id, sub.id`,
+       WHERE ${routineSubjectScope} ORDER BY sub.class_id, sub.id`,
       [req.user.id]
     );
     const [classes] = await pool.query(
@@ -453,17 +454,18 @@ router.post('/notifications/:id/read', async (req, res) => {
 
 router.get('/subjects', async (req, res) => {
   try {
+    const routineSubjectScope = routineSubjectScopeSql();
     // Two sides for a class teacher:
-    //   1) subjects they personally teach (own_subject = 1)
+    //   1) subjects assigned to them in the class routine (own_subject = 1)
     //   2) every subject of a class where they are the class teacher.
     // The UI groups these separately (Create Exam → subject picker).
     const [rows] = await pool.query(
       `SELECT sub.id, sub.name, sub.class_id, c.name AS class_name,
               c.section, c.group_name,
-              CASE WHEN sub.teacher_id = ? THEN 1 ELSE 0 END AS own_subject,
+              CASE WHEN ${routineSubjectScope} THEN 1 ELSE 0 END AS own_subject,
               CASE WHEN c.teacher_id = ? THEN 1 ELSE 0 END AS class_teacher_subject
        FROM subjects sub JOIN classes c ON sub.class_id = c.id
-       WHERE sub.teacher_id = ? OR c.teacher_id = ?
+       WHERE ${routineSubjectScope} OR c.teacher_id = ?
        ORDER BY own_subject DESC, c.name, c.section, sub.name`,
       [req.user.id, req.user.id, req.user.id, req.user.id]
     );
@@ -527,9 +529,20 @@ router.post('/exams', async (req, res) => {
        WHERE sub.id = ?`, [subject_id]
     );
     if (!subj) return res.status(404).json({ error: 'Subject not found' });
-    const ownsSubject = Number(subj.teacher_id) === Number(req.user.id);
     const isClassTeacher = Number(subj.class_teacher_id) === Number(req.user.id);
-    if (!ownsSubject && !isClassTeacher) {
+    let ownsRoutineSubject = false;
+    if (!isClassTeacher) {
+      const routineSubjectScope = routineSubjectScopeSql({ classAlias: 'c', subjectAlias: 'sub' });
+      const [[routineMatch]] = await pool.query(
+        `SELECT 1 AS matched
+         FROM subjects sub JOIN classes c ON c.id=sub.class_id
+         WHERE sub.id=? AND ${routineSubjectScope}
+         LIMIT 1`,
+        [subject_id, req.user.id]
+      );
+      ownsRoutineSubject = !!routineMatch;
+    }
+    if (!ownsRoutineSubject && !isClassTeacher) {
       return res.status(403).json({ error: 'This subject is neither yours nor in your class' });
     }
     // Guard: the exam's class must match the subject's class
@@ -2845,6 +2858,7 @@ function examComponents(s) {
 // Exam tab: one current exam → my-subjects view OR all-subjects (admin) view.
 router.get('/current-exam', async (req, res) => {
   try {
+    const routineSubjectScope = routineSubjectScopeSql();
     const [[sess]] = await pool.query(
       'SELECT id, name FROM sessions WHERE is_active=1 ORDER BY id LIMIT 1');
     const [[ev]] = await pool.query(
@@ -2860,7 +2874,10 @@ router.get('/current-exam', async (req, res) => {
               (SELECT COUNT(*) FROM students st WHERE st.class_id=c.id) AS student_count
        FROM classes c
        JOIN exams x ON x.event_id=? AND x.class_id=c.id
-       WHERE (c.teacher_id=? OR x.created_by=? OR EXISTS(SELECT 1 FROM subjects sub WHERE sub.id=x.subject_id AND sub.teacher_id=?))
+       WHERE (c.teacher_id=? OR x.created_by=? OR EXISTS(
+         SELECT 1 FROM subjects sub
+         WHERE sub.id=x.subject_id AND ${routineSubjectScope}
+       ))
          AND EXISTS (SELECT 1 FROM exams ox WHERE ox.event_id=? AND ox.class_id=c.id
                      AND ox.entry_open=1 AND ox.status<>'published')
        ORDER BY c.name, c.section, c.group_name`,
@@ -2870,14 +2887,15 @@ router.get('/current-exam', async (req, res) => {
         `SELECT sub.id AS subject_id, sub.name AS subject_name, sub.teacher_id, sub.full_marks,
                 sub.cq_full, sub.mcq_full, sub.practical_full, sub.written_full, sub.ca_full,
                 u.name AS subject_teacher_name,
-                (sub.teacher_id = ?) AS is_mine,
+                CASE WHEN ${routineSubjectScope} THEN 1 ELSE 0 END AS is_mine,
                 (SELECT x.id FROM exams x WHERE x.event_id=? AND x.class_id=? AND x.subject_id=sub.id LIMIT 1) AS exam_id,
                 (SELECT x.status FROM exams x WHERE x.event_id=? AND x.class_id=? AND x.subject_id=sub.id LIMIT 1) AS exam_status,
                 (SELECT x.entry_open FROM exams x WHERE x.event_id=? AND x.class_id=? AND x.subject_id=sub.id LIMIT 1) AS exam_entry_open,
                 (SELECT x.entry_deadline FROM exams x WHERE x.event_id=? AND x.class_id=? AND x.subject_id=sub.id LIMIT 1) AS exam_entry_deadline,
                 (SELECT COUNT(*) FROM marks m JOIN exams x ON x.id=m.exam_id
                   WHERE x.event_id=? AND x.class_id=? AND x.subject_id=sub.id) AS entered_count
-         FROM subjects sub LEFT JOIN users u ON u.id=sub.teacher_id
+         FROM subjects sub JOIN classes c ON c.id=sub.class_id
+         LEFT JOIN users u ON u.id=sub.teacher_id
          WHERE sub.class_id=? AND EXISTS (SELECT 1 FROM exams active WHERE active.event_id=? AND active.class_id=sub.class_id AND active.subject_id=sub.id AND active.entry_open=1 AND active.status<>'published') ORDER BY sub.name`,
         [req.user.id, ev.id, c.class_id, ev.id, c.class_id, ev.id, c.class_id, ev.id, c.class_id, ev.id, c.class_id, c.class_id, ev.id]);
       c.subjects = subs.map(s => ({
@@ -2901,12 +2919,16 @@ router.get('/current-exam', async (req, res) => {
 router.get('/events', async (req, res) => {
   try {
     const publishedOnly = req.query.published === '1';
+    const routineSubjectScope = routineSubjectScopeSql();
+    const routineExamScope = routineSubjectScopeSql({ classAlias: 'c', subjectAlias: 'event_subject' });
     const [events] = await pool.query(
       `SELECT DISTINCT e.*, s.name AS session_name FROM exam_events e
        LEFT JOIN sessions s ON s.id=e.session_id
        JOIN exams x ON x.event_id=e.id
        LEFT JOIN classes c ON c.id=x.class_id
-        WHERE (c.teacher_id=? OR x.created_by=? OR EXISTS(SELECT 1 FROM subjects sub WHERE sub.class_id=c.id AND sub.teacher_id=?))
+        WHERE (c.teacher_id=? OR x.created_by=? OR EXISTS(
+          SELECT 1 FROM subjects sub WHERE sub.class_id=c.id AND ${routineSubjectScope}
+        ))
          AND e.is_published = ?
           AND (e.exam_kind <> 'special_model_test' OR EXISTS(
             SELECT 1 FROM students eligible JOIN promotions mp ON mp.student_id=eligible.id
@@ -2921,7 +2943,10 @@ router.get('/events', async (req, res) => {
                     AND (
                         ex.created_by = ?
                         OR c.teacher_id = ?
-                        OR ex.subject_id IN (SELECT id FROM subjects WHERE class_id=c.id AND teacher_id=?)
+                        OR EXISTS (
+                          SELECT 1 FROM subjects event_subject
+                          WHERE event_subject.id=ex.subject_id AND ${routineExamScope}
+                        )
                     )
                   )
        ORDER BY e.is_published ASC, e.id DESC`,
@@ -2948,7 +2973,9 @@ router.get('/events', async (req, res) => {
           (SELECT COUNT(DISTINCT xx.subject_id) FROM exams xx JOIN marks m ON m.exam_id=xx.id JOIN students st ON st.id=m.student_id WHERE xx.event_id=? AND xx.class_id=c.id AND (evt.exam_kind<>'special_model_test' OR (st.session_id=evt.session_id AND EXISTS (SELECT 1 FROM promotions mp JOIN exam_events src ON src.id=mp.event_id WHERE mp.student_id=st.id AND mp.destination_session_id=evt.session_id AND mp.decision='promoted' AND src.exam_kind='test' AND src.year=evt.year-1)))) AS subjects_with_marks,
           (SELECT COUNT(*) FROM exams xx WHERE xx.event_id=? AND xx.class_id=c.id) AS subject_count
           FROM exams x JOIN classes c ON c.id=x.class_id JOIN exam_events evt ON evt.id=x.event_id
-         WHERE x.event_id=? AND (c.teacher_id=? OR x.created_by=? OR EXISTS(SELECT 1 FROM subjects sub WHERE sub.class_id=c.id AND sub.teacher_id=?)) ${classFilter}
+         WHERE x.event_id=? AND (c.teacher_id=? OR x.created_by=? OR EXISTS(
+           SELECT 1 FROM subjects sub WHERE sub.id=x.subject_id AND ${routineSubjectScope}
+         )) ${classFilter}
             AND (evt.exam_kind<>'special_model_test' OR EXISTS (SELECT 1 FROM students eligible JOIN promotions mp ON mp.student_id=eligible.id JOIN exam_events src ON src.id=mp.event_id WHERE eligible.class_id=c.id AND eligible.session_id=evt.session_id AND mp.destination_session_id=evt.session_id AND mp.decision='promoted' AND src.exam_kind='test' AND src.year=evt.year-1))
          ORDER BY c.name, c.section, c.group_name`,
         [ev.id, ev.id, ev.id, ev.id, req.user.id, req.user.id, req.user.id, ...params.slice(6)]);
@@ -2963,9 +2990,9 @@ router.get('/events', async (req, res) => {
            LEFT JOIN users u ON u.id=sub.teacher_id
            JOIN classes c ON c.id=x.class_id
            WHERE x.event_id=? AND x.class_id=?
-             AND (x.created_by=? OR ${routineSubjectScope})
+             AND (x.created_by=? OR c.teacher_id=? OR ${routineSubjectScope})
            ORDER BY sub.name`,
-          [req.user.id, ev.id, c.class_id, req.user.id, req.user.id]);
+          [req.user.id, ev.id, c.class_id, req.user.id, req.user.id, req.user.id]);
         c.subjects = subs.map(s => ({
           ...s,
           is_mine: Number(s.routine_teacher) === 1,
@@ -3001,8 +3028,13 @@ async function teacherEventClassAccess(eventId, classId, userId) {
   const [[mine]] = await pool.query('SELECT id FROM classes WHERE id=? AND teacher_id=?', [classId, userId]);
   const [[created]] = await pool.query(
     'SELECT id FROM exams WHERE event_id=? AND class_id=? AND created_by=? LIMIT 1', [eventId, classId, userId]);
+  const routineSubjectScope = routineSubjectScopeSql();
   const [teaches] = await pool.query(
-    'SELECT id FROM subjects WHERE class_id=? AND teacher_id=? ORDER BY id', [classId, userId]);
+    `SELECT DISTINCT sub.id
+     FROM subjects sub JOIN classes c ON c.id=sub.class_id
+     WHERE c.id=? AND ${routineSubjectScope}
+     ORDER BY sub.id`,
+    [classId, userId]);
   const subjectIds = teaches.map(t => Number(t.id));
   if (!mine && !created && subjectIds.length === 0) {
     return { error: 'এই class-এর result দেখার অনুমতি নেই', status: 403 };
