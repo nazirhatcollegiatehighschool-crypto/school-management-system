@@ -17,11 +17,12 @@ const { loadSchoolLogo } = require('../lib/school_logo');
 const { loadStudentActivities } = require('../lib/student_activities');
 const { uploadTeacherSignature, deleteTeacherSignature, getClassSignatories, loadTeacherSignature } = require('../lib/teacher_signatures');
 const { syncCurrentAcademicSession } = require('./results');
-const { validateStudentCurriculum, canonicalReligion } = require('../curriculum');
+const { validateStudentCurriculum, canonicalReligion, canonicalSubject } = require('../curriculum');
 const { toDatabaseBoolean, validateStudentProfileFields } = require('../lib/student_update');
 const promoEngine = require('../promotion_engine');
 const { inClause } = require('../lib/sql');
 const { routineSubjectScopeSql } = require('../lib/teacher_routine_access');
+const { studentMatchesSubject } = require('../lib/subject_access');
 
 router.use(auth('teacher'));
 
@@ -573,8 +574,12 @@ router.post('/exams', async (req, res) => {
 
 async function teacherCanAccessExam(examId, userId) {
   const routineSubjectScope = routineSubjectScopeSql({ classAlias: 'cls', subjectAlias: 'sub' });
-  const [rows] = await pool.query(
-    `SELECT e.*, cls.teacher_id AS class_teacher_id, sub.teacher_id AS subject_teacher_id,
+  let rows;
+  try {
+    [rows] = await pool.query(
+      `SELECT e.*, cls.teacher_id AS class_teacher_id, cls.name AS class_name,
+                cls.section AS class_section, cls.group_name AS class_group_name,
+                sub.teacher_id AS subject_teacher_id,
                 CASE WHEN ${routineSubjectScope} THEN 1 ELSE 0 END AS routine_teacher,
                 ev.entry_open AS event_entry_open, ev.is_published AS event_is_published,
                 ev.exam_kind AS event_exam_kind, ev.session_id AS event_session_id, ev.year AS event_year,
@@ -589,8 +594,31 @@ async function teacherCanAccessExam(examId, userId) {
            OR e.id IN (SELECT exam_id FROM exam_shares WHERE teacher_id = ?)
            OR ${routineSubjectScope}))
      )`,
-    [userId, examId, userId, userId, userId, userId]
-  );
+      [userId, examId, userId, userId, userId, userId]
+    );
+  } catch (err) {
+    if (!/exam_shares|mark_edit_requests|42P01|ER_NO_SUCH_TABLE/i.test(String(err && err.message))) throw err;
+    // Legacy databases may not contain exam_shares. Keep creator/subject
+    // access working; shared-exam support is restored once migration runs.
+    [rows] = await pool.query(
+      `SELECT e.*, cls.teacher_id AS class_teacher_id, cls.name AS class_name,
+              cls.section AS class_section, cls.group_name AS class_group_name,
+              sub.teacher_id AS subject_teacher_id,
+              CASE WHEN ${routineSubjectScope} THEN 1 ELSE 0 END AS routine_teacher,
+              ev.entry_open AS event_entry_open, ev.is_published AS event_is_published,
+              ev.exam_kind AS event_exam_kind, ev.session_id AS event_session_id, ev.year AS event_year,
+              ev.name AS event_name
+       FROM exams e
+       LEFT JOIN classes cls ON e.class_id = cls.id
+       LEFT JOIN subjects sub ON e.subject_id = sub.id
+       LEFT JOIN exam_events ev ON ev.id = e.event_id
+       WHERE e.id = ? AND (
+         (e.source = 'admin' AND ${routineSubjectScope})
+         OR (e.source = 'teacher' AND (e.created_by = ? OR ${routineSubjectScope}))
+       )`,
+      [userId, examId, userId, userId, userId]
+    );
+  }
   const exam = rows[0] || null;
   if (!exam) return null;
   // Scientific role split: entry right ≠ supervision right.
@@ -607,16 +635,38 @@ router.get('/exams/:id', async (req, res) => {
   try {
     const exam = await teacherCanAccessExam(req.params.id, req.user.id);
     if (!exam) return res.status(404).json({ error: 'Exam not found' });
-    const [[reentryRequest]] = await pool.query(
-      `SELECT r.id, r.teacher_id, r.reason, r.status, r.created_at,
-              u.name AS teacher_name
-       FROM mark_edit_requests r JOIN users u ON u.id=r.teacher_id
-       WHERE r.exam_id=? AND r.status='pending' ORDER BY r.created_at DESC LIMIT 1`,
-      [req.params.id]
-    );
+    let subj;
+    try {
+      [[subj]] = await pool.query(
+        'SELECT id, name, full_marks, teacher_id, cq_full, mcq_full, practical_full, written_full, ca_full FROM subjects WHERE id=?',
+        [exam.subject_id]
+      );
+    } catch (err) {
+      if (!/(column .*full|full.*does not exist|unknown|42P01|ER_BAD_FIELD_ERROR)/i.test(String(err && err.message))) throw err;
+      [[subj]] = await pool.query(
+        'SELECT id, name, full_marks, teacher_id FROM subjects WHERE id=?',
+        [exam.subject_id]
+      );
+    }
+    let reentryRequest = null;
+    try {
+      const [requestRows] = await pool.query(
+        `SELECT r.id, r.teacher_id, r.reason, r.status, r.created_at,
+                u.name AS teacher_name
+         FROM mark_edit_requests r JOIN users u ON u.id=r.teacher_id
+         WHERE r.exam_id=? AND r.status='pending' ORDER BY r.created_at DESC LIMIT 1`,
+        [req.params.id]
+      );
+      reentryRequest = requestRows[0] || null;
+    } catch (err) {
+      if (!/mark_edit_requests|42P01|ER_NO_SUCH_TABLE/i.test(String(err && err.message))) throw err;
+    }
     const reviewable = ['submitted', 'approved'].includes(exam.entry_status) || !!reentryRequest;
-    if (exam.event_id && ((Number(exam.entry_open) !== 1 && !reviewable) || Number(exam.event_is_published) === 1)) {
-      return res.status(404).json({ error: 'এই পরীক্ষায় number entry এখন বন্ধ।' });
+    if (exam.event_id && (Number(exam.entry_open) !== 1 && !reviewable)) {
+      return res.status(403).json({ error: 'Admin এই পরীক্ষায় number entry বন্ধ রেখেছেন।', code: 'EXAM_ENTRY_CLOSED' });
+    }
+    if (exam.event_id && Number(exam.event_is_published) === 1) {
+      return res.status(403).json({ error: 'Admin এই পরীক্ষার ফলাফল প্রকাশ করেছেন। তাই এখন number entry বন্ধ।', code: 'EXAM_RESULT_PUBLISHED' });
     }
     // Subject eligibility: only students enrolled in this subject via
     // student_subjects. If NO enrollments exist for this subject yet (legacy
@@ -627,27 +677,47 @@ router.get('/exams/:id', async (req, res) => {
             AND src.exam_kind='test' AND src.year=?)` : '';
     const modelSessionParams = exam.event_exam_kind === 'special_model_test'
       ? [exam.event_session_id, exam.event_session_id, Number(exam.event_year) - 1] : [];
-    const [[enrollCount]] = await pool.query(
-      `SELECT COUNT(*) AS c FROM student_subjects ss
-       JOIN students s ON s.id = ss.student_id
-       WHERE ss.subject_id = ? AND s.class_id = ?${modelSessionClause}`,
-      [exam.subject_id, exam.class_id, ...modelSessionParams]
-    );
+    let canonicalSubjectIds = [exam.subject_id];
+    const canonical = canonicalSubject(subj && subj.name);
+    if (canonical) {
+      const [subjectRows] = await pool.query('SELECT id, name FROM subjects');
+      canonicalSubjectIds = subjectRows
+        .filter(row => canonicalSubject(row.name) === canonical)
+        .map(row => Number(row.id));
+      if (!canonicalSubjectIds.length) canonicalSubjectIds = [exam.subject_id];
+    }
+    const subjectIdPlaceholders = canonicalSubjectIds.map(() => '?').join(',');
+    // PG rewrites IN (?) to = ANY($1), requiring an array parameter. This route
+    // passes flattened IDs, so use scalar equality for a single canonical ID.
+    const subjectIdPredicate = canonicalSubjectIds.length === 1
+      ? 'ss.subject_id = ?'
+      : `ss.subject_id IN (${subjectIdPlaceholders})`;
+    let enrollCount = { c: 0 };
+    try {
+      [[enrollCount]] = await pool.query(
+        `SELECT COUNT(*) AS c FROM student_subjects ss
+         JOIN students s ON s.id = ss.student_id
+         WHERE ${subjectIdPredicate} AND s.class_id = ?${modelSessionClause}`,
+        [...canonicalSubjectIds, exam.class_id, ...modelSessionParams]
+      );
+    } catch (err) {
+      if (!/(student_subjects|42P01|ER_NO_SUCH_TABLE)/i.test(String(err && err.message))) throw err;
+    }
     let students;
     let eligibilityEnforced = false;
     if (enrollCount && Number(enrollCount.c) > 0) {
       eligibilityEnforced = true;
       [students] = await pool.query(
-        `SELECT s.id, s.name, s.roll, s.religion
+        `SELECT DISTINCT s.id, s.name, s.roll, s.gender, s.religion, s.optional_subject, s.compulsory_subject
          FROM students s
-         JOIN student_subjects ss ON ss.student_id = s.id AND ss.subject_id = ?
+         JOIN student_subjects ss ON ss.student_id = s.id AND ${subjectIdPredicate}
          WHERE s.class_id = ? AND (s.status IS NULL OR s.status = 'active')${modelSessionClause}
          ORDER BY s.roll`,
-        [exam.subject_id, exam.class_id, ...modelSessionParams]
+        [...canonicalSubjectIds, exam.class_id, ...modelSessionParams]
       );
     } else {
       [students] = await pool.query(
-        `SELECT s.id, s.name, s.roll, s.religion
+        `SELECT s.id, s.name, s.roll, s.gender, s.religion, s.optional_subject, s.compulsory_subject
          FROM students s WHERE s.class_id = ? AND (s.status IS NULL OR s.status = 'active')${modelSessionClause}
          ORDER BY s.roll`,
         [exam.class_id, ...modelSessionParams]
@@ -663,17 +733,32 @@ router.get('/exams/:id', async (req, res) => {
       const permitted = new Set(allowed.map(canonicalReligion));
       students = students.filter(s => permitted.has(canonicalReligion(s.religion)));
     }
-    const [marks] = await pool.query(
-      `SELECT m.id, m.student_id, m.marks, m.total, m.cq, m.mcq, m.practical, m.written, m.ca, m.absent, m.edit_until, m.recorded_by,
-        (m.edit_until IS NOT NULL AND m.edit_until > NOW()) AS editable
-       FROM marks m WHERE m.exam_id = ?`,
-      [req.params.id]
-    );
+    let marks;
+    try {
+      [marks] = await pool.query(
+        `SELECT m.id, m.student_id, m.marks, m.total, m.cq, m.mcq, m.practical, m.written, m.ca, m.absent, m.edit_until, m.recorded_by,
+          (m.edit_until IS NOT NULL AND m.edit_until > NOW()) AS editable
+         FROM marks m WHERE m.exam_id = ?`,
+        [req.params.id]
+      );
+    } catch (err) {
+      if (!/(column .*cq|cq.*does not exist|cq.*unknown|42P01|ER_BAD_FIELD_ERROR)/i.test(String(err && err.message))) throw err;
+      [marks] = await pool.query(
+        `SELECT m.id, m.student_id, m.marks, m.total, m.absent, m.edit_until, m.recorded_by,
+          (m.edit_until IS NOT NULL AND m.edit_until > NOW()) AS editable
+         FROM marks m WHERE m.exam_id = ?`,
+        [req.params.id]
+      );
+    }
     const draftEditable = !['submitted', 'approved'].includes(exam.entry_status) &&
       exam.status !== 'published';
     marks.forEach(mark => { mark.editable = draftEditable; });
-    const [[subj]] = await pool.query('SELECT name, full_marks, teacher_id, cq_full, mcq_full, practical_full, written_full, ca_full FROM subjects WHERE id=?', [exam.subject_id]);
-    students = students.filter(student => studentMatchesReligionSubject(student, subj && subj.name));
+    const examClassInfo = {
+      class_name: exam.class_name,
+      section: exam.class_section,
+      group_name: exam.class_group_name,
+    };
+    students = students.filter(student => studentMatchesSubject(student, subj && subj.name, examClassInfo));
     const subjectMine = subj ? Number(subj.teacher_id) === Number(req.user.id) : false;
     const isClassTeacher = Number(exam.is_class_teacher) === 1;
     // App-level edit right mirrors the write rule: subject teacher only.
@@ -692,15 +777,45 @@ router.get('/exams/:id', async (req, res) => {
       ],
     } : null;
     if (markStructure) markStructure.has_components = markStructure.components.length > 0;
-    const [markWriters] = await pool.query(
-      `SELECT recorded_by FROM marks WHERE exam_id=? AND recorded_by IS NOT NULL
-       GROUP BY recorded_by ORDER BY COUNT(*) DESC, MAX(recorded_at) DESC LIMIT 1`, [req.params.id]);
+    let markWriters = [];
+    try {
+      const result = await pool.query(
+        `SELECT recorded_by FROM marks WHERE exam_id=? AND recorded_by IS NOT NULL
+         GROUP BY recorded_by ORDER BY COUNT(*) DESC, MAX(recorded_at) DESC LIMIT 1`, [req.params.id]);
+      markWriters = result[0] || [];
+    } catch (err) {
+      if (!/(recorded_at|column|field).*|42P01|ER_BAD_FIELD_ERROR/i.test(String(err && err.message))) throw err;
+      const [legacyWriters] = await pool.query(
+        `SELECT recorded_by FROM marks WHERE exam_id=? AND recorded_by IS NOT NULL
+         GROUP BY recorded_by ORDER BY COUNT(*) DESC LIMIT 1`, [req.params.id]);
+      markWriters = legacyWriters || [];
+    }
     const writerId = markWriters[0]?.recorded_by || req.user.id;
-    const [[writer]] = await pool.query(
-      'SELECT id, name, designation, signature, signature_name FROM users WHERE id=?', [writerId]);
-    const writerSignature = writer ? await loadTeacherSignature(writer.signature) : null;
-    res.json({ exam: { ...exam, subject_name: subj ? subj.name : exam.subject_name, full_marks: subj ? subj.full_marks : null, subject_mine: subjectMine ? 1 : 0, is_class_teacher: isClassTeacher ? 1 : 0, can_enter: canEnter ? 1 : 0, mark_structure: markStructure, eligibility_enforced: eligibilityEnforced ? 1 : 0 }, students, marks, reentry_request: reentryRequest || null, teacher_name: req.user.name, marks_entered_by: writer ? { id: writer.id, name: writer.signature_name || writer.name, designation: writer.designation || 'Subject Teacher', signature_base64: writerSignature ? writerSignature.toString('base64') : null } : { name: req.user.name, designation: 'Subject Teacher', signature_base64: null }, settings: await schoolSettings(), signatures: await getClassSignatories(exam.class_id) });
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+    let writer = null;
+    try {
+      [[writer]] = await pool.query(
+        'SELECT id, name, designation, signature, signature_name FROM users WHERE id=?', [writerId]);
+    } catch (err) {
+      if (!/(signature_name|column|field).*|ER_BAD_FIELD_ERROR/i.test(String(err && err.message))) throw err;
+      [[writer]] = await pool.query(
+        'SELECT id, name, designation, signature FROM users WHERE id=?', [writerId]);
+    }
+    let writerSignature = null;
+    try { writerSignature = writer ? await loadTeacherSignature(writer.signature) : null; } catch (_) {}
+    let signatures = {};
+    try { signatures = await getClassSignatories(exam.class_id); } catch (_) {}
+    let settingsPayload = {};
+    try { settingsPayload = await schoolSettings(); } catch (_) {}
+    res.json({ exam: { ...exam, subject_name: subj ? subj.name : exam.subject_name, full_marks: subj ? subj.full_marks : null, subject_mine: subjectMine ? 1 : 0, is_class_teacher: isClassTeacher ? 1 : 0, can_enter: canEnter ? 1 : 0, mark_structure: markStructure, eligibility_enforced: eligibilityEnforced ? 1 : 0 }, students, marks, reentry_request: reentryRequest || null, teacher_name: req.user.name, marks_entered_by: writer ? { id: writer.id, name: writer.signature_name || writer.name, designation: writer.designation || 'Subject Teacher', signature_base64: writerSignature ? writerSignature.toString('base64') : null } : { name: req.user.name, designation: 'Subject Teacher', signature_base64: null }, settings: settingsPayload, signatures });
+  } catch (err) {
+    console.error('[teacher exam detail] failed', {
+      examId: req.params.id,
+      teacherId: req.user && req.user.id,
+      code: err && err.code,
+      message: err && err.message,
+    });
+    res.status(500).json({ error: 'পরীক্ষার তথ্য server থেকে সম্পূর্ণ load করা যায়নি। আবার চেষ্টা করুন।' });
+  }
 });
 
 

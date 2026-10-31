@@ -2,7 +2,14 @@ function routineSubjectScopeSql({ classAlias = 'c', subjectAlias = 'sub' } = {})
   return `EXISTS (
     SELECT 1 FROM routines teacher_routine
     WHERE teacher_routine.teacher_id = ?
-      AND teacher_routine.subject_id = ${subjectAlias}.id
+      AND (
+        teacher_routine.subject_id = ${subjectAlias}.id
+        OR EXISTS (
+          SELECT 1 FROM subjects routine_subject
+          WHERE routine_subject.id = teacher_routine.subject_id
+            AND LOWER(TRIM(routine_subject.name)) = LOWER(TRIM(${subjectAlias}.name))
+        )
+      )
       AND (
         EXISTS (
           SELECT 1 FROM routine_sections teacher_routine_section
