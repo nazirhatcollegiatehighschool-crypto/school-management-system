@@ -1,11 +1,7 @@
 .release-signing/
 apps/
 apks/
-!backend/apks/
-backend/apks/*
-!backend/apks/AdminApp.apk
-!backend/apks/TeacherApp.apk
-!backend/apks/GuardianApp.apk
+backend/apks/
 db/
 database/
 tmp/
@@ -45,5 +41,3 @@ tmp_*
 .mcp.json
 
 database_backups/
-
-release_chunks/

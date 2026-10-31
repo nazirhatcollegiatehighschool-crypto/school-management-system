@@ -6,8 +6,8 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $secretDirectory = Join-Path $repoRoot '.release-signing'
-$keystorePath = Join-Path $secretDirectory 'school-system-release.jks'
-$encryptedPasswordPath = Join-Path $secretDirectory 'password.dpapi'
+$keystorePath = Join-Path $secretDirectory 'school-system-release-2026.jks'
+$encryptedPasswordPath = Join-Path $secretDirectory 'password-2026.dpapi'
 $outputDirectory = Join-Path $repoRoot $OutputDirectory
 $apps = @(
     @{ Directory = 'admin_app'; Artifact = 'admin-app-release.apk' },

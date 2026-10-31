@@ -7,10 +7,7 @@
       "use": "@vercel/node",
       "config": {
         "includeFiles": [
-          "backend/dist/**",
-          "backend/apks/AdminApp.apk",
-          "backend/apks/TeacherApp.apk",
-          "backend/apks/GuardianApp.apk"
+          "backend/dist/**"
         ]
       }
     }

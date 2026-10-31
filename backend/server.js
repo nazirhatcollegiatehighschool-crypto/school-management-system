@@ -162,37 +162,22 @@ app.all(['/api/admin/sync/schema', '/api/admin/sync/backup', '/api/admin/sync/fu
   res.status(410).json({ error: 'Legacy database sync is disabled.' });
 });
 
-const crypto = require('crypto');
-// Keep the manifest aligned with the APK binaries packaged below. Bump these
+// Keep the manifest aligned with the APK binaries published as release assets. Bump these
 // build values together with those APKs when publishing an app update.
-const APP_VERSIONS = { teacher: '1.4.8', guardian: '1.4.5', admin: '1.4.7' };
-const APP_BUILDS = { teacher: 2003012, guardian: 14, admin: 14 };
+const APP_VERSIONS = { teacher: '1.5.3', guardian: '1.4.10', admin: '1.4.11' };
+const APP_BUILDS = { teacher: 2003019, guardian: 21, admin: 20 };
 const APK_FILES = { teacher: 'TeacherApp.apk', guardian: 'GuardianApp.apk', admin: 'AdminApp.apk' };
-// SHA-256 of each APK, computed once at boot (integrity check for in-app
-// updates: the app refuses to install a corrupt/truncated download).
-const APK_SHA = {};
-function shaOf(p) {
-  try {
-    const h = crypto.createHash('sha256');
-    h.update(require('fs').readFileSync(p));
-    return h.digest('hex');
-  } catch (_) { return null; }
-}
+const APK_RELEASE_TAG = 'school-apps-2026-11-01-new-key';
+const APK_RELEASE_BASE = `https://github.com/nazirhatcollegiatehighschool-crypto/school-management-system/releases/download/${APK_RELEASE_TAG}`;
+const APK_SHA = {
+  teacher: 'f824890f770de4b9dfdc34eef7afe85cd27ac27c046869dead7815981cad1423',
+  guardian: '90e479e6389d131c08c46e8ae169318960d57962811b06a9e08fe222fcf1b927',
+  admin: '160593bfb1be4b3ba10f8ef000dfa60847ad8c31e202d66779e56a05f814154c'
+};
 app.get('/api/app-version', (req, res) => {
   const which = req.query.app;
-  const proto = req.headers['x-forwarded-proto'] || req.protocol;
-  const base = `${proto}://${req.get('host')}`;
-  const buildOf = (f, appName) => {
-    if (Number.isInteger(APP_BUILDS[appName])) return APP_BUILDS[appName];
-    try {
-      const st = require('fs').statSync(f);
-      return Math.floor(st.mtimeMs / 1000);
-    } catch (_) { return 0; }
-  };
   const meta = (k) => {
-    const fp = require('path').join(apksDir, APK_FILES[k]);
-    if (!APK_SHA[k]) APK_SHA[k] = shaOf(fp);
-    return { app: k, version: APP_VERSIONS[k], build: buildOf(fp, k), sha256: APK_SHA[k], apk_url: `${base}/apks/${APK_FILES[k]}` };
+    return { app: k, version: APP_VERSIONS[k], build: APP_BUILDS[k], sha256: APK_SHA[k], apk_url: `${APK_RELEASE_BASE}/${APK_FILES[k]}` };
   };
   if (which && APP_VERSIONS[which]) {
     return res.json(meta(which));
@@ -201,32 +186,33 @@ app.get('/api/app-version', (req, res) => {
   Object.keys(APP_VERSIONS).forEach(k => { all[k] = meta(k); });
   res.json(all);
 });
-const apksDir = [path.join(__dirname, 'apks'), path.join(__dirname, '..', 'apks')].find(d => fs.existsSync(d)) || path.join(__dirname, 'apks');
-app.use('/apks', express.static(apksDir, { fallthrough: false }));
+app.get('/apks/:file', (req, res) => {
+  if (!Object.values(APK_FILES).includes(req.params.file)) return res.sendStatus(404);
+  return res.redirect(302, `${APK_RELEASE_BASE}/${req.params.file}`);
+});
 
 // Public download page: versioned APK links + admin panel entry.
 // (Mobile users: open this page in Chrome, tap an app to download.)
 app.get('/download', (req, res) => {
-  const proto = req.headers['x-forwarded-proto'] || req.protocol;
-  const base = `${proto}://${req.get('host')}`;
   const card = (app, title, desc) => `
     <div style="border:1px solid #ddd;border-radius:12px;padding:16px;margin:12px 0;background:#fff">
       <div style="font-size:18px;font-weight:700">${title}
         <span style="font-size:12px;background:#0b6b4f;color:#fff;border-radius:8px;padding:2px 8px;margin-left:6px">v${APP_VERSIONS[app]}</span></div>
       <div style="color:#555;margin:6px 0 12px">${desc}</div>
-      <a href="${base}/apks/${APK_FILES[app]}" download
+      <a href="${APK_RELEASE_BASE}/${APK_FILES[app]}"
          style="display:inline-block;background:#0b6b4f;color:#fff;padding:12px 24px;border-radius:10px;text-decoration:none;font-weight:700">⬇ ডাউনলোড</a>
     </div>`;
   res.send(`<!DOCTYPE html><html lang="bn"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>School App Download</title></head>
 <body style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:16px;background:#f4f7f5">
 <h2>🏫 School Apps</h2>
+<div style="border:1px solid #f0c36d;border-radius:12px;padding:14px;margin:12px 0;background:#fff8e6;color:#633c00;font-weight:700">নতুন APK install-এর আগে পুরোনো app uninstall করুন। আগে pending offline data sync করুন।</div>
 ${card('teacher', 'Teacher App', 'শিক্ষকদের জন্য — হাজিরা, মার্কস, রুটিন, রেজাল্ট')}
 ${card('guardian', 'Guardian App', 'অভিভাবকদের জন্য — সন্তানের হাজিরা, রেজাল্ট, নোটিশ')}
 <div style="border:1px solid #ddd;border-radius:12px;padding:16px;margin:12px 0;background:#fff">
 <div style="font-size:18px;font-weight:700">Admin Panel</div>
 <div style="color:#555;margin:6px 0 12px">অ্যাডমিন ওয়েব প্যানেল (ব্রাউজারেই চলবে)</div>
-<a href="${base}/" style="display:inline-block;background:#2e3a8c;color:#fff;padding:12px 24px;border-radius:10px;text-decoration:none;font-weight:700">🖥️ Open Admin Panel</a>
+<a href="/" style="display:inline-block;background:#2e3a8c;color:#fff;padding:12px 24px;border-radius:10px;text-decoration:none;font-weight:700">🖥️ Open Admin Panel</a>
 </div>
 <p style="color:#888;font-size:12px">Install-এর সময় "Unknown apps → Allow" দিন। App-এর ভেতর Login screen → Server-এ এই সার্ভারের link বসান।</p>
 </body></html>`);
