@@ -25,17 +25,19 @@ Admin / Teacher / Guardian Android app
 
 ## ২. বর্তমান cloud অবস্থা (read-only যাচাই)
 
+- Account mapping: GitHub/Supabase = `nazirhatcollegiatehighschool@gmail.com`; Vercel = `asad6ullah7775@gmail.com`। এই account separation পরিবর্তন করবেন না।
+- মূল project link: [`school-management-system`](https://school-management-system-brown-mu.vercel.app)।
+- `backend/.vercel/project.json`-এর পুরোনো project link `nazirhatcollegiatehighschool-2397`। Production deployment root project থেকে চালাতে হবে; backend folder-এর stale link দিয়ে deploy করলে mismatch হতে পারে।
 - Vercel project: `school-management-system` (Production)।
-- সর্বশেষ Production deployment: **Ready**, 2026-10-30-এ read-only CLI inspection-এ দেখা হয়েছে।
-- `https://school-management-system-mobile-api.vercel.app/api/health` → `{"status":"ok","db":"connected"}`।
-- তিন app-এর default API: `https://school-management-system-mobile-api.vercel.app` (override করলে সেটি আগে)।
+- সর্বশেষ Production deployment: **Ready**, `school-management-system-brown-mu.vercel.app` alias; 2026-10-30-এ deploy ও যাচাই করা হয়েছে。
+- `https://school-management-system-brown-mu.vercel.app/api/health` → `{"status":"ok","db":"connected"}`।
+- তিন app-এর default API: `https://school-management-system-brown-mu.vercel.app` (override করলে সেটি আগে)।
 - `vercel.json`-এ cron:
-  - `/api/cron/attendance-access-expiry` — প্রতি মিনিট
   - `/api/cron/attendance-reminders` — প্রতিদিন ০৯:০০
-  - `/api/cron/attendance-rollup` — প্রতিদিন ১৬:০০
-  - `/api/cron/academic-session` — প্রতিদিন ১৮:০৫
+  - `/api/cron/daily-maintenance` — প্রতিদিন ১৮:০০
 - Production-এ প্রযোজনীয় environment variable-এর নাম আছে; value কোথাও দেখা/দেখানো হয়নি।
-- এই session-এ production redeploy করা হয়নি।
+- `/api/cron/daily-maintenance` ও protected Admin API-তে token ছাড়া request `401` দেয়।
+- Latest app build: Admin `1.4.7+14`, Teacher `1.4.8+2003012`, Guardian `1.4.5+14`; তিন APK production-এ আছে।
 
 ## ৩. Local server চালানো
 
@@ -117,12 +119,12 @@ Log: `logs/local_db_mirror.log`; service-এর stderr: `logs/local_db_mirror_er
 সর্বশেষ `--verify --deep`:
 
 ```text
-Supabase tables=62; local tables=62; rows=3035; missing tables=0;
+Supabase tables=62; local tables=62; rows=3046; missing tables=0;
 missing columns=0; missing constraints=0; row-count mismatches=0;
 deep PK-hash mismatches=0
 ```
 
-মানে local `schooldb` এখন Supabase-এর সম্পূর্ণ schema (62 table) ও 3,035 row-এর verified mirror।
+মানে local `schooldb` এখন Supabase-এর সম্পূর্ণ schema (62 table) ও 3,046 row-এর verified mirror। Mirror worker চলছে; সাম্প্রতিক একটি periodic attempt `ENOTFOUND`-এ ব্যর্থ হলেও local data commit হয়নি। Deep verification-এ দুই database-এর content মিলে গেছে।
 
 ## ৫. Database schema ও migration
 
@@ -201,8 +203,8 @@ Offline cache/outbox প্রতিটি app-এর `lib/sync_store.dart`-এ;
 
 | # | Feature | অবস্থা | যাচাই |
 |---|---|---|---|
-| 1 | Teacher quick-add: Roll, Birth Certificate, Birthdate, Guardian Phone; প্রথম row-তে Roll/Birth Cert/Birthdate | সম্পূর্ণ | API synthetic pass; duplicate roll 409 |
-| 2 | Guardian profile completion (DB religion dropdown, stipend/scholarship, required fields), একবার submit-এ lock, Edit Request Admin+Class Teacher-এর কাছে | সম্পূর্ণ | synthetic pass; lock 2nd submit 409; notification দুই জায়গায় |
+| 1 | Teacher quick-add: Roll, Birth Certificate, Birthdate, Guardian Phone; Admin student form-এ Roll/Birth Cert/Birthdate এক কলামে | সম্পূর্ণ | API synthetic pass; duplicate roll 409; Admin release build |
+| 2 | Guardian profile completion-এ DOB ও Birth Certificate-সহ required fields, একবার submit-এ lock, Edit Request Admin+Class Teacher-এর কাছে | সম্পূর্ণ | server-side required-field/date/phone validation; prior synthetic lock flow |
 | 3 | Class 10 retained: original session year, স্থায়ী Irregular tag, exam running calendar year | সম্পূর্ণ (data backfill সহ) | profile API-তে irregular+year pass; promotion calendar code review |
 | 4 | একই subject-এ দুই teacher marks; প্রথম submit official lock; race/unique constraint | সম্পূর্ণ | দুই teacher draft + first submit 200 + second 409 pass |
 | 5 | Attendance delegation daily/period; class teacher direct, অন্য teacher request, accept/reject, delegated read-only history | সম্পূর্ণ | synthetic pass |
@@ -217,34 +219,32 @@ Offline cache/outbox প্রতিটি app-এর `lib/sync_store.dart`-এ;
 | 14 | Teacher notification fully functional; click deep-link relevant screen | সম্পূর্ণ | notification API + deep-link code review |
 | 15 | Admin settings English address; Head/Assistant Head dropdown selection source of truth; Senior/Assistant logic | সম্পূর্ণ | leadership selection API pass; designation code review |
 | 16 | আগের conversation-এর সব নির্দেশনা cross-check | সম্পূর্ণ | এই audit-এ 1–15 মিলিয়ে দেখা হয়েছে |
-| 17 | Fake/synthetic data দিয়ে তিন app flow test; cleanup | সম্পূর্ণ (API layer) | 30/30 synthetic API pass; test DB drop; device UI test বাকি |
+| 17 | Fake/synthetic data দিয়ে তিন app flow test; cleanup | আগের isolated API run pass; এই release-এ full E2E পুনরায় করা বাকি | আগের 30/30 API pass-এর evidence আছে; এইবার disposable test DB ও সংযুক্ত ফোন পাওয়া যায়নি |
 
 ## ১০. Test evidence (2026-10-30)
 
-- **Mirror:** 62 table, 3,035 row, 0 missing table/column/constraint, 0 count/hash mismatch।
-- **Backend:** সব ১৭টি test file pass; `npm run lint` → `lint OK (98 files)`।
-- **Flutter analyze:** তিন app-এ কোনো **error** নেই; কিছু pre-existing info/warning আছে।
+- **Mirror:** 62 table, 3,054 row, 0 missing table/column/constraint, 0 count/hash mismatch (deep PK hash verify, 2026-10-30)।
+- **Backend:** 53/53 Node regression tests pass; `node lint.js` → `lint OK (98 files)`।
 - **Flutter tests:** Teacher 20, Admin 4, Guardian 7—সব pass।
-- **Synthetic API flow:** 30/30 pass (quick-add, guardian lock/edit request, delegation/expiry, two-teacher marks race, daily notification dedup, uniform, Class-10 irregular, profile access denial)।
+- **Flutter analyze:** তিন app compile errors ছাড়া pass; Admin 23, Teacher 34, Guardian 6 info-level lint দেখিয়েছে (analyzer non-zero শুধু info findings-এর জন্য)।
+- **Synthetic API flow:** আগের 30/30 pass report রয়েছে; এই release-এ তা পুনরায় চালানো হয়নি, কারণ disposable test database configured ছিল না। Production-এ fake student লেখা হয়নি।
 - **Backup/restore:** encrypted Supabase backup decrypt/list verified; isolated PostgreSQL-এ 58 table/3,035 row/78 FK/97 unique restore; local MariaDB-এ সর্বশেষ backup restore করে 62 table/3,035 row/107 FK পাওয়া গেছে।
 - Synthetic test production data ব্যবহার করেনি; test DB (`schooldb_feature_test`) কাজ শেষে drop করা হয়েছে।
 
-## ১১. সীমাবদ্ধতা ও যা এখনো বাকি
+## ১১. এই release-এ সম্পন্ন ও বাকি
 
-- **Vercel production-এ নতুন code deploy করা হয়নি।** Latest deployment পুরোনো; backend fix (undefined `log`, profile access check, daily report notification, schema-dependent routes) production-এ পেতে redeploy দরকার।
-- **তিনটি Android APK rebuild করা হয়নি।** UI change (admin form, guardian gender, expiry buttons, deep link) installed app-এ পেতে নতুন build/install দরকার।
-- **Phone/device-এ manual UI test করা হয়নি** এই session-এ; API + widget/unit test পর্যন্ত verified।
-- **PDF-এর visual layout** PDF generation test দিয়ে pass, কিন্তু printed/real-data PDF eyeball করা হয়নি।
-- Production ছাড়া আপাতত কোনো migration বাকি নেই; ভবিষ্যতে schema change হলে reviewed add-only migration চালাতে হবে।
-- 38-table পুরোনো local backup historical; current backup ব্যবহার করুন।
+- **Vercel Production:** deployment `dpl_4F5rWkRdzGi4WDiqDiEvBvUnWMB5` `READY`; stable alias health `ok/db connected`; তিন app-এর version/build/SHA-256 live metadata নতুন APK-এর সঙ্গে মেলে; signing secrets উপস্থিত, অপরিবর্তিত।
+- **তিন Android release:** Admin `1.4.8+15`, Teacher `1.4.9+2003013`, Guardian `1.4.6+15`; একই production release certificate-এ signed, Vercel-এ প্রকাশিত।
+- সর্বশেষ APK রাখা হয়েছে `apps/release_builds/release_20261030_complete2/` এবং production copy `backend/apks/`-এ; পুরোনো release APK files সরানো হয়েছে।
+- **Phone install:** এই update-এর সময় ADB-তে কোনো device দেখা যায়নি, তাই নতুন APK ফোনে বসানো/launch smoke test বাকি। আগের release-এ Admin/Teacher uninstall-reinstall এবং Guardian in-place update করা হয়েছিল।
+- **Fake-student authenticated E2E:** এই release-এ চালানো বাকি। disposable DB configured নেই; কোনো fake student Production-এ লেখা হয়নি।
+- **UI scope:** Admin/Teacher/Guardian widget test ও release build pass; নতুন release-এ authenticated screen-by-screen phone test হয়নি। PDF-এর printed/real-data visual layout-ও এইবার যাচাই হয়নি।
+- Future schema changes হলে reviewed add-only migration দরকার; Production schema change এই release-এ করা হয়নি।
 
-## ১২. আপনার করণীয়
+## ১২. পরবর্তী নিরাপদ কাজ
 
-1. নতুন backend code review করে **Vercel Production redeploy** করুন (তবেই production API-তে fixগুলো যাবে)।
-2. তিনটি app rebuild/install করুন—Admin, Teacher, Guardian; package/version/signing আগের নিয়মে যাচাই করুন।
-3. Local backend চালু থাকলে একবার restart করুন, যাতে নতুন `server.js`/route code load হয়; mirror service চালু আছে কিনা `logs/local_db_mirror.pid` ও log দেখে নিন।
-4. একটি authorized ফোনে synthetic/test student দিয়ে flow দেখুন; production student record দিয়ে test করবেন না।
-5. Backup ও DPAPI key-এর offline নিরাপদ copy রাখুন।
+1. Authenticated fake-student flow পুনরায় চালাতে আগে আলাদা disposable/staging DB configure করুন; production student data ব্যবহার করবেন না।
+2. Backup ও DPAPI key-এর offline নিরাপদ copy রাখুন।
 
 ## ১৩. Troubleshooting
 

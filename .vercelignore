@@ -1,7 +1,13 @@
 .release-signing/
+node_modules/
+**/node_modules/
 apps/
 apks/
-backend/apks/
+!backend/apks/
+backend/apks/*
+!backend/apks/AdminApp.apk
+!backend/apks/TeacherApp.apk
+!backend/apks/GuardianApp.apk
 db/
 database/
 tmp/

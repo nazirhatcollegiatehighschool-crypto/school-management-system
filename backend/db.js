@@ -58,6 +58,10 @@ if (isMysql) {
     charset: 'utf8mb4',
     timezone: 'Z',
     dateStrings: false,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 10_000,
+    connectTimeout: 10_000,
+    waitForConnections: true,
   });
   // mysql2 returns BIGINT/DECIMAL as string; normalize plain integer strings
   // to numbers for the shapes apps expect (matches pg int8 parser).
@@ -149,6 +153,10 @@ const pgPool = new Pool({
   max: poolMax,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 15000,
+  query_timeout: 20000,
+  statement_timeout: 20000,
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
   application_name: 'school-backend'
 });
 

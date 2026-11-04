@@ -37,8 +37,23 @@ async function validateStudentCurriculum(classId, choices = {}, { partial = fals
   if (level !== 9 && level !== 10) return { compulsory_subject: choices.compulsory_subject || null, optional_subject: choices.optional_subject || null };
   if (!group) throw Object.assign(new Error('Class 9–10 student-এর Arts, Commerce বা Science group নির্ধারিত থাকতে হবে।'), { status: 400 });
 
-  const compulsory = canonicalSubject(choices.compulsory_subject);
-  const optional = canonicalSubject(choices.optional_subject);
+  let compulsory = canonicalSubject(choices.compulsory_subject);
+  let optional = canonicalSubject(choices.optional_subject);
+  if (level === 9 || level === 10) {
+    if (!compulsory && group === 'arts') compulsory = 'Economics';
+    if (!optional) {
+      const gender = String(choices.gender || '').trim().toLowerCase();
+      if (group === 'arts') {
+        if (gender === 'male') optional = 'Agriculture';
+        if (gender === 'female') optional = 'Home Science';
+      } else if (group === 'commerce') {
+        if (gender === 'male') optional = 'Agriculture';
+        if (gender === 'female') optional = 'Home Science';
+      } else if (group === 'science' && ['male', 'female'].includes(gender)) {
+        optional = 'Higher Mathematics';
+      }
+    }
+  }
   if (group === 'arts' && !partial && !compulsory) {
     throw Object.assign(new Error('Arts-এর জন্য Civics অথবা Economics বেছে নিতে হবে।'), { status: 400 });
   }
@@ -47,9 +62,6 @@ async function validateStudentCurriculum(classId, choices = {}, { partial = fals
   }
   if (group !== 'arts' && compulsory) {
     throw Object.assign(new Error('Civics/Economics choice শুধু Arts group-এর জন্য।'), { status: 400 });
-  }
-  if (!partial && !optional) {
-    throw Object.assign(new Error('এই group-এর optional subject বেছে নিতে হবে।'), { status: 400 });
   }
   if (optional && !OPTIONS[group].includes(optional)) {
     throw Object.assign(new Error(`${group} group-এর জন্য এই optional subject প্রযোজ্য নয়।`), { status: 400 });

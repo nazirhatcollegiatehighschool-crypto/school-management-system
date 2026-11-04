@@ -81,6 +81,25 @@ class _ClassStudentsScreenState extends State<ClassStudentsScreen> {
 
   int? _openingStudentId;
 
+  Future<void> _setStudentActive(Map student, bool active) async {
+    final id = student['student_id'];
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await Api.put('/teacher/classes/$_selectedClass/students/$id/active', {'active': active});
+      if (!mounted) return;
+      await _loadStudents();
+      messenger.showSnackBar(SnackBar(
+        content: Text(active ? 'শিক্ষার্থী আবার সক্রিয় হয়েছে' : 'শিক্ষার্থী নিষ্ক্রিয় হয়েছে'),
+      ));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        backgroundColor: Colors.redAccent,
+        content: Text(e.toString().replaceFirst('Exception: ', '')),
+      ));
+    }
+  }
+
   Future<void> _openStudentProfile(Map student) async {
     final studentId = int.tryParse('${student['student_id']}');
     if (studentId == null || _openingStudentId != null) return;
@@ -174,31 +193,36 @@ class _ClassStudentsScreenState extends State<ClassStudentsScreen> {
                     const SizedBox(height: 4),
                     Text('শিক্ষার্থীর তথ্য ও অভিভাবকের যোগাযোগ দেখুন', style: TextStyle(fontSize: 13, color: Colors.blueGrey.shade600)),
                     const SizedBox(height: 14),
-                    DropdownButtonFormField<int>(
-                    initialValue: _selectedClass,
-                    decoration: InputDecoration(
-                      labelText: 'ক্লাস নির্বাচন করুন',
-                      prefixIcon: const Icon(Icons.class_rounded),
-                      filled: true,
-                      fillColor: Colors.white,
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
-                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide(color: const Color(0xFFE6EAF2))),
-                    ),
-                    items: _classes
-                        .map<DropdownMenuItem<int>>(
-                          (c) => DropdownMenuItem(
-                            value: c['id'],
-                            child: Text(
-                              '${c['name']} (${c['section']}) — ${c['student_count']} students',
-                            ),
+                    if (_selectedClass != null)
+                      Builder(builder: (_) {
+                        final cls = _classes.firstWhere(
+                          (c) => c['id'] == _selectedClass,
+                          orElse: () => null,
+                        );
+                        return Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: const Color(0xFFE6EAF2)),
                           ),
-                        )
-                        .toList(),
-                    onChanged: (v) {
-                      setState(() { _selectedClass = v; _students = []; _summary = null; _query = ''; _summaryFilter = null; });
-                      if (v != null) _loadStudents();
-                    },
-                  ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.class_rounded, color: Color(0xFF3F51B5)),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  cls == null
+                                      ? ''
+                                      : '${cls['name']} (${cls['section'] ?? ''}) — ${cls['student_count']} students',
+                                  style: const TextStyle(fontWeight: FontWeight.w700),
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      }),
                   ]),
                 ),
                 if (_summary != null) _classSummaryCard(),
@@ -236,6 +260,7 @@ class _ClassStudentsScreenState extends State<ClassStudentsScreen> {
                             return _StudentCard(
                               student: s,
                               onTap: () => _openStudentProfile(s as Map),
+                              onActiveChanged: (active) => _setStudentActive(s as Map, active),
                             );
                           },
                         ),
@@ -329,7 +354,8 @@ class _ClassStudentsScreenState extends State<ClassStudentsScreen> {
 class _StudentCard extends StatelessWidget {
   final Map student;
   final VoidCallback onTap;
-  const _StudentCard({required this.student, required this.onTap});
+  final ValueChanged<bool> onActiveChanged;
+  const _StudentCard({required this.student, required this.onTap, required this.onActiveChanged});
 
   @override
   Widget build(BuildContext context) {
@@ -337,6 +363,7 @@ class _StudentCard extends StatelessWidget {
     final guardian = '${student['guardian_name'] ?? '-'}';
     final phone = '${student['guardian_phone'] ?? ''}'.trim();
     final login = '${student['guardian_login'] ?? ''}'.trim();
+    final active = student['status'] == null || student['status'] == 'active';
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
       decoration: BoxDecoration(
@@ -350,7 +377,7 @@ class _StudentCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(18),
         child: InkWell(
           borderRadius: BorderRadius.circular(18),
-          onTap: onTap,
+          onTap: active ? onTap : null,
           child: Padding(
             padding: const EdgeInsets.all(14),
             child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -362,7 +389,9 @@ class _StudentCard extends StatelessWidget {
               ),
               const SizedBox(width: 12),
               Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: Color(0xFF202A49))),
+                Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: active ? const Color(0xFF202A49) : Colors.blueGrey)),
+                if (!active && '${student['deactivated_session_name'] ?? ''}'.isNotEmpty)
+                  Text('নিষ্ক্রিয় · ${student['deactivated_session_name']}', style: const TextStyle(fontSize: 11, color: Colors.deepOrange)),
                 const SizedBox(height: 7),
                 _detail(Icons.family_restroom_rounded, 'অভিভাবক: $guardian'),
                 if (phone.isNotEmpty) ...[
@@ -374,7 +403,10 @@ class _StudentCard extends StatelessWidget {
                   _detail(Icons.login_rounded, 'Login: $login'),
                 ],
               ])),
-              const Padding(padding: EdgeInsets.only(top: 12), child: Icon(Icons.chevron_right_rounded, color: Color(0xFF9AA3B5))),
+              Column(mainAxisSize: MainAxisSize.min, children: [
+                Switch.adaptive(value: active, onChanged: onActiveChanged),
+                Text(active ? 'সক্রিয়' : 'নিষ্ক্রিয়', style: TextStyle(fontSize: 10, color: active ? Colors.green : Colors.deepOrange)),
+              ]),
             ]),
           ),
         ),

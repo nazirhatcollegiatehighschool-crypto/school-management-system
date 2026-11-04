@@ -1,5 +1,6 @@
 require('dotenv').config();
 const jwt = require('jsonwebtoken');
+const pool = require('../db');
 
 // Keep a predictable key only for local development. A production deployment
 // without its configured signing secret must fail closed instead of issuing
@@ -14,7 +15,10 @@ function signToken(user) {
     throw Object.assign(new Error('JWT_SECRET is required in production'), { code: 'JWT_SECRET_MISSING' });
   }
   return jwt.sign(
-    { id: user.id, role: user.role, username: user.username, name: user.name },
+    {
+      id: user.id, role: user.role, username: user.username, name: user.name,
+      ...(user.role === 'guardian' && user.session_id ? { sid: user.session_id } : {})
+    },
     JWT_SECRET,
     { expiresIn: '7d' }
   );
@@ -32,7 +36,7 @@ function requireJwtConfiguration(req, res, next) {
 }
 
 function auth(roles) {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     if (!JWT_SECRET) return res.status(503).json({ error: 'Authentication is not configured.' });
     const header = req.headers.authorization || '';
     // PDF/print downloads can't send headers (url_launcher/browser) — allow ?token= fallback.
@@ -44,9 +48,21 @@ function auth(roles) {
       if (!matchesRole(roles, decoded.role)) {
         return res.status(403).json({ error: 'Access denied' });
       }
+      if (decoded.role === 'guardian') {
+        if (!decoded.sid) return res.status(401).json({ error: 'সেশনটি পুরোনো। আবার লগইন করুন।' });
+        const [[session]] = await pool.query(
+          'SELECT session_id FROM guardian_sessions WHERE guardian_id=? AND session_id=? AND logout_at IS NULL',
+          [decoded.id, decoded.sid]
+        );
+        if (!session) return res.status(401).json({ error: 'অন্য ফোনে লগইন হওয়ায় এই সেশনটি বন্ধ হয়েছে। আবার লগইন করুন।' });
+      }
       req.user = decoded;
       next();
     } catch (e) {
+      if (e && e.code && !['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(e.name)) {
+        console.error('Authentication session check failed:', e.code);
+        return res.status(503).json({ error: 'Session যাচাই করা যাচ্ছে না। একটু পরে চেষ্টা করুন।' });
+      }
       return res.status(401).json({ error: 'Invalid or expired session. Please login again.' });
     }
   };

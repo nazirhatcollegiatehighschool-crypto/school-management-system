@@ -1196,7 +1196,10 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
           .toList();
       doc.addPage(
         pw.MultiPage(
-          pageFormat: PdfPageFormat.a4.landscape,
+          pageTheme: AppPdf.paperTheme(
+            margin: 32,
+            pageFormat: PdfPageFormat.a4.landscape,
+          ),
           build: (_) => [
             pw.Text(
               'Session Results Analytics · ${selected.isEmpty ? '' : selected.first['name']}',
@@ -1234,9 +1237,6 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
                   .toList(),
               headerStyle: AppPdf.bn(font, size: 8, weight: pw.FontWeight.bold),
               cellStyle: AppPdf.bn(font, size: 7),
-              headerDecoration: const pw.BoxDecoration(
-                color: PdfColors.grey300,
-              ),
               cellAlignment: pw.Alignment.centerLeft,
             ),
           ],

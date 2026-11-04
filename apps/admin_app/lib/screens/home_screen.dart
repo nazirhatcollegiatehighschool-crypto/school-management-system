@@ -6,7 +6,6 @@ import 'students_screen.dart';
 import 'teachers_screen.dart';
 import 'classes_screen.dart';
 import 'notices_screen.dart';
-import 'sibling_request_screen.dart';
 import 'settings_screen.dart';
 import 'routines_screen.dart';
 import 'attendance_screen.dart';
@@ -14,6 +13,7 @@ import 'login_screen.dart';
 import 'exam_center_screen.dart';
 import 'approvals_screen.dart';
 import 'delete_logs_screen.dart';
+import 'registered_guardians_screen.dart';
 import '../widgets/offline_sync_banner.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -141,8 +141,8 @@ class _HomeScreenState extends State<HomeScreen> {
         screen: const ExamCenterScreen(),
       ),
       (
-        title: 'পরীক্ষা অনুমোদন',
-        subtitle: 'Submitted marks ও re-entry request',
+        title: 'Approval Requests',
+        subtitle: 'Teacher, guardian, exam ও profile requests',
         icon: Icons.fact_check_rounded,
         color: const Color(0xFF0F8B72),
         screen: const ApprovalsScreen(),
@@ -169,11 +169,11 @@ class _HomeScreenState extends State<HomeScreen> {
         screen: const NoticesScreen(),
       ),
       (
-        title: 'Sibling Req.',
-        subtitle: 'Guardian pairings',
+        title: 'Registered Guardians',
+        subtitle: 'Online status & last activity',
         icon: Icons.family_restroom_rounded,
-        color: const Color(0xFF3D4A75),
-        screen: const SiblingRequestScreen(),
+        color: const Color(0xFF0F8B72),
+        screen: const RegisteredGuardiansScreen(),
       ),
       (
         title: 'স্থায়ী delete log',

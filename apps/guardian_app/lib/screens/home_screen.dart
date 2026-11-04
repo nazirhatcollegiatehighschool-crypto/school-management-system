@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+
+import 'dart:async';
+
 import 'package:firebase_messaging/firebase_messaging.dart';
 
 import '../fcm_service.dart';
@@ -17,15 +20,56 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Map? _profile;
   String? _error;
+  Timer? _sessionTimer;
+  bool _sessionEnded = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _load();
     _wirePush();
+    _sendHeartbeat();
+    _sessionTimer = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => _sendHeartbeat(),
+    );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _sendHeartbeat();
+  }
+
+  Future<void> _sendHeartbeat() async {
+    if (_sessionEnded || Api.token == null) return;
+    try {
+      await Api.heartbeat();
+    } on ApiAuthException catch (e) {
+      if (!mounted || _sessionEnded) return;
+      _sessionEnded = true;
+      await Api.clearToken();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message), backgroundColor: Colors.redAccent),
+      );
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const LoginScreen()),
+      );
+    } catch (_) {
+      // A temporary network outage doesn't end the signed-in session.
+    }
+  }
+
+  @override
+  void dispose() {
+    _sessionTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
   }
 
   void _wirePush() {
@@ -144,6 +188,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
     if (ok == true) {
       await unregisterDeviceToken();
+      try {
+        await Api.post('/guardian/session/logout');
+      } catch (_) {}
       await Api.clearToken();
       if (!mounted) return;
       Navigator.pushReplacement(

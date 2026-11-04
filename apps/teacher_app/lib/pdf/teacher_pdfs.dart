@@ -290,17 +290,9 @@ class TeacherPdfs {
       cellPadding: const pw.EdgeInsets.symmetric(horizontal: 3, vertical: 2),
       border: pw.TableBorder.all(color: PdfColors.grey700, width: .5),
       headerStyle: englishStyle(7.7, bold: true),
-      headerDecoration: const pw.BoxDecoration(
-        color: PdfColor(.91, .91, .91, .88),
-      ),
       cellStyle: englishStyle(8.2, color: PdfColors.grey900),
       cellAlignment: pw.Alignment.center,
       cellAlignments: {2: pw.Alignment.centerLeft},
-      cellDecoration: (column, value, row) => pw.BoxDecoration(
-        color: row.isOdd
-            ? const PdfColor(.95, .95, .95, .70)
-            : const PdfColor(1, 1, 1, .70),
-      ),
       columnWidths: {
         0: const pw.FixedColumnWidth(24),
         1: const pw.FixedColumnWidth(35),
@@ -329,7 +321,7 @@ class TeacherPdfs {
           pageTheme: MarksheetTemplate.pageTheme(
             watermark: watermark,
             margin: 28,
-            watermarkOpacity: .18,
+            watermarkOpacity: .12,
             watermarkWidth: 500,
             watermarkHeight: 470,
           ),
@@ -639,6 +631,7 @@ class TeacherPdfs {
   /// `/teacher/events/:id/seat-plan` payload -> individual 6×3.5 inch seat tickets.
   static Future<Uint8List> seatPlan(Map data) async {
     final pw.Font bn = await AppPdf.banglaFont();
+    final watermark = await MarksheetTemplate.loadWatermark();
     final event = _asMap(data['event']);
     final cls = _asMap(data['class']);
     final settings = _asMap(data['settings']);
@@ -659,8 +652,31 @@ class TeacherPdfs {
           final seat = _asMap(pair[side]);
           doc.addPage(
             pw.Page(
-              pageFormat: ticketSize,
-              margin: const pw.EdgeInsets.all(18),
+              pageTheme: pw.PageTheme(
+                pageFormat: ticketSize,
+                margin: const pw.EdgeInsets.all(18),
+                buildBackground: (_) => pw.FullPage(
+                  ignoreMargins: true,
+                  child: pw.Stack(
+                    children: [
+                      pw.Positioned.fill(
+                        child: pw.Container(color: PdfColors.white),
+                      ),
+                      pw.Center(
+                        child: pw.Opacity(
+                          opacity: 0.14,
+                          child: pw.Image(
+                            watermark,
+                            width: 180,
+                            height: 100,
+                            fit: pw.BoxFit.contain,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
               build: (_) => pw.Container(
                 decoration: pw.BoxDecoration(
                   border: pw.Border.all(color: PdfColors.grey700, width: 1.2),
@@ -680,7 +696,7 @@ class TeacherPdfs {
                     ),
                     pw.SizedBox(height: 4),
                     pw.Text(
-                      'Seat Plan • ${_s(event['name'])}',
+                      'Seat Plan | ${_s(event['name'])}',
                       textAlign: pw.TextAlign.center,
                       style: AppPdf.bn(
                         bn,
@@ -706,12 +722,12 @@ class TeacherPdfs {
                     ),
                     pw.SizedBox(height: 8),
                     pw.Text(
-                      'Class: ${_s(cls['name'])}  •  Roll: ${_s(seat['roll'])}',
+                      'Class: ${_s(cls['name'])}  |  Roll: ${_s(seat['roll'])}',
                       textAlign: pw.TextAlign.center,
                       style: AppPdf.bn(bn, size: 11),
                     ),
                     pw.Text(
-                      'Room: ${_s(rm['room'])}  •  Desk: ${desk + 1}  •  ${side == 0 ? 'Left' : 'Right'} seat',
+                      'Room: ${_s(rm['room'])}  |  Desk: ${desk + 1}  |  ${side == 0 ? 'Left' : 'Right'} seat',
                       textAlign: pw.TextAlign.center,
                       style: AppPdf.bn(bn, size: 11),
                     ),

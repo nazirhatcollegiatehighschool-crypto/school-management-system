@@ -31,6 +31,7 @@ async function validateExamMarks(examId, opts = {}) {
 
   const [[exam]] = await pool.query(
     `SELECT e.id, e.class_id, e.subject_id, sub.name AS subject_name, sub.full_marks,
+            sub.is_optional,
             sub.cq_full, sub.mcq_full, sub.practical_full, sub.written_full, sub.ca_full
        FROM exams e JOIN subjects sub ON sub.id = e.subject_id
       WHERE e.id = ?`, [examId]);
@@ -44,19 +45,25 @@ async function validateExamMarks(examId, opts = {}) {
   const totalFull = asNum(exam.full_marks) || 100;
 
   // Enrolled students (mirrors GET /exams/:id eligibility logic).
-  const [[enrollCount]] = await pool.query(
-    `SELECT COUNT(*) AS c FROM student_subjects ss
-       JOIN students s ON s.id = ss.student_id
-      WHERE ss.subject_id = ? AND s.class_id = ?`,
-    [exam.subject_id, exam.class_id]);
+  // Allocations in student_subjects are authoritative for elective papers
+  // only; compulsory subjects can have partial allocation rows, which must
+  // not shrink the completeness check.
   let students;
-  if (enrollCount && Number(enrollCount.c) > 0) {
-    [students] = await pool.query(
-      `SELECT s.id, s.name, s.roll FROM students s
-        JOIN student_subjects ss ON ss.student_id = s.id AND ss.subject_id = ?
-       WHERE s.class_id = ? AND (s.status IS NULL OR s.status='active') ORDER BY s.roll`,
+  if (Number(exam.is_optional) === 1) {
+    const [[enrollCount]] = await pool.query(
+      `SELECT COUNT(*) AS c FROM student_subjects ss
+         JOIN students s ON s.id = ss.student_id
+        WHERE ss.subject_id = ? AND s.class_id = ?`,
       [exam.subject_id, exam.class_id]);
-  } else {
+    if (enrollCount && Number(enrollCount.c) > 0) {
+      [students] = await pool.query(
+        `SELECT s.id, s.name, s.roll FROM students s
+          JOIN student_subjects ss ON ss.student_id = s.id AND ss.subject_id = ?
+         WHERE s.class_id = ? AND (s.status IS NULL OR s.status='active') ORDER BY s.roll`,
+        [exam.subject_id, exam.class_id]);
+    }
+  }
+  if (!students) {
     [students] = await pool.query(
       `SELECT id, name, roll FROM students WHERE class_id=? AND (status IS NULL OR status='active') ORDER BY roll`,
       [exam.class_id]);

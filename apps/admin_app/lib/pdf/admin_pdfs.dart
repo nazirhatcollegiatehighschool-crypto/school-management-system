@@ -59,7 +59,7 @@ class AdminPdfs {
           _addr(settings),
           title: 'শিক্ষক তথ্য ও স্বাক্ষর তালিকা',
           subtitle:
-              'EIIN: ${_s(settings['school_eiin']).trim().isEmpty ? '104417' : settings['school_eiin']}   •   প্রতিষ্ঠিত: ১৯৫৪',
+              'EIIN: ${_s(settings['school_eiin']).trim().isEmpty ? '104417' : settings['school_eiin']}   |   প্রতিষ্ঠিত: ১৯৫৪',
         ),
         build: (_) => [
           pw.SizedBox(height: 10),
@@ -75,7 +75,6 @@ class AdminPdfs {
             },
             children: [
               pw.TableRow(
-                decoration: const pw.BoxDecoration(color: PdfColors.indigo800),
                 children: [
                   cell('নং', bold: true, alignment: pw.Alignment.center),
                   cell('শিক্ষকের নাম', bold: true),
@@ -301,7 +300,7 @@ class AdminPdfs {
             logo: logo,
             schoolName: _school(settings),
             schoolAddress: _addr(settings),
-            eventName: '$eventName • $clsLabel',
+            eventName: '$eventName | $clsLabel',
             student: student,
             event: event ?? {'name': eventName},
             result: result,
@@ -349,8 +348,7 @@ class AdminPdfs {
     final doc = pw.Document();
     doc.addPage(
       pw.Page(
-        pageFormat: PdfPageFormat.a4,
-        margin: const pw.EdgeInsets.all(36),
+        pageTheme: AppPdf.paperTheme(margin: 36),
         build: (_) => pw.Column(
           crossAxisAlignment: pw.CrossAxisAlignment.start,
           children: [
@@ -360,7 +358,7 @@ class AdminPdfs {
               _addr(settings),
               title: 'উত্তীর্ণ শিক্ষার্থীর তালিকা / Promoted Student List',
               subtitle:
-                  '$eventName  •  $clsName${destName.isNotEmpty ? ' → $destName' : ''}',
+                  '$eventName  |  $clsName${destName.isNotEmpty ? ' → $destName' : ''}',
             ),
             pw.SizedBox(height: 10),
             pw.Text(
@@ -387,10 +385,7 @@ class AdminPdfs {
                 bn,
                 size: 9,
                 weight: pw.FontWeight.bold,
-                color: PdfColors.white,
-              ),
-              headerDecoration: const pw.BoxDecoration(
-                color: PdfColors.green800,
+                color: PdfColors.grey900,
               ),
               cellStyle: AppPdf.bn(bn, size: 9),
               cellPadding: const pw.EdgeInsets.all(5),
@@ -424,10 +419,7 @@ class AdminPdfs {
                   bn,
                   size: 9,
                   weight: pw.FontWeight.bold,
-                  color: PdfColors.white,
-                ),
-                headerDecoration: const pw.BoxDecoration(
-                  color: PdfColors.red800,
+                  color: PdfColors.grey900,
                 ),
                 cellStyle: AppPdf.bn(bn, size: 9),
                 cellPadding: const pw.EdgeInsets.all(5),
@@ -493,8 +485,7 @@ class AdminPdfs {
     final doc = pw.Document();
     doc.addPage(
       pw.Page(
-        pageFormat: PdfPageFormat.a4,
-        margin: const pw.EdgeInsets.all(36),
+        pageTheme: AppPdf.paperTheme(margin: 36),
         build: (_) => pw.Column(
           crossAxisAlignment: pw.CrossAxisAlignment.start,
           children: [
@@ -550,10 +541,7 @@ class AdminPdfs {
                   bn,
                   size: 9,
                   weight: pw.FontWeight.bold,
-                  color: PdfColors.white,
-                ),
-                headerDecoration: const pw.BoxDecoration(
-                  color: PdfColors.green800,
+                  color: PdfColors.grey900,
                 ),
                 cellStyle: AppPdf.bn(bn, size: 9),
                 cellPadding: const pw.EdgeInsets.all(5),
@@ -589,10 +577,7 @@ class AdminPdfs {
                   bn,
                   size: 9,
                   weight: pw.FontWeight.bold,
-                  color: PdfColors.white,
-                ),
-                headerDecoration: const pw.BoxDecoration(
-                  color: PdfColors.red800,
+                  color: PdfColors.grey900,
                 ),
                 cellStyle: AppPdf.bn(bn, size: 9),
                 cellPadding: const pw.EdgeInsets.all(5),

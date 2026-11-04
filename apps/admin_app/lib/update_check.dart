@@ -481,15 +481,12 @@ Future<void> _downloadAndInstall(
           return;
         }
       }
-      // PRIMARY PATH — PackageInstaller.Session (Play-Store-style, in-app):
-      // system shows ONE inline Install/Update dialog; back-press can't strand
-      // the user because failure/success always lands as a notification + a
-      // persistent retry card (see _showInstallPending below).
+      // PRIMARY PATH — PackageInstaller.Session. The native status receiver
+      // opens Android's confirmation prompt and posts a retry notification only
+      // when installation fails. Do not put another retry dialog over it.
       statusMsg.value = 'Install করছে… (একটু অপেক্ষা করুন)';
-      String sessionOutcome = '';
       try {
-        final sessionId = await _nativeInstallApk(file.path);
-        sessionOutcome = 'session $sessionId committed';
+        await _nativeInstallApk(file.path);
       } on PlatformException catch (pe) {
         if (pe.code == 'PERMISSION_DENIED') {
           if (context.mounted) {
@@ -502,17 +499,6 @@ Future<void> _downloadAndInstall(
           return;
         }
         throw Exception('Install শুরু হয়নি: ${pe.message ?? pe.code}');
-      }
-      if (context.mounted) {
-        _say(
-          context,
-          'Installer খুলেছে — "Install/Update" চাপুন। পুরনো data মুছবে না। ($sessionOutcome)',
-        );
-        // Persistent retry card: survives back-press / dead installer UI.
-        // The staged APK stays on disk, so "আবার চেষ্টা" never re-downloads.
-        if (context.mounted) {
-          _showInstallPending(context, appName, latest, file.path);
-        }
       }
     } finally {
       client.close();
@@ -558,56 +544,6 @@ Future<int> _nativeInstallApk(String path) async {
     'path': path,
   });
   return v ?? 0;
-}
-
-/// Persistent install-retry card: shown right after the session commits and
-/// re-shown from Profile/Settings while a staged APK exists. Back-press,
-/// dead installer UI, or accidental dismiss can NEVER strand the user —
-/// "আবার চেষ্টা" re-commits the SAME staged file (no re-download).
-Future<void> _showInstallPending(
-  BuildContext context,
-  String appName,
-  String latest,
-  String apkPath,
-) async {
-  if (!context.mounted) return;
-  await showDialog(
-    context: context,
-    barrierDismissible: true,
-    builder: (c) => AlertDialog(
-      title: const Text('📦 Update প্রস্তুত'),
-      content: Text(
-        'v$latest download হয়ে গেছে।\n\n'
-        '• System dialog-এ "Install/Update" চাপুন — data মুছবে না।\n'
-        '• Dialog না দেখলে নিচে "আবার চেষ্টা" চাপুন (download লাগবে না)।\n'
-        '• Notification-এও install option থাকবে।',
-      ),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(c), child: const Text('পরে')),
-        FilledButton(
-          onPressed: () async {
-            Navigator.pop(c);
-            try {
-              await _nativeInstallApk(apkPath);
-              if (context.mounted) {
-                _say(context, 'Installer আবার খুলছে — "Install/Update" চাপুন।');
-              }
-            } on PlatformException catch (pe) {
-              if (context.mounted) {
-                _say(
-                  context,
-                  pe.code == 'PERMISSION_DENIED'
-                      ? 'Install অনুমতি নেই — Settings → Install unknown apps → Allow করুন।'
-                      : 'Install শুরু হয়নি: ${pe.message ?? pe.code}',
-                );
-              }
-            }
-          },
-          child: const Text('আবার চেষ্টা'),
-        ),
-      ],
-    ),
-  );
 }
 
 void _say(BuildContext context, String msg) {

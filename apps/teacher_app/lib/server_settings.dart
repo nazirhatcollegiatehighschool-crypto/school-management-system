@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import 'api.dart';
 import 'config.dart';
 
@@ -10,51 +11,92 @@ Future<void> showServerUrlDialog(BuildContext context) async {
   bool testing = false;
   await showDialog(
     context: context,
-    builder: (ctx) => StatefulBuilder(builder: (ctx, setD) => AlertDialog(
-      title: const Text('🔧 Server URL'),
-      content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        const Text('ডিফল্ট server ছাড়া অন্য URL লাগলে এখানে বসান।\nযেমন: https://school-management-system-mobile-api.vercel.app',
-            style: TextStyle(fontSize: 12.5)),
-        const SizedBox(height: 10),
-        TextField(controller: ctl, keyboardType: TextInputType.url,
-            decoration: const InputDecoration(labelText: 'Server URL *', border: OutlineInputBorder(),
-                hintText: 'https://school-management-system-mobile-api.vercel.app')),
-        if (status != null) ...[
-          const SizedBox(height: 8),
-          Text(status!, style: TextStyle(fontSize: 12.5,
-              color: status!.startsWith('✅') ? Colors.green.shade700 : Colors.red)),
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setD) => AlertDialog(
+        title: const Text('🔧 Server URL'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              'ডিফল্ট server ছাড়া অন্য URL লাগলে এখানে বসান।\nযেমন: https://school-management-system-brown-mu.vercel.app',
+              style: TextStyle(fontSize: 12.5),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: ctl,
+              keyboardType: TextInputType.url,
+              decoration: const InputDecoration(
+                labelText: 'Server URL *',
+                border: OutlineInputBorder(),
+                hintText:
+                    'https://school-management-system-brown-mu.vercel.app',
+              ),
+            ),
+            if (status != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                status!,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  color: status!.startsWith('✅')
+                      ? Colors.green.shade700
+                      : Colors.red,
+                ),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('বাতিল'),
+          ),
+          TextButton(
+            onPressed: testing
+                ? null
+                : () async {
+                    setD(() {
+                      testing = true;
+                      status = 'পরীক্ষা চলছে…';
+                    });
+                    final ok = await _testUrl(ctl.text.trim());
+                    setD(() {
+                      testing = false;
+                      status = ok
+                          ? '✅ Server পাওয়া গেছে — Save চাপুন'
+                          : '❌ Server-এ পৌঁছানো যাচ্ছে না';
+                    });
+                  },
+            child: const Text('Test'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              final u = ctl.text.trim().replaceAll(RegExp(r'/+$'), '');
+              if (!u.startsWith('http://') && !u.startsWith('https://')) {
+                setD(() => status = '❌ http:// বা https:// দিয়ে শুরু হতে হবে');
+                return;
+              }
+              await Config.setOverride(u);
+              Api.sync.markRequestOk();
+              await Api.sync.recheck();
+              if (ctx.mounted) Navigator.pop(ctx);
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    backgroundColor: Colors.green,
+                    content: Text(
+                      '✓ Server বদলেছে এবং আবার সংযোগ যাচাই করা হয়েছে',
+                    ),
+                  ),
+                );
+              }
+            },
+            child: const Text('Save'),
+          ),
         ],
-      ]),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('বাতিল')),
-        TextButton(
-          onPressed: testing ? null : () async {
-            setD(() { testing = true; status = 'পরীক্ষা চলছে…'; });
-            final ok = await _testUrl(ctl.text.trim());
-            setD(() {
-              testing = false;
-              status = ok ? '✅ Server পাওয়া গেছে — Save চাপুন' : '❌ Server-এ পৌঁছানো যাচ্ছে না';
-            });
-          },
-          child: const Text('Test')),
-        FilledButton(
-          onPressed: () async {
-            final u = ctl.text.trim().replaceAll(RegExp(r'/+$'), '');
-            if (!u.startsWith('http://') && !u.startsWith('https://')) {
-              setD(() => status = '❌ http:// বা https:// দিয়ে শুরু হতে হবে');
-              return;
-            }
-            await Config.setOverride(u);
-            if (ctx.mounted) Navigator.pop(ctx);
-            if (context.mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                  backgroundColor: Colors.green,
-                  content: Text('✓ Server বদলেছে — অ্যাপ বন্ধ করে আবার খুলুন')));
-            }
-          },
-          child: const Text('Save')),
-      ],
-    )),
+      ),
+    ),
   );
 }
 

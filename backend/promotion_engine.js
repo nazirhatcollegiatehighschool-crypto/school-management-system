@@ -531,7 +531,11 @@ async function assignGroup(studentId, fromClassId, toGroup, userId, choices = {}
       ) ORDER BY id LIMIT 1`,
     [aliases[0], aliases[0], aliases[1] || aliases[0], aliases[1] || aliases[0]]);
   if (!dest) throw Object.assign(new Error('No Class 9 group "' + toGroup + '"'), { status: 400 });
-  const curriculum = await validateStudentCurriculum(dest.id, choices);
+    const [[studentGender]] = await pool.query('SELECT gender FROM students WHERE id=?', [studentId]);
+    const curriculum = await validateStudentCurriculum(dest.id, {
+      ...choices,
+      gender: choices.gender || (studentGender && studentGender.gender),
+    });
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();

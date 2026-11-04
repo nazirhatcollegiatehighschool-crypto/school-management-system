@@ -10,6 +10,9 @@ import 'config.dart';
 import 'sync_store.dart';
 
 class Api {
+  // Reuse the HTTP connection across screen requests instead of reconnecting for every call.
+  static final http.Client _client = http.Client();
+  static final Map<String, Future<dynamic>> _getFlights = {};
   static String? token;
   static const Duration _timeout = Duration(seconds: 30);
   static const _tokenKey = 'auth_token';
@@ -28,6 +31,7 @@ class Api {
   }
 
   static Future<void> saveToken(String t) async {
+    if (token != t) _getFlights.clear();
     token = t;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_tokenKey, t);
@@ -43,6 +47,7 @@ class Api {
 
   static Future<void> clearToken() async {
     token = null;
+    _getFlights.clear();
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_tokenKey);
     await sync.clear(); // cached data belongs to the previous session
@@ -73,7 +78,7 @@ class Api {
     Duration timeout = const Duration(seconds: 20),
   }) async {
     try {
-      final res = await http
+      final res = await _client
           .get(
             Uri.parse('${base.replaceAll(RegExp(r'/+$'), '')}/api/health'),
             headers: _probeHeaders,
@@ -94,13 +99,24 @@ class Api {
         ? _headers
         : {..._headers, 'If-None-Match': etag};
     final hadOverride = Config.hasOverride;
-    Future<http.Response> request(Duration timeout) => http
+    Future<http.Response> request(Duration timeout) => _client
         .get(Uri.parse(Config.api + path), headers: headers)
         .timeout(timeout);
     return request(hadOverride ? const Duration(seconds: 4) : _timeout);
   }
 
-  static Future<dynamic> get(String path) async {
+  static Future<dynamic> get(String path) {
+    var request = _getFlights[path];
+    if (request == null) {
+      request = _getUnshared(path);
+      _getFlights[path] = request;
+    }
+    return request.then((value) => jsOne(value)).whenComplete(() {
+      if (identical(_getFlights[path], request)) _getFlights.remove(path);
+    });
+  }
+
+  static Future<dynamic> _getUnshared(String path) async {
     // Offline-first: serve the locally stored copy immediately instead of
     // waiting for a slow network timeout.
     if (sync.isOffline) {
@@ -200,15 +216,15 @@ class Api {
       final uri = Uri.parse(Config.api + path);
       final http.Response res;
       if (method == 'POST') {
-        res = await http
+        res = await _client
             .post(uri, headers: _headers, body: jsonEncode(body ?? {}))
             .timeout(_timeout);
       } else if (method == 'PUT') {
-        res = await http
+        res = await _client
             .put(uri, headers: _headers, body: jsonEncode(body ?? {}))
             .timeout(_timeout);
       } else {
-        res = await http.delete(uri, headers: _headers).timeout(_timeout);
+        res = await _client.delete(uri, headers: _headers).timeout(_timeout);
       }
       final data = _handle(res);
       sync.markRequestOk();
@@ -256,7 +272,9 @@ class Api {
       final rq = http.MultipartRequest('POST', Uri.parse(Config.api + path));
       if (token != null) rq.headers['Authorization'] = 'Bearer $token';
       rq.files.add(await http.MultipartFile.fromPath(field, filePath));
-      final streamed = await rq.send().timeout(const Duration(seconds: 90));
+      final streamed = await _client
+          .send(rq)
+          .timeout(const Duration(seconds: 90));
       final body = await streamed.stream.bytesToString();
       final data = body.isEmpty ? {} : jsonDecode(body);
       if (streamed.statusCode < 200 || streamed.statusCode >= 300) {
@@ -330,12 +348,27 @@ class Api {
   }
 
   static dynamic _handle(http.Response res) {
-    final data = res.body.isEmpty ? {} : jsonDecode(res.body);
+    dynamic data = {};
+    if (res.body.isNotEmpty) {
+      try {
+        data = jsonDecode(res.body);
+      } catch (_) {
+        throw ApiHttpException(
+          res.statusCode,
+          'Server থেকে সঠিক response পাওয়া যায়নি (${res.statusCode})। আবার চেষ্টা করুন।',
+        );
+      }
+    }
     if (res.statusCode >= 200 && res.statusCode < 300) return data;
-    if (res.statusCode == 401 || res.statusCode == 403) {
+    if (res.statusCode == 401) {
       throw ApiAuthException(data['error'] ?? 'সেশন শেষ। আবার লগইন করুন।');
     }
-    throw Exception(data['error'] ?? 'Request failed (${res.statusCode})');
+    throw ApiHttpException(
+      res.statusCode,
+      data is Map && data['error'] != null
+          ? '${data['error']}'
+          : 'Server request failed (${res.statusCode})',
+    );
   }
 
   /// True only for real auth failures (401/403). Server 5xx / parse errors
@@ -444,6 +477,16 @@ String friendlyError(Object e) {
 class ApiAuthException implements Exception {
   final String message;
   ApiAuthException(this.message);
+  @override
+  String toString() => message;
+}
+
+/// Thrown for non-authentication HTTP failures so screens can show the actual
+/// server message instead of guessing that the exam lock state is unknown.
+class ApiHttpException implements Exception {
+  final int statusCode;
+  final String message;
+  ApiHttpException(this.statusCode, this.message);
   @override
   String toString() => message;
 }

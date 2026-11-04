@@ -383,7 +383,6 @@ class MarksheetTemplate {
             horizontal: 4,
             vertical: 3,
           ),
-          headerDecoration: const pw.BoxDecoration(color: PdfColors.grey200),
           headerStyle: AppFontStyle.bold(banglaFont, 7.2),
           cellStyle: pw.TextStyle(font: banglaFont, fontSize: 7.4),
           columnWidths: const {
@@ -479,9 +478,6 @@ class MarksheetTemplate {
                 cellPadding: const pw.EdgeInsets.symmetric(
                   horizontal: 2,
                   vertical: 2,
-                ),
-                headerDecoration: const pw.BoxDecoration(
-                  color: PdfColors.grey200,
                 ),
                 headerStyle: latin(5.4, bold: true),
                 cellStyle: latin(6.2),

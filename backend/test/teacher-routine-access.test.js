@@ -11,6 +11,7 @@ test('routine access requires the teacher, subject, and exact class scope', () =
   assert.match(scope, /teacher_routine_section\.section = c\.section/);
   assert.match(scope, /teacher_routine_group\.class_id = c\.id/);
   assert.match(scope, /teacher_routine_group\.group_name = c\.group_name/);
+  assert.match(scope, /LOWER\(TRIM\(routine_subject\.name\)\)/);
 });
 
 test('routine access scope supports explicit aliases for each exam query', () => {

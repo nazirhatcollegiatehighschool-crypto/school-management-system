@@ -96,6 +96,20 @@ class _StudentProfileScreenState extends State<StudentProfileScreen> {
     final senior = level == 9 || level == 10;
     String? compulsory = student['compulsory_subject']?.toString();
     String? optional = student['optional_subject']?.toString();
+    final groupLower = group.toLowerCase();
+    if (senior && optional == null) {
+      final gender = '${student['gender'] ?? ''}'.trim().toLowerCase();
+      if (arts || groupLower.contains('commerce')) {
+        optional = gender == 'male'
+            ? 'Agriculture'
+            : gender == 'female'
+            ? 'Home Science'
+            : null;
+      } else if (science && (gender == 'male' || gender == 'female')) {
+        optional = 'Higher Mathematics';
+      }
+    }
+    if (senior && arts && compulsory == null) compulsory = 'Economics';
     final optionalOptions = science
         ? const ['Higher Mathematics', 'Agriculture', 'Home Science']
         : const ['Agriculture', 'Home Science'];
@@ -639,7 +653,8 @@ class _StudentProfileScreenState extends State<StudentProfileScreen> {
         _section(
           'Uniform report — মোট ${data['uniform_missing_reports'] ?? 0} দিন আনেনি',
           uniformReports,
-          (r) => '${r['report_date']} · ${r['uniform_brought'] == true || r['uniform_brought'] == 1 ? 'Uniform এনেছে' : 'Uniform আনেনি'}${(r['note'] ?? '').toString().trim().isEmpty ? '' : '\n${r['note']}'}',
+          (r) =>
+              '${r['report_date']} · ${r['uniform_brought'] == true || r['uniform_brought'] == 1 ? 'Uniform এনেছে' : 'Uniform আনেনি'}${(r['note'] ?? '').toString().trim().isEmpty ? '' : '\n${r['note']}'}',
         ),
         _section(
           'শিক্ষকদের অভিযোগ',

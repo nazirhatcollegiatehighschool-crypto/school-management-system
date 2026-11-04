@@ -44,6 +44,101 @@ const photoUpload = multer({
 
 router.use(auth('admin'));
 
+router.get('/registered-guardians/sections', async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT c.id AS class_id,c.name AS class_name,c.section,
+              COUNT(DISTINCT CASE
+                WHEN link_guardian.id IS NOT NULL OR direct_guardian.id IS NOT NULL THEN s.id
+              END) AS student_count
+       FROM classes c
+       LEFT JOIN students s ON s.class_id=c.id
+       LEFT JOIN guardian_links gl ON gl.student_id=s.id AND gl.status='approved'
+       LEFT JOIN users link_guardian ON link_guardian.id=gl.guardian_id
+         AND link_guardian.role='guardian' AND link_guardian.active=1
+       LEFT JOIN users direct_guardian ON direct_guardian.id=s.guardian_id
+         AND direct_guardian.role='guardian' AND direct_guardian.active=1
+       GROUP BY c.id,c.name,c.section
+       ORDER BY c.name,c.section`
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('Registered guardian sections failed:', err.code || 'DB_ERROR');
+    res.status(500).json({ error: 'Registered guardian list could not be loaded.' });
+  }
+});
+
+router.get('/registered-guardians/sections/:classId', async (req, res) => {
+  try {
+    const classId = Number(req.params.classId);
+    if (!Number.isInteger(classId) || classId < 1) return res.status(400).json({ error: 'Invalid class.' });
+    const section = typeof req.query.section === 'string' && req.query.section.trim()
+      ? req.query.section.trim()
+      : null;
+    const params = section ? [classId, section] : [classId];
+    const sectionClause = section ? ' AND c.section=$2' : '';
+    const [rows] = await pool.query(
+      `SELECT registered.student_id,registered.student_name,registered.roll,
+              registered.guardian_id,registered.guardian_name,
+              registered.session_id,registered.last_login_at,registered.last_seen_at,
+              registered.logout_at,registered.last_logout_at
+       FROM (
+         SELECT s.id AS student_id,s.name AS student_name,s.roll,
+                g.id AS guardian_id,g.name AS guardian_name,
+                gs.session_id,gs.last_login_at,gs.last_seen_at,gs.logout_at,gs.last_logout_at
+         FROM students s
+         JOIN classes c ON c.id=s.class_id
+         JOIN users g ON g.id=s.guardian_id AND g.role='guardian' AND g.active=1
+         LEFT JOIN guardian_sessions gs ON gs.guardian_id=g.id
+         WHERE s.class_id=$1${sectionClause}
+         UNION
+         SELECT s.id AS student_id,s.name AS student_name,s.roll,
+                g.id AS guardian_id,g.name AS guardian_name,
+                gs.session_id,gs.last_login_at,gs.last_seen_at,gs.logout_at,gs.last_logout_at
+         FROM guardian_links gl
+         JOIN users g ON g.id=gl.guardian_id AND g.role='guardian' AND g.active=1
+         JOIN students s ON s.id=gl.student_id
+         JOIN classes c ON c.id=s.class_id
+         LEFT JOIN guardian_sessions gs ON gs.guardian_id=g.id
+         WHERE gl.status='approved' AND s.class_id=$1${sectionClause}
+       ) registered
+       ORDER BY registered.roll,registered.student_name,registered.guardian_id`,
+      params
+    );
+    const now = Date.now();
+    const students = new Map();
+    for (const row of rows) {
+      const lastSeen = row.last_seen_at ? new Date(row.last_seen_at).getTime() : 0;
+      const isActive = !!row.session_id && !row.logout_at && now - lastSeen <= 120000;
+      const guardian = {
+        id: row.guardian_id, name: row.guardian_name,
+        last_login_at: row.last_login_at, last_seen_at: row.last_seen_at,
+        logout_at: row.logout_at, last_logout_at: row.last_logout_at,
+        is_active: isActive,
+        last_inactive_at: isActive ? row.last_logout_at : (row.logout_at || (lastSeen ? new Date(lastSeen + 120000).toISOString() : null))
+      };
+      if (!students.has(row.student_id)) {
+        students.set(row.student_id, {
+          student_id: row.student_id, student_name: row.student_name, roll: row.roll, guardians: []
+        });
+      }
+      students.get(row.student_id).guardians.push(guardian);
+    }
+    res.json([...students.values()].map(student => ({
+      ...student,
+      is_active: student.guardians.some(g => g.is_active),
+      last_login_at: student.guardians.map(g => g.last_login_at).filter(Boolean).sort().at(-1) || null,
+      last_seen_at: student.guardians.map(g => g.last_seen_at).filter(Boolean).sort().at(-1) || null,
+      logout_at: student.guardians.map(g => g.logout_at).filter(Boolean).sort().at(-1) || null,
+      last_logout_at: student.guardians.map(g => g.last_logout_at).filter(Boolean).sort().at(-1) || null,
+      last_inactive_at: student.guardians.filter(g => g.last_inactive_at).map(g => g.last_inactive_at).sort().at(-1) || null
+    })));
+  } catch (err) {
+    console.error('Registered guardian students failed:', err.code || 'DB_ERROR');
+    res.status(500).json({ error: 'Guardian status could not be loaded.' });
+  }
+});
+
 function log(userId, action, detail) {
   return pool.query('INSERT INTO activity_log (user_id, action, detail) VALUES (?,?,?)', [userId, action, detail || '']).catch(() => {});
 }
@@ -88,7 +183,7 @@ router.get('/stats', async (req, res) => {
     const [[teachers]] = await pool.query("SELECT COUNT(*) AS total FROM users WHERE role='teacher'");
     const [[classes]] = await pool.query('SELECT COUNT(*) AS total FROM classes');
     const [[guardians]] = await pool.query("SELECT COUNT(*) AS total FROM users WHERE role='guardian'");
-    const [[exams]] = await pool.query('SELECT COUNT(*) AS total FROM exams');
+    const [[exams]] = await pool.query('SELECT COUNT(*) AS total FROM exams WHERE event_id IS NULL');
     const [today] = await pool.query(
       "SELECT status, COUNT(*) AS cnt FROM attendance WHERE date = CURDATE() GROUP BY status"
     );
@@ -263,9 +358,14 @@ router.post('/sibling-requests/:id/reject', async (req, res) => {
 
 router.get('/students', async (req, res) => {
   try {
+    const studentStatus = req.query.status === 'inactive' ? 'inactive' : 'active';
     const [rows] = await pool.query(
       `SELECT s.*, c.name AS class_name, c.section
-       FROM students s JOIN classes c ON s.class_id = c.id ORDER BY s.class_id, s.roll`
+       FROM students s JOIN classes c ON s.class_id = c.id
+       WHERE (?='inactive' AND s.status='inactive' AND s.deactivated_by IS NOT NULL)
+          OR (?='active' AND (s.status IS NULL OR s.status='active'))
+       ORDER BY s.class_id, s.roll`,
+      [studentStatus, studentStatus]
     );
     res.json(rows.map(row => ({ ...row, gender: normalizeGender(row.gender) })));
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
@@ -282,7 +382,7 @@ router.post('/students', async (req, res) => {
   const vErrs = validateStudent({ name, roll, dob, guardian_phone });
   if (vErrs.length) return res.status(400).json({ error: vErrs.join('; ') });
   try {
-    const curriculum = await validateStudentCurriculum(class_id, { compulsory_subject, optional_subject });
+    const curriculum = await validateStudentCurriculum(class_id, { compulsory_subject, optional_subject, gender });
     if (!student_code || !String(student_code).trim()) {
       student_code = await genStudentCode();
     }
@@ -323,6 +423,7 @@ router.put('/students/:id', async (req, res) => {
     const curriculum = await validateStudentCurriculum(effectiveClassId, {
       optional_subject: optional_subject !== undefined ? optional_subject : cur.optional_subject,
       compulsory_subject: compulsory_subject !== undefined ? compulsory_subject : cur.compulsory_subject,
+      gender: body.gender !== undefined ? body.gender : cur.gender,
     }, { partial: optional_subject === undefined && compulsory_subject === undefined && !class_id });
     const st = status === undefined || status === null || status === '' ? undefined : String(status).trim().toLowerCase();
     if (st !== undefined && st !== 'active' && st !== 'inactive') {
@@ -499,6 +600,38 @@ async function refreshClassTeacher(teacherId) {
   } catch (err) { console.error(err); }
 }
 
+async function reconcileClassTeacherRequests(classId = null, teacherId = null) {
+  try {
+    const params = [];
+    let scope = '';
+    if (classId) {
+      scope += ' AND c.id=?';
+      params.push(Number(classId));
+    }
+    if (teacherId) {
+      scope += ' AND r.teacher_id=?';
+      params.push(Number(teacherId));
+    }
+    const [matched] = await pool.query(
+      `SELECT r.id
+       FROM class_teacher_requests r
+       JOIN classes c ON c.id=r.class_id AND c.teacher_id=r.teacher_id
+       WHERE r.status='pending'${scope}`,
+      params
+    );
+    for (const row of matched) {
+      await pool.query(
+        "UPDATE class_teacher_requests SET status='approved', decided_at=NOW() WHERE id=? AND status='pending'",
+        [row.id]
+      );
+    }
+    return matched.length;
+  } catch (err) {
+    console.error('class_teacher_request_reconcile_failed', err.code || err.message);
+    return 0;
+  }
+}
+
 router.get('/teachers', async (req, res) => {
   try {
     const [rows] = await pool.query(
@@ -604,6 +737,7 @@ router.put('/teachers/:id', async (req, res) => {
           [tid, ids, tid]);
       }
       await refreshClassTeacher(tid);
+      await reconcileClassTeacherRequests(null, tid);
     }
     await log(req.user.id, 'teacher_update', 'Updated teacher id ' + req.params.id);
     res.json({ ok: true });
@@ -665,6 +799,7 @@ router.post('/classes', async (req, res) => {
         teacherSyncWarning = true;
         console.error('class_teacher_sync_failed', err.code || err.name || 'unknown');
       }
+      await reconcileClassTeacherRequests(result.insertId, input.teacher_id);
     }
     await log(req.user.id, 'class_add', 'Added class ' + input.name + ' ' + input.section + (input.group_name ? ' (' + input.group_name + ')' : ''));
     res.status(201).json({ id: result.insertId, event_sync_warning: eventSyncWarning, teacher_sync_warning: teacherSyncWarning });
@@ -702,6 +837,7 @@ router.put('/classes/:id', async (req, res) => {
     }
     const oldTeacherId = Number(current.teacher_id) || null;
     const newTeacherId = input.teacher_id;
+    if (newTeacherId) await reconcileClassTeacherRequests(Number(req.params.id), newTeacherId);
     for (const teacherId of new Set([oldTeacherId, newTeacherId].filter(Boolean))) {
       try { await refreshClassTeacher(teacherId); } catch (err) {
         teacherSyncWarning = true;
@@ -803,6 +939,7 @@ router.put('/sessions/:id/active', async (req, res) => {
 // =====================================================================
 router.get('/class-teacher-requests', async (req, res) => {
   try {
+    await reconcileClassTeacherRequests();
     const [rows] = await pool.query(
       `SELECT r.*, c.name AS class_name, c.section, c.group_name,
               c.teacher_id AS class_teacher_id,
@@ -917,6 +1054,7 @@ router.get('/exams', async (req, res) => {
        JOIN subjects sub ON e.subject_id = sub.id
        JOIN users u ON e.created_by = u.id
        LEFT JOIN exam_events ev ON e.event_id = ev.id
+       WHERE e.event_id IS NULL
        ORDER BY e.created_at DESC`
     );
     res.json(rows);

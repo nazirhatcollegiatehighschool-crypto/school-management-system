@@ -9,10 +9,38 @@ const fs = require('fs');
 const { loadTeacherSignature } = require('../lib/teacher_signatures');
 const { loadStudentActivities } = require('../lib/student_activities');
 const { normalizeGender } = require('../lib/gender');
-const { canonicalReligion } = require('../curriculum');
+const { canonicalReligion, validateStudentCurriculum } = require('../curriculum');
 const { queuePush } = require('../fcm');
+const { COMPLETION_FIELDS, buildCompletionUpdate } = require('../lib/guardian_profile');
 
 router.use(auth('guardian'));
+
+router.post('/session/heartbeat', async (req, res) => {
+  try {
+    const [result] = await pool.query(
+      'UPDATE guardian_sessions SET last_seen_at=NOW() WHERE guardian_id=? AND session_id=? AND logout_at IS NULL',
+      [req.user.id, req.user.sid]
+    );
+    if (Number(result.affectedRows) !== 1) return res.status(401).json({ error: 'অন্য ফোনে লগইন হওয়ায় এই সেশনটি বন্ধ হয়েছে। আবার লগইন করুন।' });
+    res.json({ ok: true, server_time: new Date().toISOString() });
+  } catch (err) {
+    console.error('Guardian heartbeat failed:', err.code || 'DB_ERROR');
+    res.status(503).json({ error: 'Session status update failed.' });
+  }
+});
+
+router.post('/session/logout', async (req, res) => {
+  try {
+    await pool.query(
+      'UPDATE guardian_sessions SET session_id=NULL,logout_at=NOW(),last_logout_at=NOW(),last_seen_at=NOW() WHERE guardian_id=? AND session_id=? AND logout_at IS NULL',
+      [req.user.id, req.user.sid]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Guardian logout failed:', err.code || 'DB_ERROR');
+    res.status(503).json({ error: 'Logout could not be recorded.' });
+  }
+});
 
 // =====================================================================
 // STRICT DATA ISOLATION — MAGIC STRING:
@@ -62,17 +90,18 @@ router.get('/student/:id/profile', async (req, res) => {
     if (!s) return res.status(403).json({ error: 'Not authorized for this student' });
     const [religionRows] = await pool.query(`SELECT DISTINCT religion FROM students WHERE religion IS NOT NULL AND TRIM(religion)<>'' ORDER BY religion`);
     const [requests] = await pool.query(`SELECT id,reason,proposed_changes,status,admin_note,created_at,reviewed_at FROM student_profile_edit_requests WHERE student_id=? AND guardian_id=? ORDER BY id DESC LIMIT 50`, [s.id, req.user.id]);
-    const { birth_cert_no, phone, email, ...safe } = s;
+    const { phone, email, ...safe } = s;
     res.json({ student: safe, religions: [...new Set([...religionRows.map(r => r.religion), 'Islam','Hinduism','Christianity','Buddhism','Other'])], requests });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
 router.post('/student/:id/profile/complete', async (req, res) => {
-  const allowed = ['name','religion','receives_scholarship','guardian_name','guardian_phone','father_name','mother_name','address','gender','blood_group'];
   const body = req.body || {};
-  if (!['name','religion','guardian_name','guardian_phone','father_name','mother_name','address','gender'].every(k => String(body[k] || '').trim()) || !String(body.guardian_phone || '').replace(/\D/g,'').match(/\d{10,}/)) {
-    return res.status(400).json({ error: 'শিক্ষার্থীর নাম, ধর্ম, অভিভাবকের তথ্য, বাবা-মায়ের নাম, ঠিকানা, লিঙ্গ ও সঠিক ফোন পূরণ করুন।' });
+  if (!COMPLETION_FIELDS.filter(k => k !== 'receives_scholarship').every(k => String(body[k] || '').trim()) || typeof body.receives_scholarship !== 'boolean' || !String(body.guardian_phone || '').replace(/\D/g,'').match(/\d{10,}/)) {
+    return res.status(400).json({ error: 'প্রোফাইলের কোনো তথ্য খালি রাখা যাবে না; সব তথ্য পূরণ করে সঠিক ফোন নম্বর দিন।' });
   }
+  const dob = new Date(body.dob);
+  if (Number.isNaN(dob.getTime()) || dob > new Date()) return res.status(400).json({ error: 'সঠিক জন্মতারিখ দিন।' });
   const gender = normalizeGender(body.gender);
   if (!['Male', 'Female', 'Other'].includes(gender)) {
     return res.status(400).json({ error: 'লিঙ্গ Male, Female অথবা Other হতে হবে।' });
@@ -85,10 +114,18 @@ router.post('/student/:id/profile/complete', async (req, res) => {
     const s = rows[0];
     if (!s) { await conn.rollback(); return res.status(403).json({ error: 'Not authorized for this student' }); }
     if (s.guardian_profile_locked_at) { await conn.rollback(); return res.status(409).json({ error: 'প্রোফাইল একবার জমা হয়েছে; সংশোধনের অনুরোধ পাঠান।' }); }
-    const updates = [], params = [];
-    for (const key of allowed) if (clean[key] !== undefined) { updates.push(`${key}=?`); params.push(key === 'receives_scholarship' ? (clean[key] ? 1 : 0) : String(clean[key]).trim()); }
-    updates.push('guardian_profile_locked_at=NOW()'); params.push(s.id);
-    await conn.query(`UPDATE students SET ${updates.join(',')} WHERE id=? AND guardian_profile_locked_at IS NULL`, params);
+    const curriculum = await validateStudentCurriculum(s.class_id, {
+      optional_subject: body.optional_subject !== undefined ? body.optional_subject : s.optional_subject,
+      compulsory_subject: body.compulsory_subject !== undefined ? body.compulsory_subject : s.compulsory_subject,
+      gender,
+    });
+    const update = buildCompletionUpdate(clean, dob);
+    update.assignments.push('optional_subject=?', 'compulsory_subject=?');
+    update.params.push(curriculum.optional_subject || null, curriculum.compulsory_subject || null);
+    await conn.query(
+      `UPDATE students SET ${update.assignments.join(',')} WHERE id=? AND guardian_profile_locked_at IS NULL`,
+      [...update.params, s.id]
+    );
     await conn.commit();
     res.json({ ok: true, locked: true });
   } catch (err) { try { await conn.rollback(); } catch (_) {} console.error(err); res.status(500).json({ error: 'Server error' }); }
@@ -98,20 +135,57 @@ router.post('/student/:id/profile/complete', async (req, res) => {
 router.post('/student/:id/profile-edit-requests', async (req, res) => {
   const reason = String(req.body?.reason || '').trim();
   if (reason.length < 5) return res.status(400).json({ error: 'সংশোধনের কারণ লিখুন।' });
+  const conn = await pool.getConnection();
   try {
     const s = await getApprovedStudent(req.user.id, req.params.id);
     if (!s) return res.status(403).json({ error: 'Not authorized for this student' });
-    const [[cls]] = await pool.query('SELECT teacher_id FROM classes WHERE id=?', [s.class_id]);
-    const [result] = await pool.query(`INSERT INTO student_profile_edit_requests (student_id,guardian_id,class_id,class_teacher_id,reason,proposed_changes) VALUES (?,?,?,?,?,?)`, [s.id,req.user.id,s.class_id,cls?.teacher_id || null,reason.slice(0,1000),JSON.stringify(req.body?.proposed_changes || {})]);
+    await conn.beginTransaction();
+    const [[cls]] = await conn.query('SELECT teacher_id FROM classes WHERE id=?', [s.class_id]);
+    const proposedChanges = JSON.stringify(req.body?.proposed_changes || {});
+    const [result] = await conn.query(
+      `INSERT INTO student_profile_edit_requests (student_id,guardian_id,class_id,class_teacher_id,reason,proposed_changes) VALUES (?,?,?,?,?,?)`,
+      [s.id, req.user.id, s.class_id, cls?.teacher_id || null, reason.slice(0, 1000), proposedChanges]
+    );
     const title = 'শিক্ষার্থী প্রোফাইল সংশোধন অনুরোধ';
     const body = `${s.name} (Roll ${s.roll}): অভিভাবক প্রোফাইল সংশোধন চেয়েছেন।`;
-    if (cls?.teacher_id) await pool.query(`INSERT INTO notifications (student_id,class_id,title,body,type,target_type,related_id,target_user_id,created_by) VALUES (?,?,?,?,'general','teacher',?,?,?)`, [s.id,s.class_id,title,body,result.insertId,cls.teacher_id,req.user.id]);
-    const [admins] = await pool.query(`SELECT id FROM users WHERE role='admin' AND active=TRUE`);
-    for (const a of admins) await pool.query(`INSERT INTO notifications (student_id,class_id,title,body,type,target_type,related_id,target_user_id,created_by) VALUES (?,?,?,?,'general','teacher',?,?,?)`, [s.id,s.class_id,title,body,result.insertId,a.id,req.user.id]);
-    const targets=[...(cls?.teacher_id?[Number(cls.teacher_id)]:[]),...admins.map(a=>Number(a.id))];
-    if(targets.length) { const [tokens]=await pool.query(`SELECT fcm_token FROM device_tokens WHERE user_id IN (${targets.map(()=>'?').join(',')}) AND active=TRUE`,targets); queuePush(tokens.map(t=>t.fcm_token),title,body,{type:'general',kind:'student_profile_edit_request',request_id:result.insertId,student_id:s.id}); }
+    let admins = [];
+    try {
+      if (cls?.teacher_id) await conn.query(
+        `INSERT INTO notifications (student_id,class_id,title,body,type,target_type,related_id,target_user_id,created_by) VALUES (?,?,?,?,'general','teacher',?,?,?)`,
+        [s.id, s.class_id, title, body, result.insertId, cls.teacher_id, req.user.id]
+      );
+      [admins] = await conn.query(`SELECT id FROM users WHERE role='admin' AND active=TRUE`);
+      for (const a of admins) await conn.query(
+        `INSERT INTO notifications (student_id,class_id,title,body,type,target_type,related_id,target_user_id,created_by) VALUES (?,?,?,?,'general','teacher',?,?,?)`,
+        [s.id, s.class_id, title, body, result.insertId, a.id, req.user.id]
+      );
+    } catch (notifyErr) {
+      console.error('Profile request notification insert failed (request retained):', notifyErr.code || 'DB_ERROR');
+    }
+    await conn.commit();
+    const targets = [...(cls?.teacher_id ? [Number(cls.teacher_id)] : []), ...admins.map(a => Number(a.id))];
+    if (targets.length) {
+      try {
+        const [tokens] = await pool.query(
+          `SELECT fcm_token FROM device_tokens WHERE user_id IN (${targets.map(() => '?').join(',')}) AND active=TRUE`,
+          targets
+        );
+        queuePush(tokens.map(t => t.fcm_token), title, body, { type: 'general', kind: 'student_profile_edit_request', request_id: result.insertId, student_id: s.id });
+      } catch (pushErr) {
+        console.error('Profile request push failed:', pushErr.code || 'DB_ERROR');
+      }
+    }
     res.status(201).json({ ok: true, id: result.insertId });
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+  } catch (err) {
+    try { await conn.rollback(); } catch (_) {}
+    console.error('Guardian profile edit request failed:', err.code || err.message);
+    if (err.code === '42P01' || err.code === 'ER_NO_SUCH_TABLE') {
+      return res.status(503).json({ error: 'Profile-edit request storage is not installed. Please run the latest database migration.' });
+    }
+    res.status(500).json({ error: 'Profile-edit request could not be saved. Please try again.' });
+  } finally {
+    conn.release();
+  }
 });
 
 router.get('/attendance/monthly', async (req, res) => {
@@ -845,7 +919,7 @@ router.get('/student/:id/result-card.pdf', async (req, res) => {
       if (fs.existsSync(wp)) {
         try {
           doc.save();
-          doc.opacity(0.07);
+          doc.opacity(0.12);
           const S = 320;
           doc.image(wp, (doc.page.width - S) / 2, (doc.page.height - S) / 2, { width: S, height: S });
           doc.restore();
@@ -922,7 +996,10 @@ router.get('/student/:id/result-card.pdf', async (req, res) => {
     y += rowH;
     (payload.marksheet_hidden ? [] : (result.families || [])).forEach((f, i) => {
       if (y > doc.page.height - 60) { doc.addPage(); y = 40; }
-      if (i % 2 === 0) { doc.fillColor('#eef3f9').rect(tableX, y, CW, rowH).fill(); }
+      if (i % 2 === 0) {
+        doc.save().fillColor('#eef3f9').fillOpacity(0.35)
+          .rect(tableX, y, CW, rowH).fill().restore();
+      }
       doc.fillColor('#111').font(NORMAL).fontSize(9);
       const subject = (f.is_optional ? '(৪র্থ) ' : '') + (f.subject || '');
       cx = tableX;

@@ -27,10 +27,15 @@ const REQUIRED = {
   tables: ['attendance_access_requests', 'student_profile_edit_requests', 'student_uniform_reports', 'teacher_notification_reads'],
   columns: [
     ['students', 'guardian_profile_locked_at'], ['students', 'class10_start_year'], ['students', 'is_irregular'],
+    ['students', 'deactivated_by'], ['students', 'deactivated_at'],
+    ['students', 'deactivated_session_id'], ['students', 'deactivated_session_name'],
     ['users', 'teacher_dob'], ['users', 'teacher_degree'], ['notifications', 'target_user_id'],
     ['attendance_delegation', 'expires_at_epoch'],
   ],
 };
+if (scriptName === '20261031_guardian_sessions.sql') {
+  REQUIRED.tables.push('guardian_sessions');
+}
 
 async function postgresRun() {
   const { Client } = require(path.join(root, 'backend', 'node_modules', 'pg'));

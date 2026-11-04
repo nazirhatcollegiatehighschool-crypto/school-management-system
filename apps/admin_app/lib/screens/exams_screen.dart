@@ -480,9 +480,33 @@ class _ExamsScreenState extends State<ExamsScreen> {
           : RefreshIndicator(
               onRefresh: _load,
               child: ListView.builder(
+                physics: const AlwaysScrollableScrollPhysics(),
                 padding: const EdgeInsets.all(12),
-                itemCount: _rows.length,
+                itemCount: _rows.isEmpty ? 1 : _rows.length,
                 itemBuilder: (_, i) {
+                  if (_rows.isEmpty) {
+                    return const Padding(
+                      padding: EdgeInsets.only(top: 96),
+                      child: Center(
+                        child: Column(
+                          children: [
+                            Icon(
+                              Icons.event_note,
+                              size: 44,
+                              color: Colors.grey,
+                            ),
+                            SizedBox(height: 12),
+                            Text('আলাদা কোনো পরীক্ষা নেই'),
+                            SizedBox(height: 4),
+                            Text(
+                              'মূল পরীক্ষার সেশন Exam Center-এ পরিচালিত হয়।',
+                              textAlign: TextAlign.center,
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  }
                   final e = _rows[i];
                   final published = e['status'] == 'published';
                   return Card(

@@ -136,7 +136,7 @@ class AppPdf {
           if (_schoolLogo != null)
             pw.Center(
               child: pw.Opacity(
-                opacity: 0.06,
+                opacity: 0.12,
                 child: pw.Image(
                   _schoolLogo!,
                   width: 240,

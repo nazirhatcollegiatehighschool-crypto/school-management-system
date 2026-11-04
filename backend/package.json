@@ -5,6 +5,10 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "start:local": "node scripts/start-local-with-cloud-sync.cjs",
+    "start:supabase": "node scripts/start-with-env.cjs .env",
+    "migrate:local": "node scripts/run-migration-with-env.cjs .env.localdb",
+    "migrate:supabase": "node scripts/run-migration-with-env.cjs .env",
     "lint": "node lint.js",
     "test:db-transforms": "node --test test/db-transforms.test.js",
     "postinstall": "prisma generate",

@@ -18,6 +18,45 @@ class _StudentsScreenState extends State<StudentsScreen> {
   String? _filterCls;
   String? _filterSec;
   bool _confirmingDelete = false;
+  bool _showDeactivated = false;
+
+  void _applyCurriculumDefaults({
+    required String? className,
+    required String? group,
+    required String? gender,
+    required void Function(String?) setCompulsory,
+    required void Function(String?) setOptional,
+    String? currentCompulsory,
+    String? currentOptional,
+  }) {
+    final levelMatch = RegExp(r'\d+').firstMatch(className ?? '');
+    final level = levelMatch == null
+        ? 0
+        : int.tryParse(levelMatch.group(0) ?? '') ?? 0;
+    if (level != 9 && level != 10) return;
+    final groupLower = (group ?? '').toLowerCase();
+    final genderLower = (gender ?? '').toLowerCase();
+    final isArts =
+        groupLower.contains('arts') || groupLower.contains('humanit');
+    final isCommerce =
+        groupLower.contains('commerce') || groupLower.contains('business');
+    final isScience = groupLower.contains('science');
+    if (currentCompulsory == null && isArts) setCompulsory('Economics');
+    if (currentOptional == null) {
+      if (isArts || isCommerce) {
+        setOptional(
+          genderLower == 'male'
+              ? 'Agriculture'
+              : genderLower == 'female'
+              ? 'Home Science'
+              : null,
+        );
+      } else if (isScience &&
+          (genderLower == 'male' || genderLower == 'female')) {
+        setOptional('Higher Mathematics');
+      }
+    }
+  }
 
   @override
   void initState() {
@@ -56,7 +95,9 @@ class _StudentsScreenState extends State<StudentsScreen> {
       _loading = true;
     });
     try {
-      final r = await Api.get('/admin/students');
+      final r = await Api.get(
+        '/admin/students${_showDeactivated ? '?status=inactive' : ''}',
+      );
       if (mounted) {
         setState(() {
           _rows = r;
@@ -222,6 +263,32 @@ class _StudentsScreenState extends State<StudentsScreen> {
     String? sec = s?['section'];
     String? compulsorySubject = s?['compulsory_subject']?.toString();
     String? optionalSubject = s?['optional_subject']?.toString();
+    final levelMatch = RegExp(r'\d+').firstMatch(cls ?? '');
+    final level = levelMatch == null
+        ? 0
+        : int.tryParse(levelMatch.group(0) ?? '') ?? 0;
+    final groupLower = (sec ?? '').toLowerCase();
+    if (level == 9 || level == 10) {
+      if (compulsorySubject == null &&
+          (groupLower.contains('arts') || groupLower.contains('humanit'))) {
+        compulsorySubject = 'Economics';
+      }
+      if (optionalSubject == null) {
+        final genderLower = (genderValue ?? '').toLowerCase();
+        if (groupLower.contains('arts') ||
+            groupLower.contains('commerce') ||
+            groupLower.contains('business')) {
+          optionalSubject = genderLower == 'male'
+              ? 'Agriculture'
+              : genderLower == 'female'
+              ? 'Home Science'
+              : null;
+        } else if (groupLower.contains('science') &&
+            (genderLower == 'male' || genderLower == 'female')) {
+          optionalSubject = 'Higher Mathematics';
+        }
+      }
+    }
     bool scholarship =
         s?['receives_scholarship'] == true || s?['receives_scholarship'] == 1;
     bool isSaving = false;
@@ -306,6 +373,15 @@ class _StudentsScreenState extends State<StudentsScreen> {
                 );
                 classId = (match['id'] as num).toInt();
               }
+              _applyCurriculumDefaults(
+                className: cls,
+                group: sec,
+                gender: genderValue,
+                setCompulsory: (v) => compulsorySubject = v,
+                setOptional: (v) => optionalSubject = v,
+                currentCompulsory: compulsorySubject,
+                currentOptional: optionalSubject,
+              );
             });
             checkDup();
           }
@@ -324,6 +400,15 @@ class _StudentsScreenState extends State<StudentsScreen> {
                     (group ? c['group_name'] == sec : c['section'] == sec),
               );
               classId = (match['id'] as num).toInt();
+              _applyCurriculumDefaults(
+                className: cls,
+                group: sec,
+                gender: genderValue,
+                setCompulsory: (v) => compulsorySubject = v,
+                setOptional: (v) => optionalSubject = v,
+                currentCompulsory: compulsorySubject,
+                currentOptional: optionalSubject,
+              );
             });
             checkDup();
           }
@@ -383,69 +468,58 @@ class _StudentsScreenState extends State<StudentsScreen> {
                   ),
                   const SizedBox(height: 12),
 
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                  Column(
                     children: [
-                      Expanded(
-                        flex: 3,
-                        child: TextField(
-                          controller: roll,
-                          keyboardType: TextInputType.number,
-                          onChanged: (_) => checkDup(),
-                          decoration: InputDecoration(
-                            labelText: 'Roll Number *',
-                            prefixIcon: const Icon(Icons.tag_rounded, size: 20),
-                            errorText: dupErr,
+                      TextField(
+                        controller: roll,
+                        keyboardType: TextInputType.number,
+                        onChanged: (_) => checkDup(),
+                        decoration: InputDecoration(
+                          labelText: 'Roll Number *',
+                          prefixIcon: const Icon(Icons.tag_rounded, size: 20),
+                          errorText: dupErr,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: birthCert,
+                        keyboardType: TextInputType.number,
+                        decoration: InputDecoration(
+                          labelText: s == null
+                              ? 'জন্মনিবন্ধন *'
+                              : 'জন্মনিবন্ধন',
+                          helperText:
+                              s?['birth_cert_placeholder'] == true ||
+                                  s?['birth_cert_placeholder'] == 1
+                              ? 'অস্থায়ী নম্বর'
+                              : null,
+                          prefixIcon: const Icon(
+                            Icons.badge_outlined,
+                            size: 18,
                           ),
                         ),
                       ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        flex: 4,
-                        child: TextField(
-                          controller: birthCert,
-                          keyboardType: TextInputType.number,
-                          decoration: InputDecoration(
-                            labelText: s == null
-                                ? 'জন্মনিবন্ধন *'
-                                : 'জন্মনিবন্ধন',
-                            helperText:
-                                s?['birth_cert_placeholder'] == true ||
-                                    s?['birth_cert_placeholder'] == 1
-                                ? 'অস্থায়ী নম্বর'
-                                : null,
-                            prefixIcon: const Icon(
-                              Icons.badge_outlined,
-                              size: 18,
-                            ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: dob,
+                        readOnly: true,
+                        decoration: const InputDecoration(
+                          labelText: 'জন্মতারিখ',
+                          prefixIcon: Icon(
+                            Icons.calendar_today_rounded,
+                            size: 18,
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        flex: 4,
-                        child: TextField(
-                          controller: dob,
-                          readOnly: true,
-                          decoration: const InputDecoration(
-                            labelText: 'জন্মতারিখ',
-                            prefixIcon: Icon(
-                              Icons.calendar_today_rounded,
-                              size: 18,
-                            ),
-                          ),
-                          onTap: () async {
-                            final d = await showDatePicker(
-                              context: context,
-                              initialDate: DateTime(2013),
-                              firstDate: DateTime(1995),
-                              lastDate: DateTime.now(),
-                            );
-                            if (d != null) {
-                              dob.text = d.toIso8601String().substring(0, 10);
-                            }
-                          },
-                        ),
+                        onTap: () async {
+                          final d = await showDatePicker(
+                            context: context,
+                            initialDate: DateTime(2013),
+                            firstDate: DateTime(1995),
+                            lastDate: DateTime.now(),
+                          );
+                          if (d != null)
+                            dob.text = d.toIso8601String().substring(0, 10);
+                        },
                       ),
                     ],
                   ),
@@ -599,21 +673,32 @@ class _StudentsScreenState extends State<StudentsScreen> {
                         child: DropdownButtonFormField<String>(
                           initialValue: genderValue,
                           decoration: const InputDecoration(labelText: 'লিঙ্গ'),
-                          items: <String>{
-                            'Male',
-                            'Female',
-                            'Other',
-                            if (genderValue != null) genderValue!,
-                          }
-                              .map(
-                                (v) => DropdownMenuItem<String>(
-                                  value: v,
-                                  child: Text(v),
-                                ),
-                              )
-                              .toList(),
-                          onChanged: (v) =>
-                              setSheet(() => genderValue = v),
+                          items:
+                              <String>{
+                                    'Male',
+                                    'Female',
+                                    'Other',
+                                    if (genderValue != null) genderValue!,
+                                  }
+                                  .map(
+                                    (v) => DropdownMenuItem<String>(
+                                      value: v,
+                                      child: Text(v),
+                                    ),
+                                  )
+                                  .toList(),
+                          onChanged: (v) => setSheet(() {
+                            genderValue = v;
+                            _applyCurriculumDefaults(
+                              className: cls,
+                              group: sec,
+                              gender: genderValue,
+                              setCompulsory: (v) => compulsorySubject = v,
+                              setOptional: (v) => optionalSubject = v,
+                              currentCompulsory: compulsorySubject,
+                              currentOptional: optionalSubject,
+                            );
+                          }),
                         ),
                       ),
                       const SizedBox(width: 10),
@@ -884,6 +969,24 @@ class _StudentsScreenState extends State<StudentsScreen> {
                   ),
                   child: Column(
                     children: [
+                      SegmentedButton<bool>(
+                        segments: const [
+                          ButtonSegment(
+                            value: false,
+                            label: Text('শিক্ষার্থী'),
+                          ),
+                          ButtonSegment(
+                            value: true,
+                            label: Text('নিষ্ক্রিয় তালিকা'),
+                          ),
+                        ],
+                        selected: {_showDeactivated},
+                        onSelectionChanged: (value) {
+                          setState(() => _showDeactivated = value.first);
+                          _load();
+                        },
+                      ),
+                      const SizedBox(height: 10),
                       TextField(
                         onChanged: (v) => setState(() => _search = v),
                         decoration: InputDecoration(
@@ -1143,6 +1246,19 @@ class _StudentsScreenState extends State<StudentsScreen> {
                                               ],
                                             ),
                                             const SizedBox(height: 4),
+                                            if (_showDeactivated &&
+                                                (s['deactivated_session_name'] ??
+                                                        '')
+                                                    .toString()
+                                                    .isNotEmpty)
+                                              Text(
+                                                'নিষ্ক্রিয় · সেশন ${s['deactivated_session_name']}',
+                                                style: const TextStyle(
+                                                  fontSize: 12,
+                                                  color: Colors.deepOrange,
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                              ),
                                             // Badges Row
                                             Wrap(
                                               spacing: 6,

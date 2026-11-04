@@ -1,5 +1,6 @@
 const router = require('express').Router();
 const bcrypt = require('bcrypt');
+const { randomUUID } = require('crypto');
 const pool = require('../db');
 const { signToken, auth, requireJwtConfiguration } = require('../middleware/auth');
 
@@ -103,6 +104,21 @@ router.post('/guardian-login', requireJwtConfiguration, async (req, res) => {
       );
       [[guardian]] = await conn.query('SELECT * FROM users WHERE id=?', [guardianId]);
       if (!guardian) throw Object.assign(new Error('Guardian account was not available after linking.'), { status: 500 });
+      if (guardian.active === false || Number(guardian.active) === 0) {
+        throw Object.assign(new Error('Guardian account has been deactivated. Contact admin.'), { status: 403 });
+      }
+      // Rotating this value invalidates every token issued to an older phone.
+      guardian.session_id = randomUUID();
+      await conn.query(
+        `INSERT INTO guardian_sessions (guardian_id,session_id,last_login_at,last_seen_at,logout_at)
+         VALUES (?,?,NOW(),NOW(),NULL)
+         ON CONFLICT (guardian_id) DO UPDATE SET session_id=EXCLUDED.session_id,
+           last_login_at=NOW(),last_seen_at=NOW(),
+           last_logout_at=CASE WHEN guardian_sessions.session_id IS NOT NULL AND guardian_sessions.logout_at IS NULL
+             THEN NOW() ELSE guardian_sessions.last_logout_at END,
+           logout_at=NULL`,
+        [guardianId, guardian.session_id]
+      );
       await conn.commit();
     } catch (err) {
       try { await conn.rollback(); } catch (_) {}
@@ -112,12 +128,6 @@ router.post('/guardian-login', requireJwtConfiguration, async (req, res) => {
     }
 
     loginStage = 'token creation';
-    if (guardian.active === false || Number(guardian.active) === 0) {
-      throw Object.assign(
-        new Error('Guardian account has been deactivated. Contact admin.'),
-        { status: 403 }
-      );
-    }
     const token = signToken(guardian);
     // Audit logging is best-effort; an audit-table hiccup must not turn a
     // successfully authenticated guardian into a misleading login failure.

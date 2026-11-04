@@ -22,6 +22,7 @@ class ConnState {
 class SyncStore extends ChangeNotifier {
   SyncStore._();
   static final SyncStore instance = SyncStore._();
+  final http.Client _client = http.Client();
 
   final ValueNotifier<bool> online = ValueNotifier(true);
   final ValueNotifier<int> pending = ValueNotifier(0);
@@ -121,7 +122,7 @@ class SyncStore extends ChangeNotifier {
   Future<bool> _probeServerInner(Duration timeout) async {
     final base = Config.api;
     try {
-      final res = await http
+      final res = await _client
           .get(Uri.parse('$base/health'))
           .timeout(Config.hasOverride ? const Duration(seconds: 4) : timeout);
       if (Config.api != base) {
@@ -216,6 +217,7 @@ class SyncStore extends ChangeNotifier {
     try {
       final res = await _conn!.checkConnectivity();
       _applyConn(res);
+      if (online.value) unawaited(probeServerWithRetry(attempts: 2));
     } catch (_) {}
 
     _conn!.onConnectivityChanged.listen(_applyConn);
@@ -510,19 +512,19 @@ class SyncStore extends ChangeNotifier {
     final uri = Uri.parse(base + path);
     switch (method) {
       case 'POST':
-        return http
+        return _client
             .post(uri, headers: headers, body: jsonEncode(body ?? {}))
             .timeout(const Duration(seconds: 20));
       case 'PUT':
-        return http
+        return _client
             .put(uri, headers: headers, body: jsonEncode(body ?? {}))
             .timeout(const Duration(seconds: 20));
       case 'DELETE':
-        return http
+        return _client
             .delete(uri, headers: headers)
             .timeout(const Duration(seconds: 20));
       default:
-        return http
+        return _client
             .get(uri, headers: headers)
             .timeout(const Duration(seconds: 20));
     }

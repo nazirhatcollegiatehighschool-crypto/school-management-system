@@ -72,7 +72,7 @@ function drawWatermark(doc, logoImage, pageWidth, pageHeight) {
     const x = (pageWidth - w) / 2;
     const y = (pageHeight - h) / 2;
     doc.save()
-      .opacity(0.04)
+      .opacity(0.12)
       .image(logoImage, x, y, { width: w, height: h })
       .restore();
   } catch (_) {}
@@ -1220,11 +1220,13 @@ router.get('/class-pdf', async (req, res) => {
       `attachment; filename=result_cards_${(cls.name || 'class').replace(/\s+/g, '')}_${(cls.group_name || cls.section || '').replace(/\s+/g, '')}_event${eventId}.pdf`);
     doc.pipe(res);
     const CW = doc.page.width - 80;
+    const classLogoPath = await loadSchoolLogo(settings.school_logo_path);
 
     for (const st of students) {
       const result = await computeResult(st.id, eventId);
       const dualPosition = await resultPositionSnapshot(st.id, classId, eventId);
       doc.addPage();
+      drawWatermark(doc, classLogoPath, doc.page.width, doc.page.height);
       let y = 50;
       const schoolName = settings.school_name || settings.school || settings.school_name_en || 'School';
       const schoolAddr = settings.school_address || settings.address || '';
@@ -1275,7 +1277,10 @@ router.get('/class-pdf', async (req, res) => {
       doc.fillColor('#111111');
       result.families.forEach((f, i) => {
         if (y > doc.page.height - 70) { doc.addPage(); y = 40; }
-        if (i % 2 === 0) { doc.fillColor('#f1f1f1').rect(tableX, y, CW, rowH).fill(); }
+        if (i % 2 === 0) {
+          doc.save().fillColor('#f1f1f1').fillOpacity(0.35)
+            .rect(tableX, y, CW, rowH).fill().restore();
+        }
         doc.fillColor('#111111').font('Helvetica').fontSize(9);
         const display = (f.is_optional ? '(4th) ' : '') + f.subject;
         cx = tableX;

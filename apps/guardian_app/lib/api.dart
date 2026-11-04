@@ -9,6 +9,9 @@ import 'config.dart';
 import 'sync_store.dart';
 
 class Api {
+  // Reuse the HTTP connection across screen requests instead of reconnecting for every call.
+  static final http.Client _client = http.Client();
+  static final Map<String, Future<dynamic>> _getFlights = {};
   static String? token;
   static const Duration _timeout = Duration(seconds: 30);
   static const _tokenKey = 'auth_token';
@@ -26,6 +29,7 @@ class Api {
   }
 
   static Future<void> saveToken(String t) async {
+    if (token != t) _getFlights.clear();
     token = t;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_tokenKey, t);
@@ -41,6 +45,7 @@ class Api {
 
   static Future<void> clearToken() async {
     token = null;
+    _getFlights.clear();
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_tokenKey);
     await sync.clear();
@@ -89,7 +94,7 @@ class Api {
     Duration timeout = const Duration(seconds: 20),
   }) async {
     try {
-      final res = await http
+      final res = await _client
           .get(Uri.parse('${base.replaceAll(RegExp(r'/+$'), '')}/api/health'))
           .timeout(timeout);
       return res.statusCode == 200;
@@ -104,13 +109,24 @@ class Api {
   }) async {
     final hadOverride = Config.hasOverride;
     final headers = conditional ? _conditionalHeaders(path) : _headers;
-    Future<http.Response> request(Duration timeout) => http
+    Future<http.Response> request(Duration timeout) => _client
         .get(Uri.parse(Config.api + path), headers: headers)
         .timeout(timeout);
     return request(hadOverride ? const Duration(seconds: 4) : _timeout);
   }
 
-  static Future<dynamic> get(String path) async {
+  static Future<dynamic> get(String path) {
+    var request = _getFlights[path];
+    if (request == null) {
+      request = _getUnshared(path);
+      _getFlights[path] = request;
+    }
+    return request.then((value) => jsOne(value)).whenComplete(() {
+      if (identical(_getFlights[path], request)) _getFlights.remove(path);
+    });
+  }
+
+  static Future<dynamic> _getUnshared(String path) async {
     // Offline-first: serve the locally stored copy immediately instead of
     // waiting for a slow network timeout.
     if (sync.isOffline) {
@@ -173,7 +189,7 @@ class Api {
 
   static Future<dynamic> post(String path, [Map<String, dynamic>? body]) async {
     try {
-      final res = await http
+      final res = await _client
           .post(
             Uri.parse(Config.api + path),
             headers: _headers,
@@ -193,9 +209,21 @@ class Api {
     }
   }
 
+  /// Session heartbeat must never be queued for a later offline replay.
+  static Future<void> heartbeat() async {
+    final res = await _client
+        .post(
+          Uri.parse(Config.api + '/guardian/session/heartbeat'),
+          headers: _headers,
+          body: '{}',
+        )
+        .timeout(const Duration(seconds: 12));
+    _handle(res);
+  }
+
   static Future<dynamic> put(String path, [Map<String, dynamic>? body]) async {
     try {
-      final res = await http
+      final res = await _client
           .put(
             Uri.parse(Config.api + path),
             headers: _headers,
@@ -217,7 +245,7 @@ class Api {
 
   static Future<dynamic> delete(String path) async {
     try {
-      final res = await http
+      final res = await _client
           .delete(Uri.parse(Config.api + path), headers: _headers)
           .timeout(_timeout);
       final data = _handle(res);

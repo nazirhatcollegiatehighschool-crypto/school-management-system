@@ -4,12 +4,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// runtime-overridable from the app's Server settings (survives restarts,
 /// so server URL changes never need a rebuild).
 class Config {
+  static const String productionUrl =
+      'https://school-management-system-brown-mu.vercel.app';
   static const String _defined = String.fromEnvironment(
     'API_URL',
-    defaultValue: 'https://school-management-system-mobile-api.vercel.app',
+    defaultValue: productionUrl,
   );
-  static const String _retiredUrl =
-      'https://school-management-system-brown-mu.vercel.app';
+  static const Set<String> _retiredUrls = {
+    'https://school-management-system-mobile-api.vercel.app',
+    'https://school-management-system-jewel-5c50.vercel.app',
+  };
   static String _override = '';
 
   static String get serverUrl => _override.isNotEmpty ? _override : _defined;
@@ -25,24 +29,26 @@ class Config {
         RegExp(r'/+$'),
         '',
       );
-      if (saved == _retiredUrl) {
+      if (_retiredUrls.contains(saved)) {
         await p.remove(_key);
         _override = '';
         return;
       }
-      _override = saved;
+      _override = saved == _defined ? '' : saved;
     } catch (_) {}
   }
 
   static Future<void> setOverride(String url) async {
-    _override = url.trim().replaceAll(RegExp(r'/+$'), '');
+    final saved = url.trim().replaceAll(RegExp(r'/+$'), '');
+    final override = saved == _defined || saved == productionUrl ? '' : saved;
     try {
       final p = await SharedPreferences.getInstance();
-      if (_override.isEmpty) {
+      if (override.isEmpty) {
         await p.remove(_key);
       } else {
-        await p.setString(_key, _override);
+        await p.setString(_key, override);
       }
     } catch (_) {}
+    _override = override;
   }
 }

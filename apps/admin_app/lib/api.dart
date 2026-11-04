@@ -9,6 +9,9 @@ import 'config.dart';
 import 'sync_store.dart';
 
 class Api {
+  // Reuse the HTTP connection across screen requests instead of reconnecting for every call.
+  static final http.Client _client = http.Client();
+  static final Map<String, Future<dynamic>> _getFlights = {};
   static String? token;
   static const Duration _timeout = Duration(seconds: 30);
   static const _tokenKey = 'auth_token';
@@ -30,6 +33,7 @@ class Api {
   }
 
   static Future<void> saveToken(String t) async {
+    if (token != t) _getFlights.clear();
     token = t;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_tokenKey, t);
@@ -45,6 +49,7 @@ class Api {
 
   static Future<void> clearToken() async {
     token = null;
+    _getFlights.clear();
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_tokenKey);
     await sync.clear(); // cached data belongs to the previous session
@@ -73,7 +78,7 @@ class Api {
     Duration timeout = const Duration(seconds: 20),
   }) async {
     try {
-      final res = await http
+      final res = await _client
           .get(Uri.parse('${base.replaceAll(RegExp(r'/+$'), '')}/api/health'))
           .timeout(timeout);
       return res.statusCode == 200;
@@ -82,13 +87,38 @@ class Api {
     }
   }
 
-  static Future<dynamic> get(
+  static Future<dynamic> get(String path, {Map<String, String>? queryParams}) {
+    final cachePath = _cachePath(path, queryParams);
+    return _coalesceGet(
+      cachePath,
+      () => _getUnshared(path, queryParams: queryParams),
+    );
+  }
+
+  static String _cachePath(String path, Map<String, String>? queryParams) =>
+      queryParams == null || queryParams.isEmpty
+      ? path
+      : '$path?${(queryParams.keys.toList()..sort()).map((k) => '${Uri.encodeQueryComponent(k)}=${Uri.encodeQueryComponent(queryParams[k]!)}').join('&')}';
+
+  static Future<dynamic> _coalesceGet(
+    String key,
+    Future<dynamic> Function() load,
+  ) {
+    var request = _getFlights[key];
+    if (request == null) {
+      request = load();
+      _getFlights[key] = request;
+    }
+    return request.then((value) => jsOne(value)).whenComplete(() {
+      if (identical(_getFlights[key], request)) _getFlights.remove(key);
+    });
+  }
+
+  static Future<dynamic> _getUnshared(
     String path, {
     Map<String, String>? queryParams,
   }) async {
-    final cachePath = queryParams == null || queryParams.isEmpty
-        ? path
-        : '$path?${(queryParams.keys.toList()..sort()).map((k) => '${Uri.encodeQueryComponent(k)}=${Uri.encodeQueryComponent(queryParams[k]!)}').join('&')}';
+    final cachePath = _cachePath(path, queryParams);
     // Offline-first: serve the locally stored copy immediately instead of
     // waiting for a slow network timeout.
     if (sync.isOffline) {
@@ -158,8 +188,9 @@ class Api {
     bool conditional = true,
   }) async {
     final headers = conditional ? _conditionalHeaders(cachePath) : _headers;
-    Future<http.Response> request(Duration timeout) =>
-        http.get(_apiUri(path, queryParams), headers: headers).timeout(timeout);
+    Future<http.Response> request(Duration timeout) => _client
+        .get(_apiUri(path, queryParams), headers: headers)
+        .timeout(timeout);
     return request(Config.hasOverride ? const Duration(seconds: 4) : _timeout);
   }
 
@@ -175,7 +206,7 @@ class Api {
 
   static Future<dynamic> post(String path, [Map<String, dynamic>? body]) async {
     try {
-      final res = await http
+      final res = await _client
           .post(
             Uri.parse(Config.api + path),
             headers: _headers,
@@ -197,7 +228,7 @@ class Api {
 
   static Future<dynamic> put(String path, [Map<String, dynamic>? body]) async {
     try {
-      final res = await http
+      final res = await _client
           .put(
             Uri.parse(Config.api + path),
             headers: _headers,
@@ -222,7 +253,7 @@ class Api {
     Map<String, dynamic>? body,
   }) async {
     try {
-      final res = await http
+      final res = await _client
           .delete(
             Uri.parse(Config.api + path),
             headers: _headers,

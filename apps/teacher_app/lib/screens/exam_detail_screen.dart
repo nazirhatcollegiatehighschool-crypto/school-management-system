@@ -168,8 +168,29 @@ class _ExamDetailScreenState extends State<ExamDetailScreen> {
       });
     } catch (e) {
       if (!mounted) return;
+      String message;
+      if (Api.isNetworkError(e)) {
+        message = 'কানেকশন পাওয়া যায়নি। ইন্টারনেট/server সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।';
+      } else if (e is ApiHttpException) {
+        if (e.statusCode == 404) {
+          message = e.message.isNotEmpty
+              ? e.message
+              : 'এই পরীক্ষার ডেটা পাওয়া যায়নি।';
+        } else if (e.statusCode == 409) {
+          message = e.message;
+        } else if (e.statusCode >= 500) {
+          message = 'Server সাময়িকভাবে response দিতে পারছে না। কয়েক সেকেন্ড পরে আবার চেষ্টা করুন।';
+        } else {
+          message = e.message;
+        }
+      } else {
+        message = e.toString().replaceFirst('Exception: ', '').trim();
+        if (message.isEmpty) {
+          message = 'Server সংযোগ যাচাই করা যায়নি।';
+        }
+      }
       setState(() {
-        _error = 'পরীক্ষার বর্তমান lock অবস্থা server থেকে যাচাই করা যায়নি। Internet/server সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।';
+        _error = message;
         _loading = false;
       });
     }

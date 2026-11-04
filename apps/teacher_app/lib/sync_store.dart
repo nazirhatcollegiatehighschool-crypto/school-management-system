@@ -22,6 +22,7 @@ class ConnState {
 class SyncStore extends ChangeNotifier {
   SyncStore._();
   static final SyncStore instance = SyncStore._();
+  final http.Client _client = http.Client();
 
   final ValueNotifier<bool> online = ValueNotifier(true);
   final ValueNotifier<int> pending = ValueNotifier(0);
@@ -121,7 +122,7 @@ class SyncStore extends ChangeNotifier {
   Future<bool> _probeServerInner(Duration timeout) async {
     final base = Config.api;
     try {
-      final res = await http
+      final res = await _client
           .get(Uri.parse('$base/health'))
           .timeout(Config.hasOverride ? const Duration(seconds: 4) : timeout);
       if (Config.api != base) {
@@ -219,6 +220,9 @@ class SyncStore extends ChangeNotifier {
     } catch (_) {}
 
     _conn!.onConnectivityChanged.listen(_applyConn);
+    // Verify the actual server immediately at startup instead of waiting for
+    // a 30-second timer or a user interaction.
+    unawaited(probeServerWithRetry(attempts: 2));
     // periodic safety net: retry the outbox while app is open
     Timer.periodic(const Duration(seconds: 30), (_) {
       // self-heal: re-probe while marked down/reconnecting so the status
@@ -233,13 +237,14 @@ class SyncStore extends ChangeNotifier {
 
   void _applyConn(List<ConnectivityResult> res) {
     final was = online.value;
-    online.value = res.any(
-      (r) =>
-          r == ConnectivityResult.wifi ||
-          r == ConnectivityResult.mobile ||
-          r == ConnectivityResult.ethernet ||
-          r == ConnectivityResult.vpn,
-    );
+    if (res.isEmpty) {
+      online.value = true;
+    } else {
+      online.value = !res.every(
+        (r) =>
+            r == ConnectivityResult.none || r == ConnectivityResult.bluetooth,
+      );
+    }
     if (online.value && !was) {
       // Connectivity returned: reset the failure streak and verify server.
       _consecutiveProbeFails = 0;
@@ -298,7 +303,17 @@ class SyncStore extends ChangeNotifier {
     } catch (_) {}
   }
 
-  String _keyOf(String path) => 'GET $path';
+  String _keyOf(String path) {
+    final server = _redirectBase ?? Config.api;
+    final token = tokenProvider?.call() ?? '';
+    var hash = 0x811c9dc5;
+    for (final unit in token.codeUnits) {
+      hash ^= unit;
+      hash = (hash * 0x01000193) & 0xffffffff;
+    }
+    final namespace = 'v2:$server:${hash.toRadixString(16)}';
+    return 'GET $namespace $path';
+  }
 
   /// Store a successful GET response for offline reads.
   String? etagFor(String path) => _etags[_keyOf(path)];
@@ -510,19 +525,19 @@ class SyncStore extends ChangeNotifier {
     final uri = Uri.parse(base + path);
     switch (method) {
       case 'POST':
-        return http
+        return _client
             .post(uri, headers: headers, body: jsonEncode(body ?? {}))
             .timeout(const Duration(seconds: 20));
       case 'PUT':
-        return http
+        return _client
             .put(uri, headers: headers, body: jsonEncode(body ?? {}))
             .timeout(const Duration(seconds: 20));
       case 'DELETE':
-        return http
+        return _client
             .delete(uri, headers: headers)
             .timeout(const Duration(seconds: 20));
       default:
-        return http
+        return _client
             .get(uri, headers: headers)
             .timeout(const Duration(seconds: 20));
     }

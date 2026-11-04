@@ -8,7 +8,11 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $secretDirectory = Join-Path $repoRoot '.release-signing'
 $keystorePath = Join-Path $secretDirectory 'school-system-release-2026.jks'
 $encryptedPasswordPath = Join-Path $secretDirectory 'password-2026.dpapi'
-$outputDirectory = Join-Path $repoRoot $OutputDirectory
+$outputDirectory = if ([System.IO.Path]::IsPathRooted($OutputDirectory)) {
+    $OutputDirectory
+} else {
+    Join-Path $repoRoot $OutputDirectory
+}
 $apps = @(
     @{ Directory = 'admin_app'; Artifact = 'admin-app-release.apk' },
     @{ Directory = 'teacher_app'; Artifact = 'teacher-app-release.apk' },
@@ -31,7 +35,7 @@ if (Test-Path -LiteralPath $outputDirectory) {
 }
 
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
-$encryptedPassword = Get-Content -LiteralPath $encryptedPasswordPath -Raw
+$encryptedPassword = (Get-Content -LiteralPath $encryptedPasswordPath -Raw).Trim()
 $securePassword = ConvertTo-SecureString $encryptedPassword
 $passwordPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
 

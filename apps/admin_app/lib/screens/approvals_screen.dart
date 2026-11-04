@@ -13,6 +13,8 @@ class _ApprovalsScreenState extends State<ApprovalsScreen> {
   List _pending = const [];
   List _reentryRequests = const [];
   List _profileRequests = const [];
+  List _classTeacherRequests = const [];
+  List _siblingRequests = const [];
   bool _loading = true;
   String? _error;
 
@@ -32,6 +34,8 @@ class _ApprovalsScreenState extends State<ApprovalsScreen> {
         Api.get('/admin/approvals/pending'),
         Api.get('/admin/mark-edit-requests?status=pending'),
         Api.get('/admin/student-profile-edit-requests?status=pending'),
+        Api.get('/admin/class-teacher-requests'),
+        Api.get('/admin/sibling-requests?status=pending'),
       ]);
       if (!mounted) return;
       final exams = responses[0] as Map;
@@ -39,6 +43,10 @@ class _ApprovalsScreenState extends State<ApprovalsScreen> {
         _pending = (exams['pending'] as List?) ?? const [];
         _reentryRequests = responses[1] as List? ?? const [];
         _profileRequests = responses[2] as List? ?? const [];
+        _classTeacherRequests = ((responses[3] as List?) ?? const [])
+            .where((r) => r['status'] == 'pending')
+            .toList();
+        _siblingRequests = responses[4] as List? ?? const [];
         _loading = false;
       });
     } catch (e) {
@@ -84,9 +92,10 @@ class _ApprovalsScreenState extends State<ApprovalsScreen> {
       });
       _load();
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text('$e')));
+      }
     }
   }
 
@@ -338,21 +347,150 @@ class _ApprovalsScreenState extends State<ApprovalsScreen> {
     );
   }
 
+  Future<void> _actClassTeacher(int id, String action) async {
+    try {
+      await Api.post('/admin/class-teacher-requests/$id/$action', {});
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(action == 'approve'
+              ? 'Class Teacher অনুমোদিত হয়েছে'
+              : 'Class Teacher request প্রত্যাখ্যান হয়েছে'),
+        ),
+      );
+      _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+      );
+    }
+  }
+
+  Widget _classTeacherQueue() {
+    if (_classTeacherRequests.isEmpty) {
+      return const Center(child: Text('কোনো pending Class Teacher request নেই'));
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.all(12),
+      itemCount: _classTeacherRequests.length,
+      itemBuilder: (_, i) {
+        final request = _classTeacherRequests[i] as Map;
+        final id = int.tryParse('${request['id']}');
+        return Card(
+          child: ListTile(
+            leading: const CircleAvatar(child: Icon(Icons.person_rounded)),
+            title: Text(
+              '${request['teacher_name'] ?? 'Teacher'}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            subtitle: Text(
+              '${request['class_name']} (${request['group_name'] ?? request['section'] ?? ''})'
+              '',
+            ),
+            isThreeLine: true,
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  tooltip: 'Reject',
+                  onPressed: id == null ? null : () => _actClassTeacher(id, 'reject'),
+                  icon: const Icon(Icons.close, color: Colors.red),
+                ),
+                IconButton(
+                  tooltip: 'Approve',
+                  onPressed: id == null ? null : () => _actClassTeacher(id, 'approve'),
+                  icon: const Icon(Icons.check, color: Colors.green),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _actSibling(int id, String action) async {
+    try {
+      await Api.post('/admin/sibling-requests/$id/$action', {});
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(action == 'approve'
+              ? 'Guardian সibling request অনুমোদিত হয়েছে'
+              : 'Guardian সibling request প্রত্যাখ্যান হয়েছে'),
+        ),
+      );
+      _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+      );
+    }
+  }
+
+  Widget _siblingQueue() {
+    if (_siblingRequests.isEmpty) {
+      return const Center(child: Text('কোনো pending Guardian request নেই'));
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.all(12),
+      itemCount: _siblingRequests.length,
+      itemBuilder: (_, i) {
+        final request = _siblingRequests[i] as Map;
+        final id = int.tryParse('${request['id']}');
+        return Card(
+          child: ListTile(
+            leading: const CircleAvatar(child: Icon(Icons.family_restroom_rounded)),
+            title: Text(
+              '${request['student_name']} • Roll ${request['roll']}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            subtitle: Text(
+              '${request['class_name']} (${request['section'] ?? ''})\n'
+              'Guardian: ${request['guardian_name']} (${request['guardian_phone'] ?? ''})'
+              '${request['requester_name'] == null ? '' : '\nআবেদনকারী: ${request['requester_name']}'}',
+            ),
+            isThreeLine: true,
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  tooltip: 'Reject',
+                  onPressed: id == null ? null : () => _actSibling(id, 'reject'),
+                  icon: const Icon(Icons.close, color: Colors.red),
+                ),
+                IconButton(
+                  tooltip: 'Approve',
+                  onPressed: id == null ? null : () => _actSibling(id, 'approve'),
+                  icon: const Icon(Icons.check, color: Colors.green),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 3,
+      length: 5,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('Exam Approvals'),
+          title: const Text('Approval Requests'),
           actions: [
             IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
           ],
           bottom: const TabBar(
             tabs: [
-              Tab(text: 'Exam approvals'),
+              Tab(text: 'Class Teacher'),
+              Tab(text: 'Guardian'),
+              Tab(text: 'Profile'),
               Tab(text: 'Re-entry requests'),
-              Tab(text: 'Profile requests'),
+              Tab(text: 'Exams'),
             ],
           ),
         ),
@@ -361,7 +499,13 @@ class _ApprovalsScreenState extends State<ApprovalsScreen> {
             : _error != null
             ? Center(child: Text(_error!))
             : TabBarView(
-                children: [_examApprovals(), _reentryQueue(), _profileQueue()],
+                children: [
+                  _classTeacherQueue(),
+                  _siblingQueue(),
+                  _profileQueue(),
+                  _reentryQueue(),
+                  _examApprovals(),
+                ],
               ),
       ),
     );
