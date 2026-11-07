@@ -12,8 +12,19 @@ set URLFILE=%ROOT%\backend\data\tunnel-url.txt
 
 if not exist "%ROOT%\logs" mkdir "%ROOT%\logs"
 
+REM --- absolute Windows tools: when the watchdog is launched from a shell that
+REM has Git/MSYS on PATH, bare `find`/`tasklist`/`netstat` resolve to Unix
+REM builds (GNU find rejects /I and /FI) and every check reports a false
+REM "DOWN", spawning duplicate processes every cycle.
+set "SYS=%SystemRoot%\System32"
+set "TASKLIST=%SYS%\tasklist.exe"
+set "FIND=%SYS%\find.exe"
+set "FINDSTR=%SYS%\findstr.exe"
+set "NETSTAT=%SYS%\NETSTAT.EXE"
+set "PING=%SYS%\ping.exe"
+
 :loop
-timeout /t 60 /nobreak >nul 2>&1 || ping -n 61 127.0.0.1 >nul
+timeout /t 60 /nobreak >nul 2>&1 || "%PING%" -n 61 127.0.0.1 >nul
 echo [%date% %time%] check >> "%LOG%"
 
 REM --- 0. keep the log from growing without bound ---
@@ -28,13 +39,12 @@ if errorlevel 1 (
 )
 
 REM --- 2. Supabase -> local mirror ---
-set "MPID="
-if exist "%ROOT%\logs\local_db_mirror.pid" set /p MPID=<"%ROOT%\logs\local_db_mirror.pid"
-if defined MPID (
-  tasklist /FI "PID eq %MPID%" 2>nul | find "%MPID%" >nul
-  if errorlevel 1 set "MPID="
-)
-if not defined MPID (
+REM Ask for an actual running mirror process instead of trusting the pid file:
+REM the file can be deleted while the service keeps running, which used to
+REM spawn a duplicate mirror every cycle.
+set "MLIVE="
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\scripts\mirror-alive.ps1"`) do set "MLIVE=%%P"
+if not defined MLIVE (
   >> "%LOG%" echo [%date% %time%] mirror DOWN - restarting
   del "%ROOT%\logs\local_db_mirror.pid" >nul 2>&1
   start "School24x7_Mirror" /min cmd /c "cd /d %ROOT% && node scripts\local_db_mirror.js >nul 2>> %ROOT%\logs\local_db_mirror_error.log"
@@ -43,7 +53,7 @@ if not defined MPID (
 REM --- 3. Backend ---
 REM NOTE: findstr treats a space-separated pattern as two OR-ed strings, which
 REM made every LISTENING line match. Use /C: so each fragment is one literal.
-netstat -ano | findstr /C:":5000 " | findstr /C:"LISTENING" >nul
+"%NETSTAT%" -ano | "%FINDSTR%" /C:":5000 " | "%FINDSTR%" /C:"LISTENING" >nul
 if errorlevel 1 (
   >> "%LOG%" echo [%date% %time%] backend DOWN - restarting
   start "School24x7_API" /min cmd /c "cd /d %ROOT%\backend && set PORT=5000 && node server.js >> %ROOT%\logs\backend.log 2>&1"
@@ -51,9 +61,9 @@ if errorlevel 1 (
 )
 
 REM --- 4. Tunnel (ngrok static-domain tunnel; cloudflared kept as fallback) ---
-tasklist /FI "IMAGENAME eq ngrok.exe" 2>nul | find /I "ngrok.exe" >nul
+"%TASKLIST%" /FI "IMAGENAME eq ngrok.exe" /NH 2>nul | "%FIND%" /I "ngrok.exe" >nul
 if errorlevel 1 (
-  tasklist /FI "IMAGENAME eq ngrok" 2>nul | find /I "ngrok" >nul
+  "%TASKLIST%" /FI "IMAGENAME eq ngrok" /NH 2>nul | "%FIND%" /I "ngrok" >nul
   if errorlevel 1 (
     >> "%LOG%" echo [%date% %time%] ngrok DOWN - restarting
     start "School24x7_Tunnel" /min cmd /c "ngrok start --config C:\Users\WALTON\AppData\Local\ngrok\ngrok.yml school --log stdout >> %ROOT%\logs\ngrok.log 2>&1"

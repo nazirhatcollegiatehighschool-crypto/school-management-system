@@ -24,6 +24,11 @@ const verifyOnly = process.argv.includes('--verify');
 const pgUrl = process.env.DATABASE_URL;
 if (!pgUrl || !/^postgres(?:ql)?:\/\//i.test(pgUrl)) throw new Error('DATABASE_URL must remain the Supabase PostgreSQL source.');
 const pgPool = new Pool({ connectionString: pgUrl, ssl: { rejectUnauthorized: false }, max: 2, connectionTimeoutMillis: 15000 });
+// Idle pooled clients can emit socket errors (ECONNRESET during a network blip).
+// Without a listener those become uncaught exceptions and terminate the service.
+pgPool.on('error', (e) => {
+  try { log(`Supabase pool error (${e.code || e.message}); will reconnect on next cycle.`); } catch {}
+});
 const q = v => `\`${String(v).replace(/`/g, '``')}\``;
 const p = v => `"${String(v).replace(/"/g, '""')}"`;
 function log(message) {
@@ -522,16 +527,30 @@ let cycleBusy = false;
 async function cycle() {
   if (cycleBusy) return false;
   cycleBusy = true;
+  // Self-heal the pid file: if anything removes it while this service is still
+  // running (a log cleanup, an operator, the watchdog), write it back so
+  // operators keep seeing the real owner process.
+  if (!oneShot && !checkOnly && !verifyOnly) {
+    try { if (!fs.existsSync(lockPath)) fs.writeFileSync(lockPath, String(process.pid)); } catch {}
+  }
   try {
-    if (!local) local = await mysql.createConnection({
-      host: process.env.LOCAL_MYSQL_HOST || '127.0.0.1',
-      port: Number(process.env.LOCAL_MYSQL_PORT || 3306),
-      user: process.env.LOCAL_MYSQL_USER || 'root',
-      password: process.env.LOCAL_MYSQL_PASSWORD || undefined,
-      database: 'schooldb',
-      charset: 'utf8mb4',
-      timezone: 'Z'
-    });
+    if (!local) {
+      local = await mysql.createConnection({
+        host: process.env.LOCAL_MYSQL_HOST || '127.0.0.1',
+        port: Number(process.env.LOCAL_MYSQL_PORT || 3306),
+        user: process.env.LOCAL_MYSQL_USER || 'root',
+        password: process.env.LOCAL_MYSQL_PASSWORD || undefined,
+        database: 'schooldb',
+        charset: 'utf8mb4',
+        timezone: 'Z'
+      });
+      // Same reason as the Supabase pool: a dropped local socket must not crash.
+      local.on('error', (err) => {
+        log(`Local MariaDB connection error (${err.code || err.message}); reconnecting next cycle.`);
+        try { local.destroy(); } catch {}
+        local = null;
+      });
+    }
     return await syncOnce();
   } catch (e) {
     const state = e.state || {};
@@ -574,7 +593,13 @@ async function shutdown() {
   const ok = await cycle();
   if (oneShot || checkOnly || verifyOnly) { await shutdown(); process.exit(ok ? 0 : 1); return; }
   log(`Mirror service started on ${os.hostname()} (interval ${Math.round(intervalMs / 1000)}s; Supabase -> local schooldb only).`);
-  const timer = setInterval(cycle, intervalMs);
+  // A transient Supabase/network error (ECONNRESET, ETIMEDOUT, pool reset) must
+  // not kill the 24/7 mirror: log it and let the next interval retry.
+  const safeCycle = () => cycle().catch(e => {
+    log(`Cycle failed (${e.code || e.name || 'error'}: ${e.message || e}); retrying in ${Math.round(intervalMs / 1000)}s.`);
+    try { if (local) { local.destroy(); local = null; } } catch {}
+  });
+  const timer = setInterval(safeCycle, intervalMs);
   process.on('SIGINT', async () => { clearInterval(timer); await shutdown(); process.exit(0); });
   process.on('SIGTERM', async () => { clearInterval(timer); await shutdown(); process.exit(0); });
 })().catch(async e => { log(`Mirror stopped (${e.code || 'error'}).`); await shutdown(); process.exit(1); });
