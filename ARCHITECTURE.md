@@ -37,7 +37,7 @@ Rules: JWT 7d (`JWT_SECRET` env, fallback default — set a strong one in produc
 - `guardian`: profile, attendance(monthly), marks, homework, notifications(+read), complaints, result/:examId, exam-events, marksheet, result-card(+pdf), sibling-request(s)
 - `results` (admin-only): events CRUD + publish/unpublish/coverage/ensure-session, results/compute, tabulation, marksheet(+pdf), remarks
 - `routine`: slots, teacher mine/CRUD + delete-requests, admin CRUD + delete-requests approve/reject, all, conflicts, aliases, student (guardian)
-- `cron/routine-alerts`, `health`, `app-version?app=` (APK URLs built from Host), `/apks/*`, `/uploads/*`, `/download` page
+- `cron/routine-alerts`, `health` (reports `db`, `migration_ready`, `push.configured/source`), `app-version?app=` (APK URLs built from Host), `/apks/*`, `/uploads/*`, `/download` page
 
 ## 4. Database blueprint (`schooldb`, 32 tables, InnoDB, FKs enforced)
 
@@ -51,6 +51,7 @@ Core chains:
 - `routines ──< routine_sections/groups, routine_delete_requests(2), routine_notification_log`
 - `homework(9)` → class+subject, delivered to guardians via `notifications(type='homework')` + FCM
 - `time_slots(9)`, `holidays`, `app_settings(5)`, `device_tokens(11)`, `activity_log`, `exam_shares`, `mark_edit_requests(1)`, `promotion_grace(18)`, `promotion_history`, `class_teacher_requests(2)`, `subject_aliases(36)`, `sessions`
+- `event_promotion_grace(event_id,class_id,subject_id)` → per-event/class/subject grace used by result publish; `marksheet_templates` → `/api/admin/marksheet-templates`. Both created by `20261106_production_gap_tables.sql` (additive; 65 public tables total on Supabase mirrors).
 
 Key enums: `users.role(admin|teacher|guardian)`, `exams.exam_type(class_test|midterm|final|half_yearly|annual|pretest|test)`, `exams.status(draft|submitted|published)`, `exams.source(admin|teacher)`, `exam_events.exam_kind` + `year` + `is_published` + `promotion_linked`, `marks.edit_until` (5h re-edit window), `exams.entry_open/entry_deadline` (1-click permission), `attendance.status`, `notifications(type,target_type)`, `promotions.decision`, `guardian_links.status`.
 
