@@ -5,16 +5,41 @@ const fs = require('fs');
 const path = require('path');
 
 let messaging = null;
+let configSource = 'none';
+
+// The service-account file is git-ignored, so it is never part of a Vercel
+// deployment. Read the credential from an environment variable in that case:
+// FIREBASE_SERVICE_ACCOUNT_JSON (raw JSON or base64), FIREBASE_CONFIG or
+// GOOGLE_APPLICATION_CREDENTIALS_JSON. The local file path stays supported for
+// the local server.
+function parseServiceAccount(raw) {
+  const value = String(raw || '').trim();
+  if (!value) return null;
+  if (value.startsWith('{')) return JSON.parse(value);
+  const decoded = Buffer.from(value, 'base64').toString('utf-8').trim();
+  return decoded.startsWith('{') ? JSON.parse(decoded) : null;
+}
+
 try {
-  const keyPath = path.join(__dirname, 'firebase-service-account.json');
-  const envConfig = process.env.FIREBASE_CONFIG || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+  const fileCandidates = [
+    process.env.FIREBASE_SERVICE_ACCOUNT_PATH,
+    path.join(__dirname, 'firebase-service-account.json'),
+  ].filter(Boolean);
   let config = null;
-  if (envConfig && String(envConfig).trim().startsWith('{')) {
-    config = JSON.parse(envConfig);
-  } else if (envConfig) {
-    config = JSON.parse(Buffer.from(envConfig, 'base64').toString('utf-8'));
-  } else if (fs.existsSync(keyPath)) {
-    config = require(keyPath);
+  for (const envKey of ['FIREBASE_SERVICE_ACCOUNT_JSON', 'FIREBASE_CONFIG', 'GOOGLE_APPLICATION_CREDENTIALS_JSON']) {
+    config = parseServiceAccount(process.env[envKey]);
+    if (config) { configSource = `env:${envKey}`; break; }
+  }
+  if (!config) {
+    for (const candidate of fileCandidates) {
+      try {
+        if (fs.existsSync(candidate)) {
+          config = JSON.parse(fs.readFileSync(candidate, 'utf-8'));
+          configSource = 'file';
+          break;
+        }
+      } catch (_) { /* try the next candidate */ }
+    }
   }
   if (config) {
     const { initializeApp, getApps, cert } = require('firebase-admin/app');
@@ -93,4 +118,10 @@ async function getAllGuardianTokens(classId = null) {
   return rows.map(r => r.fcm_token);
 }
 
-module.exports = { sendPushToTokens, queuePush, getGuardianTokens, getAllGuardianTokens };
+// Non-secret diagnostics for /api/health: whether push can actually be sent and
+// where the credential came from (never the credential itself).
+function pushStatus() {
+  return { configured: !!messaging, source: configSource };
+}
+
+module.exports = { sendPushToTokens, queuePush, getGuardianTokens, getAllGuardianTokens, pushStatus };

@@ -80,6 +80,7 @@ app.get('/api/health', async (req, res) => {
       migration_ready,
       db_ms: Date.now() - started,
       mode: pool._mysql ? "mysql" : pool._pg ? "postgres" : "unknown",
+      push: require('./fcm').pushStatus(),
     });
   } catch (e) {
     console.error('health check failed:', e.message);
